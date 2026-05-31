@@ -480,61 +480,29 @@ void hal_debug_printf(const char *format, ...)
     va_end(args);
 }
 
-/* ==================== 蜂鸣器实现（PWM驱动，本地GPIO，不走I2C） ==================== */
+/* ==================== 蜂鸣器实现（GPIO 高低电平驱动，本地 GPIO，不走 I2C） ==================== */
 
 #define BUZZER_PIN              15
 
-/* 蜂鸣器PWM配置 */
-#include "hardware/pwm.h"
-
-void hal_play_sound(uint8_t note_count, 
+void hal_play_sound(uint8_t note_count,
                    const uint16_t *notes,
                    const uint16_t *durations)
 {
     if (!notes || !durations || note_count == 0) return;
-    
-    /* 初始化蜂鸣器GPIO为PWM功能 */
-    gpio_set_function(BUZZER_PIN, GPIO_FUNC_PWM);
-    
-    /* 获取PWM slice和channel */
-    uint slice_num = pwm_gpio_to_slice_num(BUZZER_PIN);
-    uint chan = pwm_gpio_to_channel(BUZZER_PIN);
-    
-    /* 使能PWM */
-    pwm_set_enabled(slice_num, true);
-    
-    for (uint8_t i = 0; i < note_count && i < 10; i++) {
-        if (notes[i] > 0) {
-            /* 计算PWM分频和wrap值以产生目标频率
-             * 系统时钟125MHz，PWM频率 = 125MHz / (wrap + 1) / (div)
-             * 使用50%占空比 */
-            uint32_t freq = notes[i];
-            uint32_t divider = 125000000 / (freq * 4096);  // 使用4096步分辨率
-            if (divider < 1) divider = 1;
-            if (divider > 255) divider = 255;
-            
-            uint32_t wrap = 125000000 / (freq * divider) - 1;
-            if (wrap > 65535) wrap = 65535;
-            
-            pwm_set_clkdiv(slice_num, (float)divider);
-            pwm_set_wrap(slice_num, (uint16_t)wrap);
-            pwm_set_chan_level(slice_num, chan, (uint16_t)(wrap / 2));  // 50%占空比
-        } else {
-            /* notes[i] == 0 表示静音 */
-            pwm_set_chan_level(slice_num, chan, 0);
-        }
-        
-        sleep_ms(durations[i]);
-        
-        /* 停止声音 */
-        pwm_set_chan_level(slice_num, chan, 0);
-        sleep_ms(50);
-    }
-    
-    /* 关闭PWM输出 */
-    pwm_set_enabled(slice_num, false);
+
+    /* 初始化蜂鸣器 GPIO 为推挽输出 */
+    gpio_init(BUZZER_PIN);
     gpio_set_dir(BUZZER_PIN, GPIO_OUT);
     gpio_put(BUZZER_PIN, 0);
+
+    for (uint8_t i = 0; i < note_count && i < 10; i++) {
+        if (notes[i] > 0) {
+            gpio_put(BUZZER_PIN, 1);
+            sleep_ms(durations[i]);
+        }
+        gpio_put(BUZZER_PIN, 0);
+        sleep_ms(50);
+    }
 }
 
 /* ==================== LED实现（本地GPIO，不走I2C） ==================== */
