@@ -286,7 +286,13 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
     ctrl_state->travel_length.y = (turn * 50) / 500;     // 旋转
     
     /* 解锁/上电 - 使用静态变量检测上升沿/下降沿
-       SWA二档开关：高位=ARM开启，低位=DISARM关闭 */
+       SWA二档开关：高位=ARM开启，低位=DISARM关闭
+       @note  使用 static 变量实现边沿触发（edge-triggered），而非电平触发。
+              这确保：
+              1. 上电后必须主动切换开关才能解锁（防止意外启动）
+              2. 开关保持在解锁位不会反复触发解锁
+              代价：函数不可重入，仅允许单一调用上下文。
+              如需重置 ARM 状态机，请调用 crsf_state_init() 重新初始化。 */
     {
         static bool prev_arm = false;
         if (arm && !prev_arm) {

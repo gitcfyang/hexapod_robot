@@ -6,9 +6,18 @@
 #include "hexapod_gait.h"
 #include <string.h>
 
-/* 预定义步态表 */
+/* 预定义步态表
+ *
+ * 关于 tl_div_factor 的设计说明：
+ *   tl_div_factor 是地面支撑阶段位移量的缩放除数（denominator）。
+ *   它与 steps_in_gait - nr_lifted_pos（实际地面步数）可能相差 1，
+ *   因为 gait 周期中有一个过渡步（transition step），在此期间腿同时
+ *   完成落地/离地动作。差值 1 是有意的设计，用于平滑腿切换时的速度曲线。
+ *   例如 RIPPLE_12: 12 步 = 3 抬腿 + 8 地面 + 1 过渡步。
+ */
 static const gait_t gait_table[GAIT_MAX] = {
-    /* GAIT_RIPPLE_12 - 波纹步态12步 */
+    /* GAIT_RIPPLE_12 - 波纹步态12步
+     *   3 抬腿步 + 8 地面步 + 1 过渡步 = 12 */
     {
         .nom_gait_speed = 100,
         .steps_in_gait = 12,
@@ -46,7 +55,8 @@ static const gait_t gait_table[GAIT_MAX] = {
         .gait_leg_nr = {0, 0, 0, 4, 4, 4}  // RR,RM,RF同组; LR,LM,LF同组
     },
     
-    /* GAIT_WAVE_24 - 波浪步态24步 */
+    /* GAIT_WAVE_24 - 波浪步态24步
+     *   3 抬腿步 + 20 地面步 + 1 过渡步 = 24 */
     {
         .nom_gait_speed = 80,
         .steps_in_gait = 24,
@@ -73,10 +83,13 @@ static const gait_t gait_table[GAIT_MAX] = {
 
 /**
  * @brief 初始化步态系统
+ * @note 步态表 gait_table 已静态定义在 ROM 中，无需运行时初始化。
+ *       此函数保留用于未来可能的动态步态加载扩展。
  */
 void hexapod_gait_init(void)
 {
-    /* 步态表已静态定义，无需初始化 */
+    /* 当前实现为空：所有步态在编译期定义。
+     * 调用 hexapod_gait_select() 即可加载指定步态。 */
 }
 
 /**

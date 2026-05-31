@@ -16,6 +16,12 @@
 #define LEG_FEMUR_LENGTH    76
 #define LEG_TIBIA_LENGTH    106
 
+/* ==================== 安全配置 ==================== */
+
+/* 电池低压保护：设为 1 启用，设为 0 禁用
+ * 启用后，当电池电压低于 MIN_VOLTAGE_MV (定义在 hexapod_core.h) 时自动停止 */
+#define BATTERY_CHECK_ENABLED   0   /* 默认关闭，调试通过后改为 1 */
+
 /* 机身尺寸
  * 坐标系：X轴前后（正=前），Y轴上下（正=上），Z轴左右（正=右）
  * 右腿offset_z为正数，左腿offset_z为负数 */
@@ -24,14 +30,14 @@
 #define BODY_OFFSET_RM_X    -63
 #define BODY_OFFSET_RM_Z    0
 #define BODY_OFFSET_RF_X    -43
-#define BODY_OFFSET_RF_Z    -82
+#define BODY_OFFSET_RF_Z    82    /* 右前腿，Z轴正=右 */
 
 #define BODY_OFFSET_LR_X    -43
 #define BODY_OFFSET_LR_Z    -82
 #define BODY_OFFSET_LM_X    -63
 #define BODY_OFFSET_LM_Z    0
 #define BODY_OFFSET_LF_X    -43
-#define BODY_OFFSET_LF_Z    82
+#define BODY_OFFSET_LF_Z    -82   /* 左前腿，Z轴负=左 */
 
 /* 初始Coxa角度 (0.1度单位) */
 #define COXA_ANGLE_RR       -600
@@ -185,7 +191,7 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RF].coxa_angle = COXA_ANGLE_RF;
     configs[LEG_RF].init_pos_x = INIT_XZ_COS60;
     configs[LEG_RF].init_pos_y = INIT_Y;
-    configs[LEG_RF].init_pos_z = -INIT_XZ_SIN60;
+    configs[LEG_RF].init_pos_z = INIT_XZ_SIN60;   /* 右前腿 Z 正方向 */
     configs[LEG_RF].coxa_min = SERVO_COXA_MIN_RF;
     configs[LEG_RF].coxa_max = SERVO_COXA_MAX_RF;
     configs[LEG_RF].femur_min = SERVO_FEMUR_MIN_RF;
@@ -207,7 +213,7 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_LR].coxa_angle = COXA_ANGLE_LR;
     configs[LEG_LR].init_pos_x = INIT_XZ_COS60;
     configs[LEG_LR].init_pos_y = INIT_Y;
-    configs[LEG_LR].init_pos_z = -INIT_XZ_SIN60;  /* 左腿Z镜像（左负） */
+    configs[LEG_LR].init_pos_z = -INIT_XZ_SIN60;  /* 左后腿 Z 负方向 */
     configs[LEG_LR].coxa_min = SERVO_COXA_MIN_LR;
     configs[LEG_LR].coxa_max = SERVO_COXA_MAX_LR;
     configs[LEG_LR].femur_min = SERVO_FEMUR_MIN_LR;

@@ -55,6 +55,11 @@ bool hal_servo_init(void)
 
 bool hal_servo_set_angle(uint8_t servo_id, int16_t angle, uint16_t move_time)
 {
+    /* move_time 参数预留用于舵机速度控制（平滑过渡）。
+     * 当前实现为即时角度设置，move_time 未生效。
+     * 未来可通过在多个控制周期内插值角度来实现缓动效果。 */
+    (void)move_time;
+
     if (servo_id >= 18) return false;
     
     g_servo_batch.servo_ids[servo_id] = servo_id;
@@ -69,11 +74,13 @@ bool hal_servo_set_angle(uint8_t servo_id, int16_t angle, uint16_t move_time)
     return true;
 }
 
-bool hal_servo_set_angles(const uint8_t *servo_ids, 
+bool hal_servo_set_angles(const uint8_t *servo_ids,
                          const int16_t *angles,
                          uint8_t count,
                          uint16_t move_time)
 {
+    (void)move_time;  /* 预留参数：舵机速度控制（参见 hal_servo_set_angle 注释） */
+
     if (!servo_ids || !angles || count == 0 || count > 18) {
         return false;
     }
@@ -441,16 +448,20 @@ void hal_input_allow_interrupts(bool allow)
 {
     static uint32_t irq_stack[8];
     static uint8_t irq_depth = 0;
-    
+
     if (allow) {
         if (irq_depth > 0) {
             irq_depth--;
             restore_interrupts(irq_stack[irq_depth]);
         }
+        /* irq_depth == 0 表示没有匹配的 disable 调用，安全忽略 */
     } else {
         if (irq_depth < 8) {
             irq_stack[irq_depth++] = save_and_disable_interrupts();
         }
+        /* irq_depth >= 8 时：栈满，静默丢弃本次 disable 请求。
+         * 这意味着在极深的嵌套调用场景下，最内层的中断状态不会被保存。
+         * 正常使用不应超过 8 层嵌套。若需更高深度，请增大 irq_stack 数组。 */
     }
 }
 
@@ -534,6 +545,9 @@ static bool led_initialized = false;
 
 void hal_led_set(uint8_t led_id, bool state)
 {
+    /* led_id 参数预留用于多 LED 扩展；当前仅支持板载 LED (GPIO 25) */
+    (void)led_id;
+
     if (!led_initialized) {
         gpio_init(LED_BUILTIN);
         gpio_set_dir(LED_BUILTIN, GPIO_OUT);

@@ -35,8 +35,11 @@ bool hexapod_ik_leg(const coord3d_t *target_pos,
     int32_t pos_y = target_pos->y;
     int32_t pos_z = target_pos->z;
     
-    /* 步骤1：计算Coxa角度（水平旋转关节） */
-    int16_t coxa_angle = hexapod_atan4(pos_z, pos_x);
+    /* 步骤1：计算Coxa角度（水平旋转关节）
+     * 减去腿部初始安装角度：atan4 得到的是足端相对于腿基座的方向角，
+     * coxa_angle 是舵机在机体上的安装偏角（如 RR=-60°, RF=+60°），
+     * 实际舵机角度 = 几何方向角 - 安装偏角 */
+    int16_t coxa_angle = hexapod_atan4(pos_z, pos_x) - leg_cfg->coxa_angle;
     
     /* 步骤2：计算Coxa在XZ平面的投影长度 */
     int32_t coxa_feet_dist = hexapod_sqrt(pos_x * pos_x + pos_z * pos_z);

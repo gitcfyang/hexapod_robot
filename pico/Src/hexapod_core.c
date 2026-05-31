@@ -4,6 +4,7 @@
  */
 
 #include "hexapod_core.h"
+#include "hexapod_config.h"
 #include "hexapod_math.h"
 #include <string.h>
 
@@ -237,14 +238,14 @@ void hexapod_update(hexapod_t *robot)
     
     robot->last_update_time = current_time;
     
-    /* 检查电池电压 */
-    /*
+    /* 检查电池电压（通过 BATTERY_CHECK_ENABLED 宏控制开关） */
+#if BATTERY_CHECK_ENABLED
     if (!hal_check_battery()) {
         hal_debug_printf("Low battery!\r\n");
         hexapod_emergency_stop(robot);
         return;
     }
-    */
+#endif
     
     /* 读取输入 */
     hal_input_update(&robot->state);
@@ -338,9 +339,14 @@ void hexapod_adjust_leg_positions(hexapod_t *robot, uint16_t xz_length)
 void hexapod_reset_leg_init_angles(hexapod_t *robot)
 {
     if (!robot) return;
-    
+
+    /* 将 state 中保存的初始角度重新加载到 leg_configs
+     * state.coxa_init_angle 在 init 时从 config 默认值复制，
+     * 并通过 hexapod_rotate_leg_init_angles() 与 leg_configs 同步修改，
+     * 故此处的值始终与 leg_configs.coxa_angle 一致。
+     * 如需恢复到真正的出厂默认值，请保存原始 config 并重新调用 hexapod_init()。 */
     for (int i = 0; i < CNT_LEGS; i++) {
-        robot->state.coxa_init_angle[i] = robot->leg_configs[i].coxa_angle;
+        robot->leg_configs[i].coxa_angle = robot->state.coxa_init_angle[i];
     }
 }
 
@@ -350,9 +356,11 @@ void hexapod_reset_leg_init_angles(hexapod_t *robot)
 void hexapod_rotate_leg_init_angles(hexapod_t *robot, int16_t delta_angle)
 {
     if (!robot) return;
-    
+
     for (int i = 0; i < CNT_LEGS; i++) {
         robot->state.coxa_init_angle[i] += delta_angle;
+        /* 同步更新 leg_configs，使 IK 解算使用新的角度 */
+        robot->leg_configs[i].coxa_angle = robot->state.coxa_init_angle[i];
     }
 }
 
