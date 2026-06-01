@@ -26,12 +26,15 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - F0) + horn
 - 步态: GAIT_STEP_PERIOD_MS=60 (默认), 舵机刷新20ms
 
 ## 控制链路
-CRSF CH1-8 → crsf_to_control() → travel_length → smooth减速 → gait步进 → IK → 舵机
+正常:  CRSF CH1-8 → 两级死区 → linear/smooth → gait步进 → IK → 舵机
+平衡:  CRSF CH1-8 → 两级死区 → body_rot + body_pos.y直接映射 → IK → 舵机 (不行走)
 
 ## 待完善
 - [ ] 用 !P 实测每条腿的 horn_offset
 - [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
 - [ ] 第二块 PCA9685 (左腿9路)
 - [ ] 电池 ADC 分压器 + BATTERY_CHECK_ENABLED
-- [ ] 行走中姿态微调 (body_rot 平衡)
+- [x] 接收机输入两级死区处理 (hexapod_config.h:122-128)
+- [x] 平衡模式机身姿态控制 (body_rot pitch/roll/yaw + 线性高度)
+- [x] 正常模式下机身高度改为线性直接映射 (替代积分器)
 - [ ] Core1 双核卸载 IK 计算

@@ -1,18 +1,27 @@
 /**
  * @file hexapod_crsf.c
  * @brief CRSF (Crossfire) 接收器协议解析实现
- * 
+ *
  * 将 ELRS 接收器的摇杆信号转换为六足机器人的运动控制命令
- * 
- * 摇杆映射方案（默认 Mode 2）:
- *   左摇杆 Y (通道1) → 前进/后退
- *   左摇杆 X (通道2) → 左右平移
- *   右摇杆 Y (通道3) → 机身高度/抬腿调整
- *   右摇杆 X (通道4) → 原地旋转
- *   通道5 (SWA) → 解锁/上电 (ARM)
- *   通道6 (SWB) → 步态选择 (三段开关)
- *   通道7 (SWC) → 速度控制
- *   通道8 (SWD) → 平衡模式
+ *
+ * 摇杆映射 (ELRS 标准通道顺序):
+ *
+ *   正常模式 (CH8=低位):
+ *     CH1 (Ail/Roll)  → 左右平移 (Strafe)
+ *     CH2 (Ele/Pitch) → 前进/后退 (Forward)
+ *     CH3 (Throttle)  → 机身高度 (线性直接映射)
+ *     CH4 (Rud/Yaw)   → 原地旋转 (Turn)
+ *     CH5 (SWA)       → 解锁/上电 (ARM)
+ *     CH6 (SWB)       → 步态选择 (三段开关)
+ *     CH7 (SWC)       → 速度控制 (三段开关)
+ *     CH8 (SWD)       → 平衡模式 (二段开关)
+ *
+ *   平衡模式 (CH8=高位):
+ *     CH1 (Ail/Roll)  → 机身横滚 Roll
+ *     CH2 (Ele/Pitch) → 机身俯仰 Pitch
+ *     CH3 (Throttle)  → 机身高度 (线性直接映射)
+ *     CH4 (Rud/Yaw)   → 机身偏航 Yaw
+ *     机器人原地不动
  */
 
 #include "hexapod_config.h"
@@ -232,6 +241,22 @@ static int16_t map_channel_to_control(uint16_t ch_value)
 }
 
 /**
+ * @brief 第 2 级死区：将映射后的控制量中小于阈值的值归零
+ * @param value 映射后的控制值 (-500 ~ +500)
+ * @return 死区处理后的值
+ *
+ * 与第 1 级死区 (map_channel_to_control 中的 CRSF_CH_VALUE_DEADBAND) 串联，
+ * 确保摇杆偏离中位足够远时才产生运动。
+ */
+static int16_t apply_control_deadband(int16_t value)
+{
+    if (value > -CONTROL_DEADBAND && value < CONTROL_DEADBAND) {
+        return 0;
+    }
+    return value;
+}
+
+/**
  * @brief 将 CRSF 通道值映射到三档开关 (-500, 0, +500)
  * 用于步态选择
  */
@@ -256,101 +281,116 @@ static bool map_to_2pos(uint16_t ch_value)
 void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
 {
     if (!state || !ctrl_state) return;
-    
-    /* 通道1: 前进/后退 */
-    int16_t forward = map_channel_to_control(state->channels[CRSF_CHANNEL_FORWARD]);
-    
-    /* 通道2: 左右平移 */
-    int16_t strafe = map_channel_to_control(state->channels[CRSF_CHANNEL_STRAFE]);
-    
-    /* 通道4: 旋转 */
-    int16_t turn = map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]);
-    
-    /* 通道3: 机身高度调整（使用绝对值，中位保持当前高度） */
-    int16_t height_ctrl = map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]);
-    
-    /* 通道5: 解锁/上电 */
-    bool arm = map_to_2pos(state->channels[CRSF_CHANNEL_ARM]);
-    
-    /* 通道6: 步态选择（三档开关） */
+
+    /* ---- 开关通道解析（正常/平衡模式共用） ---- */
+    bool  arm       = map_to_2pos(state->channels[CRSF_CHANNEL_ARM]);
     int8_t gait_pos = map_to_3pos(state->channels[CRSF_CHANNEL_GAIT]);
-    
-    /* 通道8: 平衡模式 */
-    bool balance = map_to_2pos(state->channels[CRSF_CHANNEL_BALANCE]);
-    
-    /* 通道7: 速度选择（三档开关） */
+    bool  balance   = map_to_2pos(state->channels[CRSF_CHANNEL_BALANCE]);
     int8_t speed_pos = map_to_3pos(state->channels[CRSF_CHANNEL_SPEED]);
 
-    /* ---- 应用到控制状态 ---- */
-
-    /* 步长映射: 摇杆 -500~+500 → 步长 mm */
-    ctrl_state->travel_length.x = (forward * TRAVEL_MAX_FORWARD_MM) / 500;
-    ctrl_state->travel_length.z = -(strafe * TRAVEL_MAX_STRAFE_MM) / 500;
-    ctrl_state->travel_length.y = (turn * TRAVEL_MAX_TURN_MM) / 500;
-
-    /* 速度档位: CH7 三段开关 → 步态推进周期 (ms) */
+    /* ---- 速度档位 ---- */
     if (speed_pos == -1) {
         ctrl_state->speed_control = SPEED_SLOW_MS;
     } else if (speed_pos == 1) {
         ctrl_state->speed_control = SPEED_FAST_MS;
     } else {
-        ctrl_state->speed_control = SPEED_NORMAL_MS;  /* 中位/默认 */
+        ctrl_state->speed_control = SPEED_NORMAL_MS;
     }
 
-    /* 解锁/上电 - 使用静态变量检测上升沿/下降沿
-       SWA二档开关：高位=ARM开启，低位=DISARM关闭
-       @note  使用 static 变量实现边沿触发（edge-triggered），而非电平触发。
-              这确保：
-              1. 上电后必须主动切换开关才能解锁（防止意外启动）
-              2. 开关保持在解锁位不会反复触发解锁
-              代价：函数不可重入，仅允许单一调用上下文。
-              如需重置 ARM 状态机，请调用 crsf_state_init() 重新初始化。 */
+    /* ---- 解锁/上电 : 边沿触发 ---- */
     {
         static bool prev_arm = false;
         if (arm && !prev_arm) {
-            /* 上升沿：ARM开关从低位拨到高位 -> 开启机器人 */
             ctrl_state->robot_on = true;
         } else if (!arm && prev_arm) {
-            /* 下降沿：ARM开关从高位拨到低位 -> 关闭机器人 */
             ctrl_state->robot_on = false;
         }
         prev_arm = arm;
     }
-    
-    /* 步态选择 */
+
+    /* ---- 步态选择 ---- */
     if (gait_pos == -1) {
-        /* 低档：波纹步态 */
         if (ctrl_state->gait_type != GAIT_RIPPLE_12) {
             ctrl_state->gait_type = GAIT_RIPPLE_12;
             hexapod_gait_select(GAIT_RIPPLE_12, ctrl_state);
         }
     } else if (gait_pos == 0) {
-        /* 中档：三脚步态 */
         if (ctrl_state->gait_type != GAIT_TRIPOD_6) {
             ctrl_state->gait_type = GAIT_TRIPOD_6;
             hexapod_gait_select(GAIT_TRIPOD_6, ctrl_state);
         }
     } else {
-        /* 高档：波浪步态 */
         if (ctrl_state->gait_type != GAIT_WAVE_24) {
             ctrl_state->gait_type = GAIT_WAVE_24;
             hexapod_gait_select(GAIT_WAVE_24, ctrl_state);
         }
     }
-    
-    /* 高度控制: 无弹簧油门杆, 推拉改变抬腿高度 */
-    if (height_ctrl > 50) {
-        ctrl_state->leg_lift_height += LIFT_SPEED_MM_PER_TICK;
-    } else if (height_ctrl < -50) {
-        ctrl_state->leg_lift_height -= LIFT_SPEED_MM_PER_TICK;
+
+    /* ---- 平衡模式开关 ---- */
+    ctrl_state->balance_mode = balance;
+
+    if (balance) {
+        /* ====== 平衡模式 ======
+         *
+         * 摇杆映射:
+         *   CH1 (Ail/Roll)  → body_rot.z  机身横滚 Roll
+         *   CH2 (Ele/Pitch) → body_rot.x  机身俯仰 Pitch
+         *   CH3 (Throttle)  → body_pos.y  机身高度 (线性)
+         *   CH4 (Rud/Yaw)   → body_rot.y  机身偏航 Yaw
+         *
+         * 机器人原地不动 (travel_length 全部置零) */
+
+        int16_t roll_stick  = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_STRAFE]));
+        int16_t pitch_stick = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_FORWARD]));
+        int16_t height_stick = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
+        int16_t yaw_stick   = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
+
+        /* 机身姿态旋转 (0.1° 单位) */
+        ctrl_state->body_rot.x =  (pitch_stick * BODY_ROTATION_MAX) / 500;  /* 俯仰 */
+        ctrl_state->body_rot.y = -(yaw_stick   * BODY_ROTATION_MAX) / 500;  /* 偏航, 取反使摇杆方向与机头转向一致 */
+        ctrl_state->body_rot.z =  (roll_stick  * BODY_ROTATION_MAX) / 500;  /* 横滚 */
+
+        /* 机身高度 (线性): 摇杆推高→机身抬升, 摇杆拉低→机身下降 */
+        ctrl_state->body_pos.y = (height_stick * BODY_HEIGHT_RANGE_MM) / 500;
+
+        /* 停止行走 */
+        ctrl_state->travel_length.x = 0;
+        ctrl_state->travel_length.y = 0;
+        ctrl_state->travel_length.z = 0;
+    } else {
+        /* ====== 正常模式 ======
+         *
+         * 摇杆映射:
+         *   CH1 (Ail/Roll)  → travel_length.z  左右平移
+         *   CH2 (Ele/Pitch) → travel_length.x  前进/后退
+         *   CH3 (Throttle)  → body_pos.y       机身高度 (线性)
+         *   CH4 (Rud/Yaw)   → travel_length.y  原地旋转 */
+
+        int16_t strafe  = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_STRAFE]));
+        int16_t forward = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_FORWARD]));
+        int16_t height_ctrl = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
+        int16_t turn    = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
+
+        /* 步长映射: 摇杆 -500~+500 → 步长 mm */
+        ctrl_state->travel_length.x =  (forward * TRAVEL_MAX_FORWARD_MM) / 500;
+        ctrl_state->travel_length.z = -(strafe  * TRAVEL_MAX_STRAFE_MM)  / 500;  /* 取反使摇杆右推→右平移 */
+        ctrl_state->travel_length.y =  (turn    * TRAVEL_MAX_TURN_MM)    / 500;
+
+        /* 机身高度 (线性): 摇杆偏离中位直接映射到 body_pos.y
+         * 替代了原来的积分器, 响应更直接, 中位→高度不变 */
+        ctrl_state->body_pos.y = (height_ctrl * BODY_HEIGHT_RANGE_MM) / 500;
+
+        /* 正常模式下无姿态旋转 */
+        ctrl_state->body_rot.x = 0;
+        ctrl_state->body_rot.y = 0;
+        ctrl_state->body_rot.z = 0;
     }
+
+    /* 抬腿高度边界钳位 (由 DEFAULT_LEG_LIFT_HEIGHT 初始化, 用户可通过串口 !U/!D 微调) */
     if (ctrl_state->leg_lift_height > LIFT_HEIGHT_MAX_MM)
         ctrl_state->leg_lift_height = LIFT_HEIGHT_MAX_MM;
     if (ctrl_state->leg_lift_height < LIFT_HEIGHT_MIN_MM)
         ctrl_state->leg_lift_height = LIFT_HEIGHT_MIN_MM;
-
-    /* 平衡模式 */
-    ctrl_state->balance_mode = balance;
 }
 
 bool crsf_check_link(const crsf_state_t *state, uint32_t timeout_ms, uint32_t current_ms)

@@ -61,7 +61,23 @@
 #define CRSF_CH_VALUE_MIN         172
 #define CRSF_CH_VALUE_MID         992
 #define CRSF_CH_VALUE_MAX         1811
-#define CRSF_CH_VALUE_DEADBAND    20   // 死区（去除摇杆抖动）
+
+/* 死区参数：优先使用 hexapod_config.h 中的配置，否则使用默认值 */
+#ifndef CRSF_CH_VALUE_DEADBAND
+#define CRSF_CH_VALUE_DEADBAND    40   // 原始通道死区（CRSF units）
+#endif
+#ifndef CONTROL_DEADBAND
+#define CONTROL_DEADBAND          15   // 控制量死区（-500~+500 范围）
+#endif
+#ifndef HEIGHT_CONTROL_THRESHOLD
+#define HEIGHT_CONTROL_THRESHOLD  (CONTROL_DEADBAND * 2)  // 高度积分控制阈值
+#endif
+#ifndef BODY_HEIGHT_RANGE_MM
+#define BODY_HEIGHT_RANGE_MM      40   // 机身高度线性控制范围 (mm)
+#endif
+#ifndef BODY_ROTATION_MAX
+#define BODY_ROTATION_MAX         200  // 机身姿态旋转范围 (0.1°, 200=20°)
+#endif
 
 /* ==================== CRSF 状态结构体 ==================== */
 

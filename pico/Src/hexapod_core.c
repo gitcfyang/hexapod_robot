@@ -178,12 +178,21 @@ const ik_solution_t* hexapod_get_last_ik(const hexapod_t *robot, leg_index_t leg
 static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index)
 {
     if (!robot || leg_index >= CNT_LEGS) return;
-    
-    /* 获取步态序列位置 */
+
+    /* 获取步态序列位置
+     * 平衡模式下跳过步态序列：所有腿保持在 init_pos 站立位置，
+     * 仅通过 body_rot 和 body_pos 调整姿态 */
     coord3d_t gait_pos;
     int16_t lift_height;
-    
-    hexapod_gait_sequence(&robot->state, leg_index, &gait_pos, &lift_height);
+
+    if (robot->state.balance_mode) {
+        gait_pos.x = 0;
+        gait_pos.y = 0;
+        gait_pos.z = 0;
+        lift_height = 0;
+    } else {
+        hexapod_gait_sequence(&robot->state, leg_index, &gait_pos, &lift_height);
+    }
     
     /* 计算目标足端位置 */
     coord3d_t target_foot;
@@ -292,20 +301,23 @@ void hexapod_update(hexapod_t *robot)
         robot->state.travel_length.z =
             smooth_control(target.z, cur_travel.z, ramp_divider);
 
-        /* Step 4: 碎步归位消抖 — 目标为零且实际已接近零 */
-        bool target_zero = (target.x == 0) && (target.y == 0) && (target.z == 0);
+        /* Step 4: 碎步归位消抖 — 目标为零且实际已接近零
+         * 仅在非平衡模式下触发：平衡模式下机器人原地不动，无需归位 */
+        if (!robot->state.balance_mode) {
+            bool target_zero = (target.x == 0) && (target.y == 0) && (target.z == 0);
 
-        if (target_zero) {
-            if (zero_debounce < 255) zero_debounce++;
-        } else {
-            zero_debounce = 0;
-        }
+            if (target_zero) {
+                if (zero_debounce < 255) zero_debounce++;
+            } else {
+                zero_debounce = 0;
+            }
 
-        if (zero_debounce >= 8 &&
-            robot->state.force_gait_step_cnt == 0)
-        {
-            robot->state.force_gait_step_cnt = 3;
-            zero_debounce = 0;
+            if (zero_debounce >= 8 &&
+                robot->state.force_gait_step_cnt == 0)
+            {
+                robot->state.force_gait_step_cnt = 3;
+                zero_debounce = 0;
+            }
         }
     }
 
@@ -333,15 +345,19 @@ void hexapod_update(hexapod_t *robot)
         if (gait_elapsed >= gait_period) {
             robot->last_gait_time = current_time;
 
-            bool need_step = (robot->state.travel_length.x != 0) ||
-                            (robot->state.travel_length.y != 0) ||
-                            (robot->state.travel_length.z != 0);
+            /* 平衡模式下不推进步态：机器人原地保持站立姿态，
+             * 仅通过 body_rot 和 body_pos.y 实现机身姿态调整 */
+            if (!robot->state.balance_mode) {
+                bool need_step = (robot->state.travel_length.x != 0) ||
+                                (robot->state.travel_length.y != 0) ||
+                                (robot->state.travel_length.z != 0);
 
-            if (need_step || robot->state.force_gait_step_cnt) {
-                hexapod_gait_step(&robot->state);
+                if (need_step || robot->state.force_gait_step_cnt) {
+                    hexapod_gait_step(&robot->state);
 
-                if (robot->state.force_gait_step_cnt > 0) {
-                    robot->state.force_gait_step_cnt--;
+                    if (robot->state.force_gait_step_cnt > 0) {
+                        robot->state.force_gait_step_cnt--;
+                    }
                 }
             }
         }

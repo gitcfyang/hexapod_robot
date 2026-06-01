@@ -66,7 +66,7 @@ static void debug_print_crsf(const crsf_state_t *crsf)
                 crsf->frame_count,
                 hal_get_tick_ms() - crsf->last_frame_time_ms);
 
-    hal_debug_printf("[DBG1] CH1(Fwd):%u CH2(Str):%u CH3(Hgt):%u CH4(Trn):%u "
+    hal_debug_printf("[DBG1] CH1(Str/Rol):%u CH2(Fwd/Pit):%u CH3(Hgt/Hgt):%u CH4(Trn/Yaw):%u "
                 "CH5(Arm):%u CH6(Gait):%u CH7(Spd):%u CH8(Bal):%u\r\n",
                 crsf->channels[0], crsf->channels[1],
                 crsf->channels[2], crsf->channels[3],
@@ -86,10 +86,13 @@ static void debug_print_crsf(const crsf_state_t *crsf)
  */
 static void debug_print_control(const control_state_t *s)
 {
-    hal_debug_printf("[DBG2] ON:%d Travel(X:%d Y:%d Z:%d) Gait:%d Lift:%d Bal:%d\r\n",
-                s->robot_on,
+    hal_debug_printf("[DBG2] ON:%d Bal:%d Travel(X:%d Y:%d Z:%d) Gait:%d Lift:%d\r\n",
+                s->robot_on, s->balance_mode,
                 s->travel_length.x, s->travel_length.y, s->travel_length.z,
-                s->gait_type, s->leg_lift_height, s->balance_mode);
+                s->gait_type, s->leg_lift_height);
+    hal_debug_printf("[DBG2] BodyPos Y:%d  BodyRot(P:%d Y:%d R:%d)\r\n",
+                s->body_pos.y,
+                s->body_rot.x, s->body_rot.y, s->body_rot.z);
 }
 
 /**
@@ -147,14 +150,16 @@ int main(void)
     hal_debug_printf("Debug: USB CDC\r\n");
 
     /* 打印 CRSF 摇杆映射 */
-    hal_debug_printf("\r\nCRSF Channel Mapping (Mode 2):\r\n");
-    hal_debug_printf("  CH1 (Left Y): Forward/Backward\r\n");
-    hal_debug_printf("  CH2 (Left X): Strafe Left/Right\r\n");
-    hal_debug_printf("  CH3 (Right Y): Lift Height\r\n");
-    hal_debug_printf("  CH4 (Right X): Turn\r\n");
-    hal_debug_printf("  CH5 (SWA): Arm/Disarm\r\n");
-    hal_debug_printf("  CH6 (SWB): Gait (Low=RIPPLE, Mid=TRIPOD, High=WAVE)\r\n");
-    hal_debug_printf("  CH8 (SWD): Balance Mode\r\n");
+    hal_debug_printf("\r\nCRSF Channel Mapping:\r\n");
+    hal_debug_printf("  Normal mode (CH8=LOW):\r\n");
+    hal_debug_printf("    CH1 (Ail): Strafe    CH2 (Ele): Forward\r\n");
+    hal_debug_printf("    CH3 (Thr): Height    CH4 (Rud): Turn\r\n");
+    hal_debug_printf("  Balance mode (CH8=HIGH):\r\n");
+    hal_debug_printf("    CH1 (Ail): Roll      CH2 (Ele): Pitch\r\n");
+    hal_debug_printf("    CH3 (Thr): Height    CH4 (Rud): Yaw\r\n");
+    hal_debug_printf("  Switches:\r\n");
+    hal_debug_printf("    CH5 (SWA): Arm    CH6 (SWB): Gait\r\n");
+    hal_debug_printf("    CH7 (SWC): Speed  CH8 (SWD): Balance\r\n");
 
     hal_debug_printf("\r\nWaiting for ELRS link...\r\n");
     hal_debug_printf("Send '!V' to toggle debug level (current=%u)\r\n", hal_debug_get_level());

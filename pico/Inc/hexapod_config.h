@@ -90,18 +90,70 @@
 
 /* ==================== CRSF 通道映射 ====================
  *
- * 根据遥控器实际的通道顺序修改以下宏。
+ * 默认映射基于 ELRS 标准通道顺序。
  * 查看调试输出 [DBG1] 行的原始值来确定每个通道对应什么功能。
  *
+ * CH1~CH4 在正常模式和平衡模式下功能不同：
+ *
+ *   正常模式 (CH8=低位):
+ *     CH1 (Aileron/Roll):    左右平移 (Strafe)
+ *     CH2 (Elevator/Pitch):  前进/后退 (Forward)
+ *     CH3 (Throttle):        机身高度 (线性直接映射，无弹簧)
+ *     CH4 (Rudder/Yaw):      原地旋转 (Turn)
+ *
+ *   平衡模式 (CH8=高位):
+ *     CH1 (Aileron/Roll):    机身横滚 Roll
+ *     CH2 (Elevator/Pitch):  机身俯仰 Pitch
+ *     CH3 (Throttle):        机身高度 (线性直接映射)
+ *     CH4 (Rudder/Yaw):      机身偏航 Yaw
+ *     机器人原地不动，不做平移/旋转行走
+ *
+ *   CH5~CH8 开关在两种模式下功能相同:
  */
-#define CRSF_CHANNEL_FORWARD      1   // CH2: 前后 (右摇杆Y)
-#define CRSF_CHANNEL_STRAFE       0   // CH1: 左右 (右摇杆X)
-#define CRSF_CHANNEL_TURN         3   // CH4: 转向 (左摇杆X)
-#define CRSF_CHANNEL_HEIGHT       2   // CH3: 升降 (左摇杆Y，无弹簧)
+#define CRSF_CHANNEL_FORWARD      1   // CH2: 正常=前进/后退, 平衡=俯仰
+#define CRSF_CHANNEL_STRAFE       0   // CH1: 正常=左右平移, 平衡=横滚
+#define CRSF_CHANNEL_TURN         3   // CH4: 正常=原地旋转, 平衡=偏航
+#define CRSF_CHANNEL_HEIGHT       2   // CH3: 正常=机身高度, 平衡=机身高度
 #define CRSF_CHANNEL_ARM          4   // CH5: 解锁 (二段开关)
 #define CRSF_CHANNEL_GAIT         5   // CH6: 步态 (三段开关)
 #define CRSF_CHANNEL_SPEED        6   // CH7: 速度 (三段开关)
 #define CRSF_CHANNEL_BALANCE      7   // CH8: 平衡模式 (二段开关)
+
+/* ---- CRSF 死区参数 ----
+ *
+ * 两级死区设计：
+ *
+ *   第 1 级：原始通道死区 (CRSF raw units)
+ *     CRSF_CH_VALUE_DEADBAND 定义了摇杆中位附近的死区宽度。
+ *     channel ∈ [MID-DEADBAND, MID+DEADBAND] → 输出强制为 0。
+ *     CRSF 通道范围 172~1811 (跨度 ~1639)，默认死区 ±40 ≈ ±2.4%。
+ *
+ *   第 2 级：控制量死区 (映射后的 -500~+500 范围)
+ *     CONTROL_DEADBAND 定义了摇杆映射后的死区阈值。
+ *     mapped ∈ [-DEADBAND, +DEADBAND] → 输出强制为 0。
+ *     默认 ±15/500 = ±3%，过滤映射后的微小残余。
+ *
+ *   两级串联效果：摇杆需偏离中位足够远才会产生运动，
+ *   消除摇杆抖动、中位漂移和机械虚位引起的误动作。 */
+#define CRSF_CH_VALUE_DEADBAND    40     /* 原始通道死区 (CRSF units)，±40 约 ±2.4% */
+#define CONTROL_DEADBAND          15     /* 控制量死区 (-500~+500)，±15 约 ±3% */
+
+/* 高度控制阈值：油门杆须偏离中位超过此值才开始改变抬腿高度。
+ * 因为高度是积分控制（每周期累积），阈值需比运动通道的死区更大。
+ * 默认 = CONTROL_DEADBAND × 2 ≈ 30，即摇杆偏离约 6% 才响应。 */
+#define HEIGHT_CONTROL_THRESHOLD  (CONTROL_DEADBAND * 2)
+
+/* 机身高度线性控制范围 (mm)
+ * 摇杆满量程 (±500) 映射到的机身高度偏移。
+ * body_pos.y = stick * BODY_HEIGHT_RANGE_MM / 500
+ * 正值抬升机身 (腿向下伸展), 负值降低机身 (腿向上收缩) */
+#define BODY_HEIGHT_RANGE_MM      40
+
+/* 机身姿态旋转范围 (0.1° 单位)
+ * 摇杆满量程 (±500) 映射到的机身旋转角。
+ * body_rot = stick * BODY_ROTATION_MAX / 500
+ * 200 = 20.0°, 即摇杆推到底时机身倾斜 20° */
+#define BODY_ROTATION_MAX         200
 
 /* ---- CRSF 摇杆→控制量 缩放参数 ----
  * 摇杆范围 -500~+500, 映射到实际运动参数 */
