@@ -37,7 +37,7 @@ bool robot_init(void)
         return false;
     }
 
-    hexapod_set_leg_lift_height(&g_robot, 50);
+    hexapod_set_leg_lift_height(&g_robot, DEFAULT_LEG_LIFT_HEIGHT);
     hexapod_set_gait(&g_robot, GAIT_RIPPLE_12);
 
     hal_debug_printf("Robot initialized successfully!\r\n");

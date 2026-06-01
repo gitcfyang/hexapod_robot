@@ -119,7 +119,10 @@ typedef struct {
     bool femur_invert;
     bool tibia_invert;
     
-    /* 舵机偏移校准 */
+    /* 舵机偏移校准 (0.1度单位)
+     * 用于补偿舵盘安装偏差。正值 = 顺时针追加。
+     * 校准方法: !P<id> 找最佳角度 → 减去 IK 输出 = horn_offset */
+    int16_t coxa_horn_offset;
     int16_t femur_horn_offset;
     int16_t tibia_horn_offset;
 } leg_config_t;

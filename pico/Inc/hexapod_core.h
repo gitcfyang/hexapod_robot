@@ -15,10 +15,12 @@
 /* ==================== 配置参数 ==================== */
 
 #define DEFAULT_GAIT_SPEED      100     // 默认步态速度
-#define DEFAULT_LEG_LIFT_HEIGHT 50      // 默认抬腿高度（mm）
-#define DEFAULT_INIT_Y          25      // 默认初始足端Y高度（mm）
+#define DEFAULT_LEG_LIFT_HEIGHT 80      // 默认抬腿高度（mm） (长腿可抬更高)
+#define DEFAULT_INIT_Y          80      // 默认初始足端Y高度（mm） (站立时机身离地高)
 #define MIN_VOLTAGE_MV          10000   // 最低电压（10V）
-#define CONTROL_LOOP_PERIOD_MS  20       // 控制循环周期（20ms = 50Hz）
+#define CONTROL_LOOP_PERIOD_MS  20       // 舵机刷新周期（20ms = 50Hz，保证动作平滑）
+#define GAIT_STEP_PERIOD_MS     60       // 步态推进周期（ms）。越大=越慢。RIPPLE_12有12步，
+                                         // 60ms×12=720ms/周期。步长80mm时速度=80/0.72≈111mm/s。
 
 /* ==================== 机器人实例 ==================== */
 
@@ -27,7 +29,8 @@ typedef struct {
     leg_config_t     leg_configs[CNT_LEGS];     // 腿部配置
     bool             initialized;               // 初始化标志
     bool             servos_enabled;            // 舵机使能标志
-    uint32_t         last_update_time;          // 上次更新时间
+    uint32_t         last_update_time;          // 上次舵机刷新时间
+    uint32_t         last_gait_time;            // 上次步态推进时间
 } hexapod_t;
 
 /* ==================== 核心功能 ==================== */

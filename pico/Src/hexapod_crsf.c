@@ -278,14 +278,25 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
     /* 通道8: 平衡模式 */
     bool balance = map_to_2pos(state->channels[CRSF_CHANNEL_BALANCE]);
     
+    /* 通道7: 速度选择（三档开关） */
+    int8_t speed_pos = map_to_3pos(state->channels[CRSF_CHANNEL_SPEED]);
+
     /* ---- 应用到控制状态 ---- */
-    
-    /* 前进/后退和左右平移映射到 travel_length */
-    /* forward/strafe 范围 -500~500，映射到步长 -50~50 mm */
-    ctrl_state->travel_length.x = (forward * 50) / 500;
-    ctrl_state->travel_length.z = -(strafe * 40) / 500;  // Z 取反：摇杆右→右移
-    ctrl_state->travel_length.y = (turn * 50) / 500;     // 旋转
-    
+
+    /* 步长映射: 摇杆 -500~+500 → 步长 mm */
+    ctrl_state->travel_length.x = (forward * TRAVEL_MAX_FORWARD_MM) / 500;
+    ctrl_state->travel_length.z = -(strafe * TRAVEL_MAX_STRAFE_MM) / 500;
+    ctrl_state->travel_length.y = (turn * TRAVEL_MAX_TURN_MM) / 500;
+
+    /* 速度档位: CH7 三段开关 → 步态推进周期 (ms) */
+    if (speed_pos == -1) {
+        ctrl_state->speed_control = SPEED_SLOW_MS;
+    } else if (speed_pos == 1) {
+        ctrl_state->speed_control = SPEED_FAST_MS;
+    } else {
+        ctrl_state->speed_control = SPEED_NORMAL_MS;  /* 中位/默认 */
+    }
+
     /* 解锁/上电 - 使用静态变量检测上升沿/下降沿
        SWA二档开关：高位=ARM开启，低位=DISARM关闭
        @note  使用 static 变量实现边沿触发（edge-triggered），而非电平触发。
@@ -327,15 +338,17 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         }
     }
     
-    /* 高度控制：摇杆上推→抬腿高度增大，下推→减小 */
+    /* 高度控制: 无弹簧油门杆, 推拉改变抬腿高度 */
     if (height_ctrl > 50) {
-        ctrl_state->leg_lift_height += 2;
-        if (ctrl_state->leg_lift_height > 100) ctrl_state->leg_lift_height = 100;
+        ctrl_state->leg_lift_height += LIFT_SPEED_MM_PER_TICK;
     } else if (height_ctrl < -50) {
-        ctrl_state->leg_lift_height -= 2;
-        if (ctrl_state->leg_lift_height < 10) ctrl_state->leg_lift_height = 10;
+        ctrl_state->leg_lift_height -= LIFT_SPEED_MM_PER_TICK;
     }
-    
+    if (ctrl_state->leg_lift_height > LIFT_HEIGHT_MAX_MM)
+        ctrl_state->leg_lift_height = LIFT_HEIGHT_MAX_MM;
+    if (ctrl_state->leg_lift_height < LIFT_HEIGHT_MIN_MM)
+        ctrl_state->leg_lift_height = LIFT_HEIGHT_MIN_MM;
+
     /* 平衡模式 */
     ctrl_state->balance_mode = balance;
 }

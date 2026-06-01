@@ -248,18 +248,16 @@ static void update_servos(hexapod_t *robot)
 void hexapod_update(hexapod_t *robot)
 {
     if (!robot || !robot->initialized) return;
-    
+
     uint32_t current_time = hal_get_tick_ms();
-    uint32_t elapsed = current_time - robot->last_update_time;
-    
-    /* 控制周期检查 */
-    if (elapsed < CONTROL_LOOP_PERIOD_MS) {
+
+    /* 舵机刷新周期检查 (20ms, 保证动作平滑) */
+    if (current_time - robot->last_update_time < CONTROL_LOOP_PERIOD_MS) {
         return;
     }
-    
     robot->last_update_time = current_time;
-    
-    /* 检查电池电压（通过 BATTERY_CHECK_ENABLED 宏控制开关） */
+
+    /* 检查电池电压 */
 #if BATTERY_CHECK_ENABLED
     if (!hal_check_battery()) {
         hal_debug_printf("Low battery!\r\n");
@@ -267,18 +265,57 @@ void hexapod_update(hexapod_t *robot)
         return;
     }
 #endif
-    
-    /* 读取输入 */
-    hal_input_update(&robot->state);
-    
+
+    /* ---- 速度平滑 + 碎步归位 ----
+     *
+     * hal_input_update 直接覆写 travel_length 为目标值。
+     * 这里在调用前保存旧值, 调用后用 smooth_control 逐步过渡,
+     * 实现自然的加减速而非瞬间跳变。
+     */
+    {
+        static uint8_t zero_debounce = 0;
+        const uint8_t  ramp_divider  = 4;
+
+        /* Step 1: 保存当前实际速度 */
+        coord3d_t cur_travel = robot->state.travel_length;
+
+        /* Step 2: 读取输入 (会覆写 travel_length 为目标值) */
+        hal_input_update(&robot->state);
+
+        /* Step 3: 锁存目标, 并用 smooth_control 从旧值逐步逼近 */
+        coord3d_t target = robot->state.travel_length;
+
+        robot->state.travel_length.x =
+            smooth_control(target.x, cur_travel.x, ramp_divider);
+        robot->state.travel_length.y =
+            smooth_control(target.y, cur_travel.y, ramp_divider);
+        robot->state.travel_length.z =
+            smooth_control(target.z, cur_travel.z, ramp_divider);
+
+        /* Step 4: 碎步归位消抖 — 目标为零且实际已接近零 */
+        bool target_zero = (target.x == 0) && (target.y == 0) && (target.z == 0);
+
+        if (target_zero) {
+            if (zero_debounce < 255) zero_debounce++;
+        } else {
+            zero_debounce = 0;
+        }
+
+        if (zero_debounce >= 8 &&
+            robot->state.force_gait_step_cnt == 0)
+        {
+            robot->state.force_gait_step_cnt = 3;
+            zero_debounce = 0;
+        }
+    }
+
     /* 机器人开关状态变化处理 */
     if (robot->state.robot_on != robot->state.prev_robot_on) {
         if (robot->state.robot_on) {
-            /* 机器人开启 → 使能舵机 */
             robot->servos_enabled = true;
+            robot->last_gait_time = current_time;  /* 初始化步态时钟 */
             hal_debug_printf("Robot ON\r\n");
         } else {
-            /* 机器人关闭 → 释放舵机 */
             robot->servos_enabled = false;
             hal_servo_free_all();
             hal_debug_printf("Robot OFF\r\n");
@@ -286,24 +323,30 @@ void hexapod_update(hexapod_t *robot)
     }
     robot->state.prev_robot_on = robot->state.robot_on;
 
-    
     /* 如果机器人开启 */
     if (robot->state.robot_on) {
-        /* 检查是否需要步进 */
-        bool need_step = (robot->state.travel_length.x != 0) ||
-                        (robot->state.travel_length.y != 0) ||
-                        (robot->state.travel_length.z != 0);
-        
-        if (need_step || robot->state.force_gait_step_cnt) {
-            /* 步态步进 */
-            hexapod_gait_step(&robot->state);
-            
-            if (robot->state.force_gait_step_cnt > 0) {
-                robot->state.force_gait_step_cnt--;
+        /* ---- 步态推进 (频率低于舵机刷新) ---- */
+        uint32_t gait_elapsed = current_time - robot->last_gait_time;
+        /* 步态周期从 speed_control 读取 (CRSF CH7 开关设定, 默认 60ms) */
+        uint16_t gait_period = robot->state.speed_control;
+        if (gait_period < 20) gait_period = GAIT_STEP_PERIOD_MS;  /* 未设定时用默认 */
+        if (gait_elapsed >= gait_period) {
+            robot->last_gait_time = current_time;
+
+            bool need_step = (robot->state.travel_length.x != 0) ||
+                            (robot->state.travel_length.y != 0) ||
+                            (robot->state.travel_length.z != 0);
+
+            if (need_step || robot->state.force_gait_step_cnt) {
+                hexapod_gait_step(&robot->state);
+
+                if (robot->state.force_gait_step_cnt > 0) {
+                    robot->state.force_gait_step_cnt--;
+                }
             }
         }
-        
-        /* 更新舵机 */
+
+        /* ---- 舵机更新 (每周期都执行, 保证平滑) ---- */
         update_servos(robot);
     }
 }
@@ -314,8 +357,9 @@ void hexapod_update(hexapod_t *robot)
 void hexapod_single_step(hexapod_t *robot)
 {
     if (!robot) return;
-    
+
     hexapod_gait_step(&robot->state);
+    robot->last_gait_time = hal_get_tick_ms();  /* 重置步态时钟 */
     update_servos(robot);
 }
 

@@ -349,12 +349,12 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
 
     switch (buf[1]) {
         /* ---- 运动控制 ---- */
-        case 'F': ctrl_state->travel_length.x = 30;  ctrl_state->travel_length.z = 0;  ctrl_state->travel_length.y = 0;  break;
-        case 'B': ctrl_state->travel_length.x = -30; ctrl_state->travel_length.z = 0;  ctrl_state->travel_length.y = 0;  break;
-        case 'L': ctrl_state->travel_length.z = 20;  break;
-        case 'R': ctrl_state->travel_length.z = -20; break;
-        case 'Q': ctrl_state->travel_length.y = 30;  break;
-        case 'E': ctrl_state->travel_length.y = -30; break;
+        case 'F': ctrl_state->travel_length.x = 60;  ctrl_state->travel_length.z = 0;  ctrl_state->travel_length.y = 0;  break;
+        case 'B': ctrl_state->travel_length.x = -60; ctrl_state->travel_length.z = 0;  ctrl_state->travel_length.y = 0;  break;
+        case 'L': ctrl_state->travel_length.z = 40;  break;
+        case 'R': ctrl_state->travel_length.z = -40; break;
+        case 'Q': ctrl_state->travel_length.y = 40;  break;
+        case 'E': ctrl_state->travel_length.y = -40; break;
         case 'S': ctrl_state->travel_length.x = 0;   ctrl_state->travel_length.y = 0;   ctrl_state->travel_length.z = 0;  break;
 
         /* ---- 状态控制 ---- */

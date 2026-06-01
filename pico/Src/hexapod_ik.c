@@ -4,6 +4,7 @@
  */
 
 #include "hexapod_ik.h"
+#include "hexapod_config.h"
 #include "hexapod_math.h"
 #include <string.h>
 
@@ -80,7 +81,7 @@ bool hexapod_ik_leg(const coord3d_t *target_pos,
     if (cos_tibia < -10000) { cos_tibia = -10000; solution->solution_warning = true; }
     
     int16_t tibia_angle = hexapod_acos((int16_t)cos_tibia);
-    tibia_angle = 900 - tibia_angle;  // 转换为舵机角度
+    tibia_angle = TIBIA_SERVO_ZERO - tibia_angle;  /* 舵机零位 → 几何角度映射 */
     
     /* 计算Femur角度 */
     /* 先计算辅助角度 angle_a1 = atan2(pos_y, ik_feet_dist) */
@@ -107,7 +108,9 @@ bool hexapod_ik_leg(const coord3d_t *target_pos,
     if (cos_a2 < -10000) { cos_a2 = -10000; solution->solution_warning = true; }
     
     int16_t angle_a2 = hexapod_acos((int16_t)cos_a2);
-    int16_t femur_angle = angle_a1 + angle_a2 - 900;  // 转换为舵机角度
+    /* 股节几何角 = α_2 - α_1 (股节在足端线上方, 向上朝身体)
+     * 若股节向下悬挂则用 α_1 + α_2 */
+    int16_t femur_angle = angle_a2 - angle_a1 - FEMUR_SERVO_ZERO;
     
     /* 应用舵机方向和偏移 */
     if (leg_cfg->coxa_invert) {
@@ -119,8 +122,9 @@ bool hexapod_ik_leg(const coord3d_t *target_pos,
     if (leg_cfg->tibia_invert) {
         tibia_angle = -tibia_angle;
     }
-    
-    /* 应用舵机校准偏移 */
+
+    /* 应用舵盘安装偏移（三关节都支持） */
+    coxa_angle  += leg_cfg->coxa_horn_offset;
     femur_angle += leg_cfg->femur_horn_offset;
     tibia_angle += leg_cfg->tibia_horn_offset;
     
