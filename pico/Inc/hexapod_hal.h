@@ -171,4 +171,36 @@ void hal_led_blink(uint8_t led_id, uint8_t times);
  */
 uint8_t hal_get_servo_id(leg_index_t leg_index, uint8_t joint);
 
+/* ==================== 调试辅助接口 ==================== */
+
+/**
+ * @brief 获取 CRSF 内部状态指针（只读，用于调试输出）
+ * @return CRSF 状态指针，非 CRSF 模式下返回 NULL
+ */
+const void* hal_debug_get_crsf_state(void);
+
+/**
+ * @brief 获取 CRSF 帧计数增量（用于检测是否有新数据到达）
+ * @return 自上次调用后的帧计数增量，非 CRSF 模式返回 0
+ */
+uint32_t hal_debug_get_crsf_frame_delta(void);
+
+/**
+ * @brief 获取最后一次 servo flush 的舵机数量
+ * @return 舵机数量 (0-18)
+ */
+uint8_t hal_debug_get_last_servo_count(void);
+
+/**
+ * @brief 设置运行时调试等级
+ * @param level 调试等级 (0=关, 1=CRSF, 2=+控制, 3=+舵机)
+ */
+void hal_debug_set_level(uint8_t level);
+
+/**
+ * @brief 获取当前调试等级
+ * @return 调试等级
+ */
+uint8_t hal_debug_get_level(void);
+
 #endif /* HEXAPOD_HAL_H */

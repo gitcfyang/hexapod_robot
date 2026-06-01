@@ -7,6 +7,7 @@
  */
 
 #include "hexapod_hal.h"
+#include "hexapod_config.h"
 #include "hexapod_i2c_protocol.h"
 #include "hexapod_core.h"
 #include "hexapod_gait.h"
@@ -39,6 +40,7 @@ typedef struct {
 } servo_batch_t;
 
 static servo_batch_t g_servo_batch;
+static uint8_t  g_last_servo_count = 0;      /* 上次 flush 的舵机数（调试用） */
 
 bool hal_servo_init(void)
 {
@@ -109,7 +111,9 @@ bool hal_servo_set_angles(const uint8_t *servo_ids,
  */
 void hal_servo_flush(void)
 {
-    if (g_servo_batch.count == 0) return;
+    if (g_servo_batch.count == 0) { g_last_servo_count = 0; return; }
+
+    g_last_servo_count = g_servo_batch.count;  /* 记录调试信息 */
     
     /* 收集第一片PCA9685 (0x40) 的脉宽：舵机ID 0~8 */
     uint16_t pulses_pca1[16] = {0};
@@ -233,6 +237,7 @@ static crsf_parser_t g_crsf_parser;
 static crsf_state_t  g_crsf_state;
 static bool g_crsf_mode = false;           // true=CRSF模式, false=串口命令模式
 static uint32_t g_last_crsf_frame_ms = 0;  // 最后CRSF帧时间
+static uint32_t g_last_crsf_frame_count = 0; // 上次查询时的帧计数（调试用）
 
 static void input_uart_irq_handler(void)
 {
@@ -378,6 +383,14 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             ctrl_state->balance_mode = !ctrl_state->balance_mode;
             hal_debug_printf("Balance: %d\r\n", ctrl_state->balance_mode);
             break;
+        case 'V':
+            /* 切换调试等级: 0→1→2→3→0 */
+            {
+                uint8_t lvl = hal_debug_get_level();
+                lvl = (lvl + 1) % 4;
+                hal_debug_set_level(lvl);
+            }
+            break;
         default:
             return false;
     }
@@ -393,11 +406,11 @@ bool hal_input_update(control_state_t *ctrl_state)
         /* ========== CRSF 模式 ========== */
         uint32_t now = hal_get_tick_ms();
         
-        /* 检查是否有新帧 - 使用 frame_count 检测，因为 last_frame_time_ms 已在 crsf_parse_byte 中被更新 */
+        /* 检查是否有新帧 - 使用 last_frame_time_ms 检测 */
         uint32_t last_frame_time = g_crsf_state.last_frame_time_ms;
         if (last_frame_time != g_last_crsf_frame_ms) {
             g_last_crsf_frame_ms = last_frame_time;
-            
+
             /* 检查链接状态 */
             if (g_crsf_state.link_connected) {
                 /* 将 CRSF 状态映射到机器人控制 */
@@ -533,4 +546,40 @@ void hal_led_blink(uint8_t led_id, uint8_t times)
         hal_led_set(led_id, false);
         sleep_ms(100);
     }
+}
+
+/* ==================== 调试辅助接口实现 ==================== */
+
+static uint8_t g_debug_level = DEBUG_LEVEL;
+
+void hal_debug_set_level(uint8_t level)
+{
+    if (level > 3) level = 0;
+    g_debug_level = level;
+    hal_debug_printf("[DBG] Level set to %u\r\n", g_debug_level);
+}
+
+uint8_t hal_debug_get_level(void)
+{
+    return g_debug_level;
+}
+
+const void* hal_debug_get_crsf_state(void)
+{
+    if (!g_crsf_mode) return NULL;
+    return &g_crsf_state;
+}
+
+uint32_t hal_debug_get_crsf_frame_delta(void)
+{
+    if (!g_crsf_mode) return 0;
+    uint32_t current = g_crsf_state.frame_count;
+    uint32_t delta = current - g_last_crsf_frame_count;
+    g_last_crsf_frame_count = current;
+    return delta;
+}
+
+uint8_t hal_debug_get_last_servo_count(void)
+{
+    return g_last_servo_count;
 }
