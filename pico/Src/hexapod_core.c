@@ -12,6 +12,9 @@
 static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index);
 static void update_servos(hexapod_t *robot);
 
+/* 调试：缓存最近一次 IK 解算结果 */
+static ik_solution_t g_debug_ik[CNT_LEGS];
+
 /**
  * @brief 初始化六足机器人
  */
@@ -45,11 +48,17 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
         robot->state.coxa_init_angle[i] = configs[i].coxa_angle;
     }
     
-    /* 初始化硬件 */
+    /* 初始化舵机硬件 */
     if (!hal_servo_init()) {
+#if HEADLESS_MODE
+        hal_debug_printf("WARNING: Servo init failed (HEADLESS_MODE=1, continuing)\r\n");
+        /* 不返回 false，允许无舵机调试 */
+#else
+        hal_debug_printf("ERROR: Servo init failed!\r\n");
         return false;
+#endif
     }
-    
+
     hal_debug_init();
     hal_input_init(INPUT_TYPE_CRSF);  /* 使用 CRSF 接收器输入 */
     
@@ -155,6 +164,15 @@ const control_state_t* hexapod_get_state(const hexapod_t *robot)
 }
 
 /**
+ * @brief 获取最近一次 IK 解算结果（调试用）
+ */
+const ik_solution_t* hexapod_get_last_ik(const hexapod_t *robot, leg_index_t leg_index)
+{
+    if (!robot || leg_index >= CNT_LEGS) return NULL;
+    return &g_debug_ik[leg_index];
+}
+
+/**
  * @brief 计算单腿逆运动学
  */
 static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index)
@@ -184,7 +202,10 @@ static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index)
                                  leg_index,
                                  cfg,
                                  &solution);
-    
+
+    /* 缓存调试用 */
+    g_debug_ik[leg_index] = solution;
+
     if (robot->servos_enabled) {
         /* 仅当无严重求解错误时输出舵机角度
          * solution_warning（角度越界）时仍然输出限幅后的角度，保持姿态稳定

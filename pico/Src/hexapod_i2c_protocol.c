@@ -12,11 +12,26 @@
  */
 
 #include "hexapod_i2c_protocol.h"
+#include "hexapod_config.h"
 #include <string.h>
 #include <stdio.h>
 #include "pico/stdlib.h"
 #include "hardware/i2c.h"
 #include "hardware/gpio.h"
+
+/* ==================== 板载追踪 ==================== */
+
+/* 候选地址列表（按优先级排列） */
+static const uint8_t PCA9685_CANDIDATE_ADDRS[] = {0x40, 0x41};
+
+/* 运行时检测结果 */
+static uint8_t g_board_addrs[2] = {0};
+static uint8_t g_board_count = 0;
+
+uint8_t pca9685_get_board_count(void) { return g_board_count; }
+uint8_t pca9685_get_board_addr(uint8_t index) {
+    return (index < g_board_count) ? g_board_addrs[index] : 0;
+}
 
 /* ==================== 内部帮助函数 ==================== */
 
@@ -80,102 +95,113 @@ bool pca9685_init(void)
     gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_I2C);
     gpio_pull_up(PCA9685_I2C_SDA_PIN);
     gpio_pull_up(PCA9685_I2C_SCL_PIN);
-    
-    /* 配置第一片PCA9685 */
-    uint8_t addr1 = PCA9685_ADDR_0x40;
-    uint8_t addr2 = PCA9685_ADDR_0x41;
-    
-    /* 唤醒PCA9685：清除SLEEP位 */
-    uint8_t mode1;
-    if (!pca9685_read_reg(addr1, PCA9685_MODE1, &mode1)) return false;
-    mode1 &= ~PCA9685_MODE1_SLEEP;   /* 清除休眠位 */
-    mode1 |= PCA9685_MODE1_AI;       /* 使能自动递增 */
-    if (!pca9685_write_reg(addr1, PCA9685_MODE1, mode1)) return false;
-    
-    if (!pca9685_read_reg(addr2, PCA9685_MODE1, &mode1)) return false;
-    mode1 &= ~PCA9685_MODE1_SLEEP;
-    mode1 |= PCA9685_MODE1_AI;
-    if (!pca9685_write_reg(addr2, PCA9685_MODE1, mode1)) return false;
-    
+
+    /* 自动探测可用的 PCA9685 板 */
+    g_board_count = 0;
+    uint8_t max_boards = (PCA9685_BOARD_COUNT <= 2) ? PCA9685_BOARD_COUNT : 2;
+
+    for (uint8_t i = 0; i < max_boards; i++) {
+        uint8_t addr = PCA9685_CANDIDATE_ADDRS[i];
+        uint8_t mode1;
+
+        /* 尝试读取 MODE1 寄存器验证芯片是否存在 */
+        if (pca9685_read_reg(addr, PCA9685_MODE1, &mode1)) {
+            /* 唤醒：清除 SLEEP 位，使能自动递增 */
+            mode1 &= ~PCA9685_MODE1_SLEEP;
+            mode1 |= PCA9685_MODE1_AI;
+            if (pca9685_write_reg(addr, PCA9685_MODE1, mode1)) {
+                g_board_addrs[g_board_count++] = addr;
+                printf("  PCA9685 #%u found at 0x%02X\r\n", g_board_count, addr);
+            }
+        }
+    }
+
+    if (g_board_count == 0) {
+        printf("  No PCA9685 detected on I2C bus!\r\n");
+        printf("  Check: SDA=GP%d SCL=GP%d power to PCA9685\r\n",
+               PCA9685_I2C_SDA_PIN, PCA9685_I2C_SCL_PIN);
+        return false;
+    }
+
     /* 等待振荡器稳定 */
     sleep_ms(1);
-    
-    /* 配置MODE2：推挽输出 */
-    if (!pca9685_write_reg(addr1, PCA9685_MODE2, PCA9685_MODE2_OUTDRV)) return false;
-    if (!pca9685_write_reg(addr2, PCA9685_MODE2, PCA9685_MODE2_OUTDRV)) return false;
-    
-    /* 设置PWM频率为50Hz */
+
+    /* 配置 MODE2：推挽输出 */
+    for (uint8_t i = 0; i < g_board_count; i++) {
+        pca9685_write_reg(g_board_addrs[i], PCA9685_MODE2, PCA9685_MODE2_OUTDRV);
+    }
+
+    /* 设置 PWM 频率为 50Hz */
     if (!pca9685_set_freq(PCA9685_FREQUENCY)) return false;
-    
+
     /* 所有通道初始输出低电平 */
     pca9685_free_all();
-    
+
     return true;
 }
 
 bool pca9685_set_freq(uint16_t freq)
 {
     if (freq < 1 || freq > 1000) return false;
-    
-    uint8_t addr1 = PCA9685_ADDR_0x40;
-    uint8_t addr2 = PCA9685_ADDR_0x41;
-    
+
     /* 计算预分频值
      * PRE_SCALE = round(osc_clock / (4096 * freq)) - 1
      * 内部振荡器 = 25MHz
      */
     float pre_scale_val = 25000000.0f / (4096.0f * freq) - 1.0f;
-    uint8_t pre_scale = (uint8_t)(pre_scale_val + 0.5f);  /* 四舍五入 */
-    if (pre_scale < 3) pre_scale = 3;  /* 最小允许值 */
-    
-    /* 需要先使芯片进入SLEEP模式才能修改预分频 */
-    uint8_t mode1;
-    
-    pca9685_read_reg(addr1, PCA9685_MODE1, &mode1);
-    mode1 |= PCA9685_MODE1_SLEEP;
-    pca9685_write_reg(addr1, PCA9685_MODE1, mode1);
-    
-    pca9685_read_reg(addr2, PCA9685_MODE1, &mode1);
-    mode1 |= PCA9685_MODE1_SLEEP;
-    pca9685_write_reg(addr2, PCA9685_MODE1, mode1);
-    
-    /* 写入预分频 */
-    pca9685_write_reg(addr1, PCA9685_PRE_SCALE, pre_scale);
-    pca9685_write_reg(addr2, PCA9685_PRE_SCALE, pre_scale);
-    
-    /* 唤醒 */
-    pca9685_read_reg(addr1, PCA9685_MODE1, &mode1);
-    mode1 &= ~PCA9685_MODE1_SLEEP;
-    mode1 |= PCA9685_MODE1_AI;
-    pca9685_write_reg(addr1, PCA9685_MODE1, mode1);
-    
-    pca9685_read_reg(addr2, PCA9685_MODE1, &mode1);
-    mode1 &= ~PCA9685_MODE1_SLEEP;
-    mode1 |= PCA9685_MODE1_AI;
-    pca9685_write_reg(addr2, PCA9685_MODE1, mode1);
-    
+    uint8_t pre_scale = (uint8_t)(pre_scale_val + 0.5f);
+    if (pre_scale < 3) pre_scale = 3;
+
+    for (uint8_t i = 0; i < g_board_count; i++) {
+        uint8_t addr = g_board_addrs[i];
+        uint8_t mode1;
+
+        /* 进入 SLEEP 模式 */
+        pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
+        mode1 |= PCA9685_MODE1_SLEEP;
+        pca9685_write_reg(addr, PCA9685_MODE1, mode1);
+
+        /* 写入预分频 */
+        pca9685_write_reg(addr, PCA9685_PRE_SCALE, pre_scale);
+
+        /* 唤醒 */
+        pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
+        mode1 &= ~PCA9685_MODE1_SLEEP;
+        mode1 |= PCA9685_MODE1_AI;
+        pca9685_write_reg(addr, PCA9685_MODE1, mode1);
+    }
+
     sleep_ms(1);
-    
-    /* 发送RESTART信号 */
-    pca9685_read_reg(addr1, PCA9685_MODE1, &mode1);
-    mode1 |= PCA9685_MODE1_RESTART;
-    pca9685_write_reg(addr1, PCA9685_MODE1, mode1);
-    
-    pca9685_read_reg(addr2, PCA9685_MODE1, &mode1);
-    mode1 |= PCA9685_MODE1_RESTART;
-    pca9685_write_reg(addr2, PCA9685_MODE1, mode1);
-    
+
+    /* 发送 RESTART */
+    for (uint8_t i = 0; i < g_board_count; i++) {
+        uint8_t addr = g_board_addrs[i];
+        uint8_t mode1;
+        pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
+        mode1 |= PCA9685_MODE1_RESTART;
+        pca9685_write_reg(addr, PCA9685_MODE1, mode1);
+    }
+
     return true;
 }
 
 uint16_t pca9685_angle_to_pulse(int16_t angle)
 {
-    /* 角度范围 0~1800 (0.1度单位) 映射到 500~2500us */
-    if (angle <= 0) return SERVO_PULSE_MIN;
-    if (angle >= 1800) return SERVO_PULSE_MAX;
-    
-    uint32_t pulse = SERVO_PULSE_MIN + 
-                     ((uint32_t)(SERVO_PULSE_MAX - SERVO_PULSE_MIN) * (uint32_t)angle) / 1800;
+    /* 舵机角度 → PWM 脉宽映射：
+     *   角度 0   = 舵机中位 → 1500us
+     *   角度 +900 = +90°  → 2500us (顺时针极限)
+     *   角度 -900 = -90°  →  500us (逆时针极限)
+     *
+     *   右腿 invert=true 时 IK 输出负角度，此处正确处理正负双向映射 */
+#define SERVO_PULSE_MID 1500
+
+    if (angle <= -900) return SERVO_PULSE_MIN;
+    if (angle >=  900) return SERVO_PULSE_MAX;
+
+    /* pulse = 1500 + angle * (1000 / 900)，即每 0.9° 偏移 10us */
+    int32_t pulse = SERVO_PULSE_MID + ((int32_t)angle * 1000) / 900;
+    if (pulse < SERVO_PULSE_MIN) pulse = SERVO_PULSE_MIN;
+    if (pulse > SERVO_PULSE_MAX) pulse = SERVO_PULSE_MAX;
     return (uint16_t)pulse;
 }
 
@@ -224,18 +250,25 @@ void pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t co
 bool pca9685_set_servo_pulse(uint8_t servo_id, uint16_t pulse_us)
 {
     if (servo_id >= SERVO_TOTAL_COUNT) return false;
-    
-    /* 确定使用的PCA9685和内部通道号 */
-    uint8_t pca_addr;
+
+    /* 确定使用的 PCA9685 板索引和内部通道号
+     * 板 0: 舵机 ID 0~8 (右腿组)
+     * 板 1: 舵机 ID 9~17 (左腿组) — 仅当 g_board_count >= 2 时可用 */
+    uint8_t board_idx;
     uint8_t channel;
-    
+
     if (servo_id <= PCA9685_1_SERVO_MAX) {
-        pca_addr = PCA9685_ADDR_0x40;
-        channel = servo_id;  /* 通道0-8直接对应 */
+        board_idx = 0;
+        channel = servo_id;
     } else {
-        pca_addr = PCA9685_ADDR_0x41;
-        channel = servo_id - (PCA9685_2_SERVO_MIN);  /* 舵机ID9对应通道0 */
+        board_idx = 1;
+        channel = servo_id - PCA9685_2_SERVO_MIN;
     }
+
+    /* 目标板不存在则静默跳过 */
+    if (board_idx >= g_board_count) return false;
+
+    uint8_t pca_addr = g_board_addrs[board_idx];
     
     /* 限幅 */
     if (pulse_us < SERVO_PULSE_MIN) pulse_us = SERVO_PULSE_MIN;
@@ -281,18 +314,13 @@ bool pca9685_set_servo_pulses(const uint8_t *servo_ids,
 
 void pca9685_free_all(void)
 {
-    uint8_t addr1 = PCA9685_ADDR_0x40;
-    uint8_t addr2 = PCA9685_ADDR_0x41;
-    
-    /* 构建数据：寄存器地址 + 64字节数据（16通道 × 4字节/通道）
-       利用自动递增(AI)模式，从LED0_ON_L开始写入 */
     uint8_t data[65];
-    data[0] = PCA9685_LED0_ON_L;                     // 起始寄存器
-    memset(data + 1, 0, 64);     // 16通道 × 4字节/通道 = 64字节
-    
-    /* 一次性写入两片PCA9685（各1次I2C事务替代16次单独写入） */
-    i2c_write_blocking(PCA9685_I2C_INSTANCE, addr1, data, sizeof(data), false);
-    i2c_write_blocking(PCA9685_I2C_INSTANCE, addr2, data, sizeof(data), false);
+    data[0] = PCA9685_LED0_ON_L;
+    memset(data + 1, 0, 64);
+
+    for (uint8_t i = 0; i < g_board_count; i++) {
+        i2c_write_blocking(PCA9685_I2C_INSTANCE, g_board_addrs[i], data, sizeof(data), false);
+    }
 }
 
 /* ==================== 调试工具 ==================== */

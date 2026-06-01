@@ -109,6 +109,14 @@ void hexapod_emergency_stop(hexapod_t *robot);
 const control_state_t* hexapod_get_state(const hexapod_t *robot);
 
 /**
+ * @brief 获取最近一次 IK 解算结果（调试用）
+ * @param robot 机器人实例
+ * @param leg_index 腿索引 (0-5)
+ * @return IK 角度，robot 为空时返回 NULL
+ */
+const ik_solution_t* hexapod_get_last_ik(const hexapod_t *robot, leg_index_t leg_index);
+
+/**
  * @brief 执行单步（调试用）
  * @param robot 机器人实例
  */

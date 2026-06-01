@@ -64,5 +64,7 @@ void pca9685_free_all(void);
 uint16_t pca9685_angle_to_pulse(int16_t angle);
 void pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t count);
 void pca9685_scan_bus(void);
+uint8_t pca9685_get_board_count(void);
+uint8_t pca9685_get_board_addr(uint8_t index);
 
 #endif /* HEXAPOD_I2C_PROTOCOL_H */

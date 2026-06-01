@@ -19,6 +19,7 @@
 #include "hexapod_core.h"
 #include "hexapod_config.h"
 #include "hexapod_crsf.h"
+#include "hexapod_i2c_protocol.h"
 
 /* 全局机器人实例 */
 static hexapod_t g_robot;
@@ -92,12 +93,25 @@ static void debug_print_control(const control_state_t *s)
 }
 
 /**
- * @brief Level 3 调试：打印舵机输出统计
+ * @brief Level 3 调试：打印每腿 IK 解算角度
  */
-static void debug_print_servo_summary(void)
+static void debug_print_ik_angles(void)
 {
+    static const char* leg_name[CNT_LEGS] = {"RR","RM","RF","LR","LM","LF"};
+    hal_debug_printf("[DBG3] IK angles (Cox/Fem/Tib, 0.1deg):\r\n");
+    for (uint8_t i = 0; i < CNT_LEGS; i++) {
+        const ik_solution_t *ik = hexapod_get_last_ik(&g_robot, (leg_index_t)i);
+        if (ik) {
+            hal_debug_printf("  %s: %d %d %d %s%s\r\n",
+                        leg_name[i],
+                        ik->coxa_angle, ik->femur_angle, ik->tibia_angle,
+                        ik->solution_error ? "ERR " : "",
+                        ik->solution_warning ? "WARN" : "");
+        }
+    }
     uint8_t cnt = hal_debug_get_last_servo_count();
-    hal_debug_printf("[DBG3] Servos flushed: %u/18\r\n", cnt);
+    hal_debug_printf("[DBG3] Servos flushed: %u/%u\r\n", cnt,
+                pca9685_get_board_count() * 9);
 }
 
 /* ==================== 主函数 ==================== */
@@ -186,7 +200,7 @@ int main(void)
 
             /* Level 3: 舵机输出 */
             if (hal_debug_get_level() >= 3) {
-                debug_print_servo_summary();
+                debug_print_ik_angles();
             }
 
             /* 帧率统计 */

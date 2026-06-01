@@ -41,17 +41,20 @@ typedef struct {
 
 static servo_batch_t g_servo_batch;
 static uint8_t  g_last_servo_count = 0;      /* 上次 flush 的舵机数（调试用） */
+static bool     g_servo_available   = false; /* 舵机硬件是否可用 */
 
 bool hal_servo_init(void)
 {
     /* 清零舵机缓存 */
     memset(&g_servo_batch, 0, sizeof(g_servo_batch));
-    
+
     /* 初始化PCA9685（I2C初始化 + 两块PCA9685配置） */
     if (!pca9685_init()) {
+        g_servo_available = false;
         return false;
     }
-    
+
+    g_servo_available = true;
     return true;
 }
 
@@ -111,39 +114,32 @@ bool hal_servo_set_angles(const uint8_t *servo_ids,
  */
 void hal_servo_flush(void)
 {
+    if (!g_servo_available) { g_last_servo_count = 0; return; }
     if (g_servo_batch.count == 0) { g_last_servo_count = 0; return; }
 
     g_last_servo_count = g_servo_batch.count;  /* 记录调试信息 */
-    
-    /* 收集第一片PCA9685 (0x40) 的脉宽：舵机ID 0~8 */
-    uint16_t pulses_pca1[16] = {0};
-    bool has_pca1 = false;
-    for (uint8_t i = 0; i <= 8; i++) {
-        if (g_servo_batch.pending[i]) {
-            pulses_pca1[i] = g_servo_batch.pulses[i];
-            g_servo_batch.pending[i] = false;
-            has_pca1 = true;
+
+    uint8_t board_cnt = pca9685_get_board_count();
+
+    /* 处理每块 PCA9685 板：板 0→舵机 ID 0~8, 板 1→舵机 ID 9~17 */
+    for (uint8_t b = 0; b < board_cnt; b++) {
+        uint16_t pulses[16] = {0};
+        bool has_pending = false;
+        uint8_t id_start = (b == 0) ? 0 : 9;
+        uint8_t id_end   = (b == 0) ? 8 : 17;
+
+        for (uint8_t id = id_start; id <= id_end; id++) {
+            if (g_servo_batch.pending[id]) {
+                uint8_t ch = id - id_start;  /* 映射到 PCA9685 通道 0~8 */
+                pulses[ch] = g_servo_batch.pulses[id];
+                g_servo_batch.pending[id] = false;
+                has_pending = true;
+            }
         }
-    }
-    
-    /* 收集第二片PCA9685 (0x41) 的脉宽：舵机ID 9~17 */
-    uint16_t pulses_pca2[16] = {0};
-    bool has_pca2 = false;
-    for (uint8_t i = 9; i < 18; i++) {
-        if (g_servo_batch.pending[i]) {
-            uint8_t ch = i - 9;  // 映射到PCA9685通道0~8
-            pulses_pca2[ch] = g_servo_batch.pulses[i];
-            g_servo_batch.pending[i] = false;
-            has_pca2 = true;
+
+        if (has_pending) {
+            pca9685_write_all_channels(pca9685_get_board_addr(b), pulses, 16);
         }
-    }
-    
-    /* 批量写入（各1次I2C事务） */
-    if (has_pca1) {
-        pca9685_write_all_channels(PCA9685_ADDR_0x40, pulses_pca1, 16);
-    }
-    if (has_pca2) {
-        pca9685_write_all_channels(PCA9685_ADDR_0x41, pulses_pca2, 16);
     }
     
     g_servo_batch.count = 0;
@@ -152,7 +148,9 @@ void hal_servo_flush(void)
 void hal_servo_free_all(void)
 {
     memset(&g_servo_batch, 0, sizeof(g_servo_batch));
-    pca9685_free_all();
+    if (g_servo_available) {
+        pca9685_free_all();
+    }
 }
 
 bool hal_servo_is_movement_done(void)
@@ -323,43 +321,43 @@ bool hal_input_init(input_type_t type)
 
 /**
  * @brief 简单串口命令协议
- * 格式: !<CMD>[PARAM]\n
- *   !F 前进 | !B 后退 | !L 左移 | !R 右移
- *   !Q 左转 | !E 右转 | !S 停止
- *   !O 开关 | !G<n> 步态 | !U 高度+ | !D 高度- | !T 平衡
+ *
+ * 运动控制:
+ *   !F 前进  !B 后退  !L 左移  !R 右移  !Q 左转  !E 右转  !S 停止
+ * 状态控制:
+ *   !O 解锁/锁定  !G<n> 步态  !U/D 抬腿高度  !T 平衡  !V 调试等级
+ * 舵机直控 (排查硬件):
+ *   !P<id> <angle>   设置单个舵机 (例: !P0 900 → 舵机0 到90度)
+ *   !W<id>           舵机扫摆测试 (例: !W0 → 舵机0 来回扫摆)
+ *   !Z               所有舵机回中位 (900=90度)
+ *   !A               打印 18 路舵机当前角度
  */
+static int16_t parse_int(const uint8_t *buf, uint8_t start, uint8_t len)
+{
+    int16_t val = 0;
+    bool neg = false;
+    if (start < len && buf[start] == '-') { neg = true; start++; }
+    for (uint8_t i = start; i < len && buf[i] >= '0' && buf[i] <= '9'; i++) {
+        val = val * 10 + (buf[i] - '0');
+    }
+    return neg ? -val : val;
+}
+
 static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint8_t len)
 {
     if (len < 2 || buf[0] != '!') return false;
-    
+
     switch (buf[1]) {
-        case 'F':
-            ctrl_state->travel_length.x = 30;
-            ctrl_state->travel_length.z = 0;
-            ctrl_state->travel_length.y = 0;
-            break;
-        case 'B':
-            ctrl_state->travel_length.x = -30;
-            ctrl_state->travel_length.z = 0;
-            ctrl_state->travel_length.y = 0;
-            break;
-        case 'L':
-            ctrl_state->travel_length.z = 20;
-            break;
-        case 'R':
-            ctrl_state->travel_length.z = -20;
-            break;
-        case 'Q':
-            ctrl_state->travel_length.y = 30;
-            break;
-        case 'E':
-            ctrl_state->travel_length.y = -30;
-            break;
-        case 'S':
-            ctrl_state->travel_length.x = 0;
-            ctrl_state->travel_length.y = 0;
-            ctrl_state->travel_length.z = 0;
-            break;
+        /* ---- 运动控制 ---- */
+        case 'F': ctrl_state->travel_length.x = 30;  ctrl_state->travel_length.z = 0;  ctrl_state->travel_length.y = 0;  break;
+        case 'B': ctrl_state->travel_length.x = -30; ctrl_state->travel_length.z = 0;  ctrl_state->travel_length.y = 0;  break;
+        case 'L': ctrl_state->travel_length.z = 20;  break;
+        case 'R': ctrl_state->travel_length.z = -20; break;
+        case 'Q': ctrl_state->travel_length.y = 30;  break;
+        case 'E': ctrl_state->travel_length.y = -30; break;
+        case 'S': ctrl_state->travel_length.x = 0;   ctrl_state->travel_length.y = 0;   ctrl_state->travel_length.z = 0;  break;
+
+        /* ---- 状态控制 ---- */
         case 'O':
             ctrl_state->robot_on = !ctrl_state->robot_on;
             hal_debug_printf("Robot %s\r\n", ctrl_state->robot_on ? "ON" : "OFF");
@@ -371,30 +369,84 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
                 hal_debug_printf("Gait: %d\r\n", ctrl_state->gait_type);
             }
             break;
-        case 'U':
-            ctrl_state->leg_lift_height += 5;
-            if (ctrl_state->leg_lift_height > 100) ctrl_state->leg_lift_height = 100;
-            break;
-        case 'D':
-            ctrl_state->leg_lift_height -= 5;
-            if (ctrl_state->leg_lift_height < 20) ctrl_state->leg_lift_height = 20;
-            break;
-        case 'T':
-            ctrl_state->balance_mode = !ctrl_state->balance_mode;
-            hal_debug_printf("Balance: %d\r\n", ctrl_state->balance_mode);
-            break;
-        case 'V':
-            /* 切换调试等级: 0→1→2→3→0 */
-            {
-                uint8_t lvl = hal_debug_get_level();
-                lvl = (lvl + 1) % 4;
-                hal_debug_set_level(lvl);
+        case 'U': ctrl_state->leg_lift_height += 5; if (ctrl_state->leg_lift_height > 100) ctrl_state->leg_lift_height = 100; break;
+        case 'D': ctrl_state->leg_lift_height -= 5; if (ctrl_state->leg_lift_height < 20)  ctrl_state->leg_lift_height = 20;  break;
+        case 'T': ctrl_state->balance_mode = !ctrl_state->balance_mode; hal_debug_printf("Balance: %d\r\n", ctrl_state->balance_mode); break;
+        case 'V': { uint8_t lvl = hal_debug_get_level(); lvl = (lvl + 1) % 4; hal_debug_set_level(lvl); } break;
+
+        /* ---- 舵机直控 (硬件排查) ---- */
+        case 'P': {
+            /* !P<servo_id> <angle>  例: !P0 900  */
+            if (len < 5) { hal_debug_printf("Usage: !P<id> <angle>\r\n"); break; }
+            uint8_t sid = (uint8_t)parse_int(buf, 2, len);
+            /* 跳过 id 找到空格后的 angle */
+            uint8_t pos = 2; while (pos < len && buf[pos] != ' ') pos++;
+            int16_t ang = parse_int(buf, pos + 1, len);
+            if (sid < 18 && ang >= -1800 && ang <= 1800) {
+                /* 直接写入舵机，绕过 IK/步态 */
+                uint16_t pulse = pca9685_angle_to_pulse(ang);
+                uint8_t addr;
+                if (sid <= 8) addr = pca9685_get_board_addr(0);
+                else          addr = pca9685_get_board_addr(1);
+                if (addr) {
+                    pca9685_set_servo_pulse(sid, pulse);
+                    hal_debug_printf("Servo %u → angle %d (pulse %u us, addr 0x%02X)\r\n", sid, ang, pulse, addr);
+                } else {
+                    hal_debug_printf("Servo %u: board not present\r\n", sid);
+                }
+            } else {
+                hal_debug_printf("Invalid: id=%u angle=%d\r\n", sid, ang);
             }
             break;
+        }
+        case 'W': {
+            /* !W<servo_id> 扫摆测试 */
+            if (len < 3) { hal_debug_printf("Usage: !W<id>\r\n"); break; }
+            uint8_t sid = (uint8_t)parse_int(buf, 2, len);
+            if (sid >= 18) { hal_debug_printf("Invalid servo id\r\n"); break; }
+            hal_debug_printf("Sweep test servo %u: 300→1500→300\r\n", sid);
+            for (int16_t a = 300; a <= 1500; a += 50) {
+                pca9685_set_servo_pulse(sid, pca9685_angle_to_pulse(a));
+                sleep_ms(80);
+            }
+            for (int16_t a = 1500; a >= 300; a -= 50) {
+                pca9685_set_servo_pulse(sid, pca9685_angle_to_pulse(a));
+                sleep_ms(80);
+            }
+            pca9685_set_servo_pulse(sid, pca9685_angle_to_pulse(0));
+            hal_debug_printf("Sweep test done\r\n");
+            break;
+        }
+        case 'Z': {
+            /* 所有舵机回中位 (900 = 90°) */
+            hal_debug_printf("All servos → 90° (900)\r\n");
+            uint16_t pulse = pca9685_angle_to_pulse(900);
+            for (uint8_t i = 0; i < 18; i++) {
+                pca9685_set_servo_pulse(i, pulse);
+            }
+            break;
+        }
+        case 'A': {
+            /* 打印所有舵机当前角度（从 servo batch 缓存读取） */
+            hal_debug_printf("=== Servo Snapshot ===\r\n");
+            hal_debug_printf("Board 0 (0x%02X): ", pca9685_get_board_addr(0));
+            for (uint8_t i = 0; i <= 8; i++) {
+                hal_debug_printf("[%u]:%d ", i, g_servo_batch.angles[i]);
+            }
+            hal_debug_printf("\r\n");
+            if (pca9685_get_board_count() >= 2) {
+                hal_debug_printf("Board 1 (0x%02X): ", pca9685_get_board_addr(1));
+                for (uint8_t i = 9; i < 18; i++) {
+                    hal_debug_printf("[%u]:%d ", i, g_servo_batch.angles[i]);
+                }
+                hal_debug_printf("\r\n");
+            }
+            break;
+        }
         default:
             return false;
     }
-    
+
     return true;
 }
 

@@ -15,6 +15,7 @@
  *   通道8 (SWD) → 平衡模式
  */
 
+#include "hexapod_config.h"
 #include "hexapod_crsf.h"
 #include "hexapod_gait.h"
 #include <string.h>

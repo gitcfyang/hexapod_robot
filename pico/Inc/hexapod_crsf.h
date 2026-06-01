@@ -31,15 +31,31 @@
 #define CRSF_FRAMETYPE_LINK_STATISTICS       0x14
 #define CRSF_FRAMETYPE_DEVICE_INFO           0x29
 
-/* RC 通道映射 */
-#define CRSF_CHANNEL_FORWARD      0   // 通道1: 前后 (左摇杆Y)
-#define CRSF_CHANNEL_STRAFE       1   // 通道2: 左右平移 (左摇杆X)
-#define CRSF_CHANNEL_TURN         3   // 通道4: 旋转 (右摇杆X)
-#define CRSF_CHANNEL_HEIGHT       2   // 通道3: 升降 (右摇杆Y)
-#define CRSF_CHANNEL_ARM          4   // 通道5: 解锁/上电
-#define CRSF_CHANNEL_GAIT         5   // 通道6: 步态切换
-#define CRSF_CHANNEL_SPEED        6   // 通道7: 速度控制
-#define CRSF_CHANNEL_BALANCE      7   // 通道8: 平衡模式
+/* RC 通道映射 — 默认值（可被 hexapod_config.h 覆盖） */
+#ifndef CRSF_CHANNEL_FORWARD
+#define CRSF_CHANNEL_FORWARD      0   // 前后
+#endif
+#ifndef CRSF_CHANNEL_STRAFE
+#define CRSF_CHANNEL_STRAFE       1   // 左右平移
+#endif
+#ifndef CRSF_CHANNEL_TURN
+#define CRSF_CHANNEL_TURN         3   // 旋转
+#endif
+#ifndef CRSF_CHANNEL_HEIGHT
+#define CRSF_CHANNEL_HEIGHT       2   // 升降
+#endif
+#ifndef CRSF_CHANNEL_ARM
+#define CRSF_CHANNEL_ARM          4   // 解锁/上电
+#endif
+#ifndef CRSF_CHANNEL_GAIT
+#define CRSF_CHANNEL_GAIT         5   // 步态切换
+#endif
+#ifndef CRSF_CHANNEL_SPEED
+#define CRSF_CHANNEL_SPEED        6   // 速度控制
+#endif
+#ifndef CRSF_CHANNEL_BALANCE
+#define CRSF_CHANNEL_BALANCE      7   // 平衡模式
+#endif
 
 /* CRSF 通道值范围（PWM us 等效值） */
 #define CRSF_CH_VALUE_MIN         172
