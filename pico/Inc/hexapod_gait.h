@@ -32,17 +32,20 @@ void hexapod_gait_init(void);
 void hexapod_gait_select(gait_type_t gait_type, control_state_t *ctrl_state);
 
 /**
- * @brief 步态序列更新
+ * @brief 步态序列更新（支持子步态插值）
  * @param ctrl_state 控制状态
  * @param leg_index 腿索引
  * @param leg_pos 输出：腿部位置
  * @param lift_height 输出：当前抬腿高度
+ * @param gait_sub_phase 子步态相位 0-99 (0=步态步起点, 99=即将进入下一步)
+ *                        传 0 等效于旧版无插值行为
  * @return true表示该腿正在抬起，false表示在地面
  */
 bool hexapod_gait_sequence(const control_state_t *ctrl_state,
                           leg_index_t leg_index,
                           coord3d_t *leg_pos,
-                          int16_t *lift_height);
+                          int16_t *lift_height,
+                          int16_t gait_sub_phase);
 
 /**
  * @brief 获取预定义步态

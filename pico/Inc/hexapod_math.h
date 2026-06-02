@@ -55,13 +55,4 @@ uint32_t hexapod_sqrt(uint32_t value);
  */
 int16_t hexapod_atan4(int32_t y, int32_t x);
 
-/**
- * @brief 平滑控制函数
- * @param ctrl_input 输入控制值
- * @param ctrl_output 输出控制值
- * @param divider 除数因子
- * @return 平滑后的控制值
- */
-int16_t smooth_control(int16_t ctrl_input, int16_t ctrl_output, uint8_t divider);
-
 #endif /* HEXAPOD_MATH_H */

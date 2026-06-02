@@ -157,18 +157,35 @@
 
 /* ---- CRSF 摇杆→控制量 缩放参数 ----
  * 摇杆范围 -500~+500, 映射到实际运动参数 */
-#define TRAVEL_MAX_FORWARD_MM   100     /* 满杆前进/后退步长 (mm) */
-#define TRAVEL_MAX_STRAFE_MM    80      /* 满杆平移步长 (mm) */
-#define TRAVEL_MAX_TURN_MM      60      /* 满杆旋转步长 (mm) */
-#define LIFT_SPEED_MM_PER_TICK  3       /* 升降速度 (mm/周期), 油门杆用 */
-#define LIFT_HEIGHT_MIN_MM      20      /* 最低抬腿高度 (mm) */
-#define LIFT_HEIGHT_MAX_MM      150     /* 最高抬腿高度 (mm) */
+#define TRAVEL_MAX_FORWARD_MM   120     /* 满杆步长 (mm)，约体长1/3 */
+#define TRAVEL_MAX_STRAFE_MM     60     /* 满杆平移步长 (mm) */
+#define TRAVEL_MAX_TURN_MM       45     /* 满杆旋转步长 (mm) */
+#define LIFT_SPEED_MM_PER_TICK   3      /* 升降速度 (mm/周期), 油门杆用 */
+#define LIFT_HEIGHT_MIN_MM      10      /* 最低抬腿高度 (mm) */
+#define LIFT_HEIGHT_MAX_MM      100     /* 最高抬腿高度 (mm) */
 
-/* ---- 速度档位 (CH7 三段开关) ----
- * 通过改变步态推进间隔实现变速 */
-#define SPEED_SLOW_MS           90      /* 低速: 步态推进间隔 ms */
-#define SPEED_NORMAL_MS         60      /* 中速: 步态推进间隔 ms */
-#define SPEED_FAST_MS           35      /* 高速: 步态推进间隔 ms */
+/* ---- 仿生连续变速 ----
+ *
+ * 六足虫行走时靠改变迈腿频率调速，而非改变步长。
+ * 摇杆推得越多 → 步态周期越短（频率越高）。
+ *
+ *   period = PERIOD_MAX - (MAX-MIN) × stick_magnitude / 500
+ *
+ *   摇杆微动 (~10%):  period ≈ 175ms → 12×175=2100ms/周期 ≈ 0.48 Hz (慢走)
+ *   摇杆半量 (~50%):  period ≈ 125ms → 12×125=1500ms/周期 ≈ 0.67 Hz (常步)
+ *   摇杆满量 (100%):  period ≈  70ms → 12×70= 840ms/周期 ≈ 1.19 Hz (快走)
+ *
+ * 注意: 步长 (travel_length) 也随摇杆线性变化。
+ *       低摇杆 = 短步长 + 低频率 → 精细缓动
+ *       高摇杆 = 大步长 + 高频率 → 快速行进
+ *       两者叠加产生自然的加速度曲线。 */
+#define GAIT_PERIOD_MAX_MS      180    /* 微动: 最慢步频 */
+#define GAIT_PERIOD_MIN_MS       70    /* 满杆: 最快步频 */
+
+/* CH7 保留为频率范围倍率 (可选)
+ * 设为 0 禁用 CH7 开关, 始终使用连续变速。
+ * 设为 1 则 CH7 三档分别缩放 GAIT_PERIOD_MIN/MAX。 */
+#define SPEED_SWITCH_ENABLED     0
 
 /* ---- 腿基座在机身上的安装位置 ----
  *
@@ -226,13 +243,22 @@
  */
 /* 足端方向 = 舵机0°时 coxa 的指向:
  *   RR=135°(后右) RM=90°(正右) RF=45°(前右)
- *   LR=-135°(后左) LM=-90°(正左) LF=-45°(前左) */
+ *   LR=-135°(后左) LM=-90°(正左) LF=-45°(前左)
+ *
+ * 这些角度由硬件机械结构决定，不可随意修改。
+ * COXA_ANGLE 使 atan4(init_foot) - COXA_ANGLE = 0，即站立时 coxa=0°。 */
 #define COXA_ANGLE_RR       1350    /* 右后: 135° 后方偏右 */
 #define COXA_ANGLE_RM       900     /* 右中:  90° 正右方 */
 #define COXA_ANGLE_RF       450     /* 右前:  45° 前方偏右 */
 #define COXA_ANGLE_LR       -1350   /* 左后: -135° 后方偏左 */
 #define COXA_ANGLE_LM       -900    /* 左中:  -90° 正左方 */
 #define COXA_ANGLE_LF       -450    /* 左前:  -45° 前方偏左 */
+
+/* 前进方向取反开关
+ * 如果推摇杆前进时机体后退，设为 1 翻转前进/后退方向。
+ * 原因：某些遥控器的 CH2 (Pitch) 输出极性相反 (拉杆=高位, 推杆=低位)。
+ * 不要通过翻转 coxa_invert 来修正方向——那会同时破坏转动方向。 */
+#define FORWARD_DIRECTION_INVERT   0
 
 /* ---- 初始足端位置 (站立时足端在腿基座坐标系中的坐标) ----
  *
@@ -283,7 +309,12 @@
 #define FOOT_REACH           110     /* 站立: coxa基座→足端水平距离 */
 #define INIT_Y               80      /* 站立: coxa基座→足端下深度 */
 
-/* 足端方向角度 (舵机0°时 coxa 指向, 休息和站立共用) */
+/* 足端在 coxa 基座坐标系中的位置 (站立时)
+ *
+ * 由 FOOT_REACH(110mm) 和设计出射角 (RR=135°, RM=90°, RF=45°) 计算:
+ *   DX = FOOT_REACH × cos(angle)
+ *   DZ = FOOT_REACH × sin(angle)
+ * 这些值由硬件结构决定，与 COXA_ANGLE 配套使用。 */
 #define FOOT_DX_RR     -78     /* RR: 110×cos135° */
 #define FOOT_DZ_RR      78     /* RR: 110×sin135° */
 
@@ -477,7 +508,7 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RR].tibia_max = SERVO_TIBIA_MAX_RR;
     configs[LEG_RR].coxa_invert = true;
     configs[LEG_RR].femur_invert = true;
-    configs[LEG_RR].tibia_invert = true;
+    configs[LEG_RR].tibia_invert = false;
     configs[LEG_RR].coxa_horn_offset = 0;
     configs[LEG_RR].femur_horn_offset = 0;
     configs[LEG_RR].tibia_horn_offset = 0;
@@ -503,7 +534,7 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RM].tibia_max = SERVO_TIBIA_MAX_RM;
     configs[LEG_RM].coxa_invert = true;
     configs[LEG_RM].femur_invert = true;
-    configs[LEG_RM].tibia_invert = true;
+    configs[LEG_RM].tibia_invert = false;
     configs[LEG_RM].coxa_horn_offset = 0;
     configs[LEG_RM].femur_horn_offset = 0;
     configs[LEG_RM].tibia_horn_offset = 0;
@@ -529,7 +560,7 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RF].tibia_max = SERVO_TIBIA_MAX_RF;
     configs[LEG_RF].coxa_invert = true;
     configs[LEG_RF].femur_invert = true;
-    configs[LEG_RF].tibia_invert = true;
+    configs[LEG_RF].tibia_invert = false;
     configs[LEG_RF].coxa_horn_offset = 0;
     configs[LEG_RF].femur_horn_offset = 0;
     configs[LEG_RF].tibia_horn_offset = 0;

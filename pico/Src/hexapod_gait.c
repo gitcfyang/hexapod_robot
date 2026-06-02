@@ -16,12 +16,15 @@
  *   例如 RIPPLE_12: 12 步 = 3 抬腿 + 8 地面 + 1 过渡步。
  */
 static const gait_t gait_table[GAIT_MAX] = {
-    /* GAIT_RIPPLE_12 - 波纹步态12步
-     *   3 抬腿步 + 8 地面步 + 1 过渡步 = 12 */
+    /* GAIT_RIPPLE_12 - 波纹步态12步 (仿生优化版)
+     *   4 抬腿步 + 8 地面步 = 12
+     *   抬腿:支撑速度比 = (120/4):(120/8) = 2:1 (原 2.67:1)
+     *   占空比 = 8/12 = 67% (脚 67% 时间着地)
+     *   抬腿多 1 步 → 足端空中轨迹更平滑、速度更接近支撑速度 */
     {
         .nom_gait_speed = 100,
         .steps_in_gait = 12,
-        .nr_lifted_pos = 3,
+        .nr_lifted_pos = 4,
         .front_down_pos = 2,
         .lift_div_factor = 2,
         .tl_div_factor = 8,
@@ -160,70 +163,93 @@ bool hexapod_gait_get_leg_position(const control_state_t *ctrl_state,
 }
 
 /**
- * @brief 步态序列计算
+ * @brief 步态序列计算（子步态插值版）
+ *
+ * 原理：旧版用整数 gait_step 计算位置，每个步态步（如 60ms）内
+ * 舵机刷新 3 次（20ms×3）都输出相同角度，形成台阶式跳动。
+ * 新版用 gait_sub_phase（0-99）线性细分每个步态步，使 12 步态
+ * 变成 12×100 = 1200 个微位置，消除跳变。
+ *
+ * 精度：1 gait step = 100 sub-units，所有计算用 int32_t 避免溢出。
  */
 bool hexapod_gait_sequence(const control_state_t *ctrl_state,
                           leg_index_t leg_index,
                           coord3d_t *leg_pos,
-                          int16_t *lift_height)
+                          int16_t *lift_height,
+                          int16_t gait_sub_phase)
 {
     if (!ctrl_state || !leg_pos || !lift_height || leg_index >= CNT_LEGS) {
         return false;
     }
-    
-    uint8_t gait_pos;
-    bool is_lifting = hexapod_gait_get_leg_position(ctrl_state, leg_index, &gait_pos);
-    
+
     const gait_t *gait = &ctrl_state->gait_cur;
-    
+
+    /* ---- 计算该腿在当前步态周期中的连续相位 ----
+     * leg_phase ∈ [0, steps_in_gait * 100)，1 step = 100 units */
+    int32_t total_phase = (int32_t)ctrl_state->gait_step * 100 + (int32_t)gait_sub_phase;
+    int32_t leg_offset  = (int32_t)gait->gait_leg_nr[leg_index] * 100;
+    int32_t leg_phase   = total_phase - leg_offset;
+
+    int32_t cycle_len = (int32_t)gait->steps_in_gait * 100;
+    while (leg_phase < 0)         leg_phase += cycle_len;
+    while (leg_phase >= cycle_len) leg_phase -= cycle_len;
+
+    bool is_lifting = (leg_phase < (int32_t)gait->nr_lifted_pos * 100);
+
     if (is_lifting) {
-        /* ---- 抬腿阶段 ----
-           抛物线轨迹：从0上升到最高点再下降到0
-           nr_lifted_pos 表示抬腿占用的步数
-           使用对称的抛物线高度计算 */
-        
-        /* 计算抛物线抬腿高度 */
-        /* 映射到对称范围，计算抛物线 y = 1 - t^2/nr^2
-           t从 -(nr-1) 到 +(nr-1)，避免首尾为0导致拖地 */
-        int16_t nr = (int16_t)gait->nr_lifted_pos;
-        int16_t t = (int16_t)gait_pos * 2 - (nr - 1);  // 范围 [-(nr-1), +(nr-1)]
-        int16_t t_sq = (t * t * 100) / (nr * nr);
-        
-        /* 抛物线高度: h = leg_lift_height * (100 - t_sq%) / 100 */
-        *lift_height = (ctrl_state->leg_lift_height * (100 - t_sq)) / 100;
-        if (*lift_height < 0) *lift_height = 0;
-        
-        /* 计算X-Z平面的运动（足端在抬起时从后向前移动） */
-        int16_t lift_phase = (int16_t)gait_pos - (nr / 2);  // 中心对齐
-        
-        int32_t travel_x = (ctrl_state->travel_length.x * lift_phase) / (int16_t)gait->nr_lifted_pos;
-        int32_t travel_z = (ctrl_state->travel_length.z * lift_phase) / (int16_t)gait->nr_lifted_pos;
-        
+        /* ---- 抬腿阶段：0→峰值→0 二次曲线 ----
+         *
+         * 旧抛物线 1-(t/nr)² 在首尾有 44-55% 的残余高度，
+         * 导致足端凭空"弹起"再"砸下"。
+         * 改用 h ∝ 4·x·(1-x) 二次型，x∈[0,1)：
+         *   h(0)=0, h(0.5)=max, h(1)→0
+         * 足端从地面平滑升起，到中点达最高，再平滑落回地面。
+         *
+         * X-Z 扫掠：线性（抬腿 3 步扫过全位移，约为支撑 8 步的 2.7× 速度）。
+         * 速度差是少步抬腿的固有特性；方向反转由"支撑向后 / 抬腿向前"决定。 */
+        int32_t nr         = (int32_t)gait->nr_lifted_pos;
+        int32_t nr_scaled  = nr * 100;                    /* 抬腿阶段总 sub-unit 数 */
+
+        /* 高度: h_pct = 400 * leg_phase * (nr_scaled - leg_phase) / (nr² * 100)
+         *        = 4 * leg_phase * (nr_scaled - leg_phase) / (nr² * 100)  ... 简化 */
+        int32_t h_pct = (4 * leg_phase * (nr_scaled - leg_phase)) / (nr * nr * 100);
+        if (h_pct > 100) h_pct = 100;
+        if (h_pct < 0)   h_pct = 0;
+
+        *lift_height = (ctrl_state->leg_lift_height * h_pct) / 100;
+
+        /* X-Z 位移：以抬腿中点为 0，足端从后向前线性扫 */
+        int32_t lift_phase = leg_phase - nr_scaled / 2;
+        int32_t travel_x = (ctrl_state->travel_length.x * lift_phase) / nr_scaled;
+        int32_t travel_z = (ctrl_state->travel_length.z * lift_phase) / nr_scaled;
+
         leg_pos->x = travel_x;
         leg_pos->z = travel_z;
-        /* Y轴约定：Y正=机身向上方向
-         * 抬腿时足端向上移动（靠近机身），所以y取负值
-         * 支撑阶段足端在地面，y=0 */
         leg_pos->y = -(*lift_height);
-        
+
         return true;
-    } 
-    else {
-        /* 地面支撑阶段 */
+    } else {
+        /* ---- 地面支撑阶段：足端从前向后扫 ----
+         *
+         * 支撑时脚着地，身体向前移动 → 脚相对身体向后滑动。
+         * 所以 travel_x 应从正(前)到负(后)，与抬腿方向相反。
+         * 取反 ground_centered 使位移方向正确：
+         *   start → foot forward (+X), end → foot backward (-X) */
         *lift_height = 0;
-        
-        /* 撑地阶段足端从前向后移动（与抬腿方向相反） */
-        int16_t ground_pos = (int16_t)gait_pos - (int16_t)gait->nr_lifted_pos;
-        int16_t half_tl = gait->tl_div_factor / 2;
-        int16_t ground_phase = ground_pos - half_tl;
-        
-        int32_t travel_x = (ctrl_state->travel_length.x * ground_phase) / (int16_t)gait->tl_div_factor;
-        int32_t travel_z = (ctrl_state->travel_length.z * ground_phase) / (int16_t)gait->tl_div_factor;
-        
+
+        int32_t ground_phase = leg_phase - (int32_t)gait->nr_lifted_pos * 100;
+        int32_t half_tl = (int32_t)gait->tl_div_factor * 50;    /* *100/2 */
+        int32_t ground_centered = ground_phase - half_tl;
+
+        int32_t div = (int32_t)gait->tl_div_factor * 100;
+        /* 取反: 支撑位移与抬腿位移方向相反 */
+        int32_t travel_x = -(ctrl_state->travel_length.x * ground_centered) / div;
+        int32_t travel_z = -(ctrl_state->travel_length.z * ground_centered) / div;
+
         leg_pos->x = travel_x;
         leg_pos->z = travel_z;
         leg_pos->y = 0;
-        
+
         return false;
     }
 }

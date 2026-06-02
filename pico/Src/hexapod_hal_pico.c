@@ -237,6 +237,129 @@ static bool g_crsf_mode = false;           // true=CRSF模式, false=串口命�
 static uint32_t g_last_crsf_frame_ms = 0;  // 最后CRSF帧时间
 static uint32_t g_last_crsf_frame_count = 0; // 上次查询时的帧计数（调试用）
 
+/* ==================== 舵机校准模式 ==================== */
+static bool     g_calib_active = false;
+static uint8_t  g_calib_servo = 0;
+static int16_t  g_calib_angle = 900;
+static int16_t  g_calib_best[18];
+static bool     g_calib_done[18];
+
+static const char *g_calib_leg_name[6]   = {"RR","RM","RF","LR","LM","LF"};
+static const char *g_calib_joint_name[3] = {"coxa","femur","tibia"};
+
+/* 将当前校准角度写入选中舵机 */
+static void calib_apply(void)
+{
+    uint16_t pulse = pca9685_angle_to_pulse(g_calib_angle);
+    pca9685_set_servo_pulse(g_calib_servo, pulse);
+}
+
+/* 打印当前校准状态 */
+static void calib_print_status(void)
+{
+    uint8_t leg   = g_calib_servo / 3;
+    uint8_t joint = g_calib_servo % 3;
+    hal_debug_printf("[CAL] Servo %u (%s %s) angle=%d | "
+                     "!+/- fine !++/-- coarse !N next !S save !D dump !Q quit\r\n",
+                     g_calib_servo, g_calib_leg_name[leg],
+                     g_calib_joint_name[joint], g_calib_angle);
+}
+
+/* 进入校准模式 */
+static void calib_enter(uint8_t start_servo, control_state_t *ctrl_state)
+{
+    if (ctrl_state) ctrl_state->robot_on = false;
+
+    memset(g_calib_best, 0, sizeof(g_calib_best));
+    memset(g_calib_done, 0, sizeof(g_calib_done));
+
+    g_calib_active = true;
+    g_calib_servo  = (start_servo < 18) ? start_servo : 0;
+    g_calib_angle  = 900;
+
+    /* 所有舵机回中位 */
+    uint16_t pulse = pca9685_angle_to_pulse(900);
+    for (uint8_t i = 0; i < 18; i++) {
+        pca9685_set_servo_pulse(i, pulse);
+    }
+
+    hal_debug_printf("\r\n");
+    hal_debug_printf("╔══════════════════════════════╗\r\n");
+    hal_debug_printf("║   SERVO CALIBRATION MODE    ║\r\n");
+    hal_debug_printf("║   !Q quit  !D dump offsets  ║\r\n");
+    hal_debug_printf("╚══════════════════════════════╝\r\n");
+    calib_print_status();
+}
+
+/* 保存当前舵机的最佳角度 */
+static void calib_save(void)
+{
+    g_calib_best[g_calib_servo]  = g_calib_angle;
+    g_calib_done[g_calib_servo]  = true;
+
+    int16_t offset = g_calib_angle - 900;
+    uint8_t leg   = g_calib_servo / 3;
+    uint8_t joint = g_calib_servo % 3;
+    hal_debug_printf("[CAL] ✓ Saved: %s %s best=%d → horn_offset=%d\r\n",
+                     g_calib_leg_name[leg], g_calib_joint_name[joint],
+                     g_calib_angle, offset);
+}
+
+/* 保存并切换到下一个舵机 */
+static void calib_next(void)
+{
+    calib_save();
+
+    if (g_calib_servo < 17) {
+        g_calib_servo++;
+        g_calib_angle = 900;
+        calib_apply();
+    } else {
+        hal_debug_printf("[CAL] ★ All 18 servos cycled! Use !D to dump, !Q to quit.\r\n");
+    }
+    calib_print_status();
+}
+
+/* 打印所有校准结果（可直接复制到 hexapod_config.h） */
+static void calib_dump(void)
+{
+    uint8_t done_cnt = 0;
+    for (uint8_t i = 0; i < 18; i++) { if (g_calib_done[i]) done_cnt++; }
+
+    hal_debug_printf("\r\n");
+    hal_debug_printf("╔══════════════════════════════════════╗\r\n");
+    hal_debug_printf("║  HORN OFFSET RESULTS (%u/18 done)    ║\r\n", done_cnt);
+    hal_debug_printf("║  Copy into hexapod_config.h          ║\r\n");
+    hal_debug_printf("╚══════════════════════════════════════╝\r\n");
+
+    for (uint8_t leg = 0; leg < 6; leg++) {
+        hal_debug_printf("\r\n  /* %s leg */\r\n", g_calib_leg_name[leg]);
+        for (uint8_t j = 0; j < 3; j++) {
+            uint8_t id = leg * 3 + j;
+            int16_t offset = g_calib_best[id] - 900;
+            char marker = g_calib_done[id] ? ' ' : '?';  /* ? = 未校准 */
+            hal_debug_printf("  configs[LEG_%s].%s_horn_offset = %d;%c\r\n",
+                             g_calib_leg_name[leg], g_calib_joint_name[j],
+                             offset, marker);
+        }
+    }
+    hal_debug_printf("\r\n");
+}
+
+/* 退出校准模式 */
+static void calib_quit(void)
+{
+    calib_dump();
+
+    uint16_t pulse = pca9685_angle_to_pulse(900);
+    for (uint8_t i = 0; i < 18; i++) {
+        pca9685_set_servo_pulse(i, pulse);
+    }
+
+    g_calib_active = false;
+    hal_debug_printf("[CAL] Calibration exited. All servos → 900.\r\n");
+}
+
 static void input_uart_irq_handler(void)
 {
     while (uart_is_readable(INPUT_UART_ID)) {
@@ -320,12 +443,18 @@ bool hal_input_init(input_type_t type)
 }
 
 /**
- * @brief 简单串口命令协议
+ * @brief 简单串口命令协议 (USB CDC + UART1 双通道)
+ *
+ * 通过 Pico USB 虚拟串口 (CDC) 直接发送命令，无需额外硬件。
+ * USB CDC 命令在 CRSF 和串口命令两种输入模式下均可用。
  *
  * 运动控制:
  *   !F 前进  !B 后退  !L 左移  !R 右移  !Q 左转  !E 右转  !S 停止
  * 状态控制:
  *   !O 解锁/锁定  !G<n> 步态  !U/D 抬腿高度  !T 平衡  !V 调试等级
+ * 舵机校准:
+ *   !C[<id>] 进入校准模式  !+/- 精调  !++/-- 粗调
+ *   !N 保存+下一个  !S 保存  !D dump offset  !Q 退出校准
  * 舵机直控 (排查硬件):
  *   !P<id> <angle>   设置单个舵机 (例: !P0 900 → 舵机0 到90度)
  *   !W<id>           舵机扫摆测试 (例: !W0 → 舵机0 来回扫摆)
@@ -343,9 +472,86 @@ static int16_t parse_int(const uint8_t *buf, uint8_t start, uint8_t len)
     return neg ? -val : val;
 }
 
+/**
+ * @brief 处理校准模式下的按键命令
+ * @return true 表示命令被校准模式消费
+ */
+static bool calib_handle_command(uint8_t *buf, uint8_t len)
+{
+    switch (buf[1]) {
+        case '+':
+            if (len >= 3 && buf[2] == '+') {
+                /* !++ 大步进 +20 (2°) */
+                g_calib_angle += 20;
+            } else {
+                /* !+ 小步进 +5 (0.5°) */
+                g_calib_angle += 5;
+            }
+            if (g_calib_angle >  1800) g_calib_angle =  1800;
+            calib_apply();
+            calib_print_status();
+            return true;
+
+        case '-':
+            if (len >= 3 && buf[2] == '-') {
+                /* !-- 大步进 -20 (2°) */
+                g_calib_angle -= 20;
+            } else {
+                /* !- 小步进 -5 (0.5°) */
+                g_calib_angle -= 5;
+            }
+            if (g_calib_angle < -1800) g_calib_angle = -1800;
+            calib_apply();
+            calib_print_status();
+            return true;
+
+        case 'N': case 'n':
+            calib_next();
+            return true;
+
+        case 'S': case 's':
+            calib_save();
+            calib_print_status();
+            return true;
+
+        case 'D': case 'd':
+            calib_dump();
+            return true;
+
+        case 'Q': case 'q':
+            calib_quit();
+            return true;
+
+        case 'C': case 'c':
+            /* !C 或 !C<id> — 重新选择起始舵机 */
+            {
+                uint8_t sid = (len >= 3) ? (uint8_t)parse_int(buf, 2, len) : g_calib_servo;
+                calib_enter(sid, NULL);
+            }
+            return true;
+
+        default:
+            /* 校准模式下忽略其他命令 */
+            hal_debug_printf("[CAL] Unknown. Use: !+ !- !++ !-- !N !S !D !Q\r\n");
+            return true;
+    }
+}
+
 static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint8_t len)
 {
     if (len < 2 || buf[0] != '!') return false;
+
+    /* ---- 校准模式命令路由 ---- */
+    if (g_calib_active) {
+        return calib_handle_command(buf, len);
+    }
+
+    /* ---- 进入校准模式 (!C 或 !C<id>) ---- */
+    if (buf[1] == 'C' || buf[1] == 'c') {
+        uint8_t sid = (len >= 3) ? (uint8_t)parse_int(buf, 2, len) : 0;
+        calib_enter(sid, ctrl_state);
+        return true;
+    }
 
     switch (buf[1]) {
         /* ---- 运动控制 ---- */
@@ -453,11 +659,33 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
 bool hal_input_update(control_state_t *ctrl_state)
 {
     if (!ctrl_state) return false;
-    
+
+    /* ---- USB CDC 串口命令 (始终可用，独立于输入模式) ----
+     * 通过 Pico 的 USB 虚拟串口接收命令，无需额外硬件。
+     * 非阻塞轮询：getchar_timeout_us(0) 无数据立即返回。
+     * 无论在 CRSF 还是串口命令模式下，USB 命令都可用。 */
+    {
+        static uint8_t usb_buf[16];
+        static uint8_t usb_len = 0;
+
+        int ch = getchar_timeout_us(0);
+        while (ch != PICO_ERROR_TIMEOUT) {
+            if (ch == '\n' || ch == '\r') {
+                if (usb_len > 0) {
+                    parse_serial_command(ctrl_state, usb_buf, usb_len);
+                    usb_len = 0;
+                }
+            } else if (usb_len < sizeof(usb_buf)) {
+                usb_buf[usb_len++] = (uint8_t)ch;
+            }
+            ch = getchar_timeout_us(0);
+        }
+    }
+
     if (g_crsf_mode) {
         /* ========== CRSF 模式 ========== */
         uint32_t now = hal_get_tick_ms();
-        
+
         /* 检查是否有新帧 - 使用 last_frame_time_ms 检测 */
         uint32_t last_frame_time = g_crsf_state.last_frame_time_ms;
         if (last_frame_time != g_last_crsf_frame_ms) {
@@ -470,7 +698,7 @@ bool hal_input_update(control_state_t *ctrl_state)
                 return true;
             }
         }
-        
+
         /* 链接断开处理：如果超过200ms无数据，自动停止 */
         if (g_last_crsf_frame_ms > 0 && (now - g_last_crsf_frame_ms > 200)) {
             if (ctrl_state->robot_on) {
@@ -479,7 +707,7 @@ bool hal_input_update(control_state_t *ctrl_state)
                 ctrl_state->travel_length.z = 0;
             }
         }
-        
+
         return false;
     } else {
         /* ========== 串口命令模式 ========== */
@@ -634,4 +862,11 @@ uint32_t hal_debug_get_crsf_frame_delta(void)
 uint8_t hal_debug_get_last_servo_count(void)
 {
     return g_last_servo_count;
+}
+
+/* ==================== 校准模式接口 ==================== */
+
+bool hal_is_calibration_active(void)
+{
+    return g_calib_active;
 }

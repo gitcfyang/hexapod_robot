@@ -251,21 +251,3 @@ int16_t hexapod_atan4(int32_t y, int32_t x)
     
     return angle;
 }
-
-/**
- * @brief 平滑控制函数
- */
-int16_t smooth_control(int16_t ctrl_input, int16_t ctrl_output, uint8_t divider)
-{
-    if (divider == 0) divider = 1;
-    
-    int16_t delta = ctrl_input - ctrl_output;
-    int16_t step = delta / divider;
-    
-    /* 确保至少有一些移动 */
-    if (delta != 0 && step == 0) {
-        step = (delta > 0) ? 1 : -1;
-    }
-    
-    return ctrl_output + step;
-}

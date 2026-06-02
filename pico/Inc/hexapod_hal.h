@@ -203,4 +203,10 @@ void hal_debug_set_level(uint8_t level);
  */
 uint8_t hal_debug_get_level(void);
 
+/**
+ * @brief 查询舵机校准模式是否激活
+ * @return true 表示校准模式激活中（主循环应跳过 servo flush）
+ */
+bool hal_is_calibration_active(void);
+
 #endif /* HEXAPOD_HAL_H */

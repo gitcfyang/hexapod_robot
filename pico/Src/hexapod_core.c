@@ -9,8 +9,8 @@
 #include <string.h>
 
 /* 静态函数声明 */
-static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index);
-static void update_servos(hexapod_t *robot);
+static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index, int16_t gait_sub_phase);
+static void update_servos(hexapod_t *robot, int16_t gait_sub_phase);
 
 /* 调试：缓存最近一次 IK 解算结果 */
 static ik_solution_t g_debug_ik[CNT_LEGS];
@@ -175,23 +175,34 @@ const ik_solution_t* hexapod_get_last_ik(const hexapod_t *robot, leg_index_t leg
 /**
  * @brief 计算单腿逆运动学
  */
-static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index)
+static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index, int16_t gait_sub_phase)
 {
     if (!robot || leg_index >= CNT_LEGS) return;
 
     /* 获取步态序列位置
-     * 平衡模式下跳过步态序列：所有腿保持在 init_pos 站立位置，
-     * 仅通过 body_rot 和 body_pos 调整姿态 */
+     *
+     * 站立条件: balance_mode 开启时，或正常模式下 travel 为零。
+     * 此时所有腿保持在 init_pos 位置，不产生步态偏移 (抬腿/支撑)。
+     * 仅通过 body_rot 和 body_pos 调整姿态。
+     *
+     * 行走条件: 有非零 travel_length，
+     *   走步态序列 (抬腿抛物线 / 支撑滑动)。
+     *   gait_sub_phase 提供步态步内的连续细分 (0-99)。 */
     coord3d_t gait_pos;
     int16_t lift_height;
 
-    if (robot->state.balance_mode) {
+    bool stand_still = robot->state.balance_mode ||
+                       ((robot->state.travel_length.x == 0) &&
+                        (robot->state.travel_length.y == 0) &&
+                        (robot->state.travel_length.z == 0));
+
+    if (stand_still) {
         gait_pos.x = 0;
         gait_pos.y = 0;
         gait_pos.z = 0;
         lift_height = 0;
     } else {
-        hexapod_gait_sequence(&robot->state, leg_index, &gait_pos, &lift_height);
+        hexapod_gait_sequence(&robot->state, leg_index, &gait_pos, &lift_height, gait_sub_phase);
     }
     
     /* 计算目标足端位置 */
@@ -238,15 +249,15 @@ static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index)
  * @brief 更新所有舵机
  *        先缓存所有角度，再通过I2C批量输出到PCA9685
  */
-static void update_servos(hexapod_t *robot)
+static void update_servos(hexapod_t *robot, int16_t gait_sub_phase)
 {
     if (!robot || !robot->servos_enabled) return;
-    
+
     /* 批量更新所有腿 */
     for (leg_index_t i = 0; i < CNT_LEGS; i++) {
-        compute_leg_ik(robot, i);
+        compute_leg_ik(robot, i, gait_sub_phase);
     }
-    
+
     /* 将所有缓存的角度通过I2C一次性发送到PCA9685 */
     hal_servo_flush();
 }
@@ -266,6 +277,13 @@ void hexapod_update(hexapod_t *robot)
     }
     robot->last_update_time = current_time;
 
+    /* 校准模式：仅处理输入（串口命令），跳过所有舵机更新。
+     * 校准通过直接 PCA9685 写入控制舵机，IK 管线在此模式下不运行。 */
+    if (hal_is_calibration_active()) {
+        hal_input_update(&robot->state);
+        return;
+    }
+
     /* 检查电池电压 */
 #if BATTERY_CHECK_ENABLED
     if (!hal_check_battery()) {
@@ -275,51 +293,8 @@ void hexapod_update(hexapod_t *robot)
     }
 #endif
 
-    /* ---- 速度平滑 + 碎步归位 ----
-     *
-     * hal_input_update 直接覆写 travel_length 为目标值。
-     * 这里在调用前保存旧值, 调用后用 smooth_control 逐步过渡,
-     * 实现自然的加减速而非瞬间跳变。
-     */
-    {
-        static uint8_t zero_debounce = 0;
-        const uint8_t  ramp_divider  = 4;
-
-        /* Step 1: 保存当前实际速度 */
-        coord3d_t cur_travel = robot->state.travel_length;
-
-        /* Step 2: 读取输入 (会覆写 travel_length 为目标值) */
-        hal_input_update(&robot->state);
-
-        /* Step 3: 锁存目标, 并用 smooth_control 从旧值逐步逼近 */
-        coord3d_t target = robot->state.travel_length;
-
-        robot->state.travel_length.x =
-            smooth_control(target.x, cur_travel.x, ramp_divider);
-        robot->state.travel_length.y =
-            smooth_control(target.y, cur_travel.y, ramp_divider);
-        robot->state.travel_length.z =
-            smooth_control(target.z, cur_travel.z, ramp_divider);
-
-        /* Step 4: 碎步归位消抖 — 目标为零且实际已接近零
-         * 仅在非平衡模式下触发：平衡模式下机器人原地不动，无需归位 */
-        if (!robot->state.balance_mode) {
-            bool target_zero = (target.x == 0) && (target.y == 0) && (target.z == 0);
-
-            if (target_zero) {
-                if (zero_debounce < 255) zero_debounce++;
-            } else {
-                zero_debounce = 0;
-            }
-
-            if (zero_debounce >= 8 &&
-                robot->state.force_gait_step_cnt == 0)
-            {
-                robot->state.force_gait_step_cnt = 3;
-                zero_debounce = 0;
-            }
-        }
-    }
+    /* 读取输入 (直接覆写 travel_length) */
+    hal_input_update(&robot->state);
 
     /* 机器人开关状态变化处理 */
     if (robot->state.robot_on != robot->state.prev_robot_on) {
@@ -337,33 +312,42 @@ void hexapod_update(hexapod_t *robot)
 
     /* 如果机器人开启 */
     if (robot->state.robot_on) {
-        /* ---- 步态推进 (频率低于舵机刷新) ---- */
+        /* ---- 步态推进 + 子步态插值 ----
+         *
+         * 每个步态步（如 60ms）被细分为 100 个微时间片。
+         * gait_sub_phase ∈ [0, 99] 表示当前步内的微进度。
+         * 舵机 20ms 刷新一次，每次 IK 解算使用当前微进度，
+         * 把 12 步 × 100 = 1200 个连续位置平滑输出，消除台阶跳变。 */
         uint32_t gait_elapsed = current_time - robot->last_gait_time;
-        /* 步态周期从 speed_control 读取 (CRSF CH7 开关设定, 默认 60ms) */
         uint16_t gait_period = robot->state.speed_control;
-        if (gait_period < 20) gait_period = GAIT_STEP_PERIOD_MS;  /* 未设定时用默认 */
-        if (gait_elapsed >= gait_period) {
-            robot->last_gait_time = current_time;
+        if (gait_period < 20) gait_period = GAIT_STEP_PERIOD_MS;
 
-            /* 平衡模式下不推进步态：机器人原地保持站立姿态，
-             * 仅通过 body_rot 和 body_pos.y 实现机身姿态调整 */
+        /* 步态步进（仅行走时推进，站立时不推进也不重置时钟） */
+        if (gait_elapsed >= gait_period) {
             if (!robot->state.balance_mode) {
                 bool need_step = (robot->state.travel_length.x != 0) ||
                                 (robot->state.travel_length.y != 0) ||
                                 (robot->state.travel_length.z != 0);
 
-                if (need_step || robot->state.force_gait_step_cnt) {
+                if (need_step) {
                     hexapod_gait_step(&robot->state);
-
-                    if (robot->state.force_gait_step_cnt > 0) {
-                        robot->state.force_gait_step_cnt--;
-                    }
+                    robot->last_gait_time = current_time;
+                    gait_elapsed = 0;
                 }
             }
         }
 
-        /* ---- 舵机更新 (每周期都执行, 保证平滑) ---- */
-        update_servos(robot);
+        /* 子步态相位: elapsed 占 period 的比例 × 100 */
+        int16_t gait_sub_phase;
+        if (gait_elapsed < gait_period) {
+            gait_sub_phase = (int16_t)((gait_elapsed * 100) / gait_period);
+            if (gait_sub_phase >= 100) gait_sub_phase = 99;
+        } else {
+            gait_sub_phase = 99;  /* 静立超时，钳位在周期末尾 */
+        }
+
+        /* ---- 舵机更新 (每周期都执行, 使用子步态插值保证平滑) ---- */
+        update_servos(robot, gait_sub_phase);
     }
 }
 
@@ -376,7 +360,7 @@ void hexapod_single_step(hexapod_t *robot)
 
     hexapod_gait_step(&robot->state);
     robot->last_gait_time = hal_get_tick_ms();  /* 重置步态时钟 */
-    update_servos(robot);
+    update_servos(robot, 0);  /* 单步调试无子步态插值 */
 }
 
 /**

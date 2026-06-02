@@ -15,7 +15,7 @@
 /* ==================== 配置参数 ==================== */
 
 #define DEFAULT_GAIT_SPEED      100     // 默认步态速度
-#define DEFAULT_LEG_LIFT_HEIGHT 80      // 默认抬腿高度（mm） (长腿可抬更高)
+#define DEFAULT_LEG_LIFT_HEIGHT 40      // 默认抬腿高度（mm）(完整站立高度80mm，抬一半即40mm)
 #define DEFAULT_INIT_Y          80      // 默认初始足端Y高度（mm） (站立时机身离地高)
 #define MIN_VOLTAGE_MV          10000   // 最低电压（10V）
 #define CONTROL_LOOP_PERIOD_MS  20       // 舵机刷新周期（20ms = 50Hz，保证动作平滑）
