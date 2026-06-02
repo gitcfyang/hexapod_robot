@@ -39,7 +39,20 @@
 
 /* ==================== 舵机参数 ==================== */
 
-#define PCA9685_FREQUENCY       50
+/* PWM 实际周期 (微秒)。
+ *
+ * PCA9685 计数器 = 脉宽目标 × 4096 / PWM 周期。
+ * 不管 PCA9685 振荡器偏差多大, 用示波器实测周期填在此处,
+ * 代码直接按实际周期反算计数值, 保证输出的脉宽绝对准确。
+ *
+ *   50Hz 标准: 20000 μs
+ *   58Hz 实测: 17241 μs  (1,000,000 / 58)
+ *
+ * 不要通过改 PCA9685_FREQUENCY 来补偿 — 那是间接修正。
+ * 改这个值直接修正脉宽。 */
+#define PWM_PERIOD_US           8475   /* 用示波器实测后修改 */
+
+#define PCA9685_FREQUENCY       100      /* 目标频率, 不改 */
 #define SERVO_PULSE_MIN         500
 #define SERVO_PULSE_MAX         2500
 #define PCA9685_RESOLUTION      4096
@@ -62,7 +75,7 @@ bool pca9685_set_servo_pulses(const uint8_t *servo_ids,
                               uint8_t count);
 void pca9685_free_all(void);
 uint16_t pca9685_angle_to_pulse(int16_t angle);
-void pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t count);
+bool pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t count);
 void pca9685_scan_bus(void);
 uint8_t pca9685_get_board_count(void);
 uint8_t pca9685_get_board_addr(uint8_t index);

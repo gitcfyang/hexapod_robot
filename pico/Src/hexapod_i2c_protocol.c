@@ -209,14 +209,14 @@ uint16_t pca9685_angle_to_pulse(int16_t angle)
 
 /**
  * @brief 将脉宽（微秒）转换为PCA9685的12位计数值
- * 
- * PCA9685分辨率4096步，周期20ms(50Hz)：
- *   计数值 = (pulse_us * 4096) / 20000
+ *
+ * 使用 PWM_PERIOD_US (用户实测周期) 计算, 直接保证输出脉宽准确,
+ * 不依赖 PCA9685 振荡器精度。
  */
 static inline uint16_t pulse_to_count(uint16_t pulse_us)
 {
-    if (pulse_us >= 20000) return PCA9685_RESOLUTION - 1;
-    return (uint16_t)(((uint32_t)pulse_us * PCA9685_RESOLUTION) / 20000);
+    if (pulse_us >= PWM_PERIOD_US) return PCA9685_RESOLUTION - 1;
+    return (uint16_t)(((uint32_t)pulse_us * PCA9685_RESOLUTION) / PWM_PERIOD_US);
 }
 
 /**
@@ -225,9 +225,9 @@ static inline uint16_t pulse_to_count(uint16_t pulse_us)
  * @param pulses 脉宽数组（16通道）
  * @param count 有效通道数量
  */
-void pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t count)
+bool pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t count)
 {
-    if (!pulses || count == 0) return;
+    if (!pulses || count == 0) return false;
     if (count > 16) count = 16;
     
     /* 构建数据：寄存器地址 + 64字节（16通道 × 4字节）
@@ -244,7 +244,8 @@ void pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t co
         data[idx + 3] = (uint8_t)((off_count >> 8) & 0x0F); // OFF_H
     }
     
-    i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, data, sizeof(data), false);
+    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, data, sizeof(data), false);
+    return (ret == (int)sizeof(data));
 }
 
 bool pca9685_set_servo_pulse(uint8_t servo_id, uint16_t pulse_us)

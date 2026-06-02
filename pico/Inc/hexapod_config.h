@@ -147,7 +147,7 @@
  * 摇杆满量程 (±500) 映射到的机身高度偏移。
  * body_pos.y = stick * BODY_HEIGHT_RANGE_MM / 500
  * 正值抬升机身 (腿向下伸展), 负值降低机身 (腿向上收缩) */
-#define BODY_HEIGHT_RANGE_MM      40
+#define BODY_HEIGHT_RANGE_MM      20
 
 /* 机身姿态旋转范围 (0.1° 单位)
  * 摇杆满量程 (±500) 映射到的机身旋转角。
@@ -157,12 +157,12 @@
 
 /* ---- CRSF 摇杆→控制量 缩放参数 ----
  * 摇杆范围 -500~+500, 映射到实际运动参数 */
-#define TRAVEL_MAX_FORWARD_MM   120     /* 满杆步长 (mm)，约体长1/3 */
+#define TRAVEL_MAX_FORWARD_MM   140     /* 满杆步长 (mm)，约体长1/3 */
 #define TRAVEL_MAX_STRAFE_MM     60     /* 满杆平移步长 (mm) */
-#define TRAVEL_MAX_TURN_MM       45     /* 满杆旋转步长 (mm) */
-#define LIFT_SPEED_MM_PER_TICK   3      /* 升降速度 (mm/周期), 油门杆用 */
+#define TRAVEL_MAX_TURN_MM       60    /* 满杆旋转步长 (mm) */
+#define LIFT_SPEED_MM_PER_TICK   40      /* 升降速度 (mm/周期), 油门杆用 */
 #define LIFT_HEIGHT_MIN_MM      10      /* 最低抬腿高度 (mm) */
-#define LIFT_HEIGHT_MAX_MM      100     /* 最高抬腿高度 (mm) */
+#define LIFT_HEIGHT_MAX_MM      60     /* 最高抬腿高度 (mm) */
 
 /* ---- 仿生连续变速 ----
  *
@@ -276,62 +276,42 @@
  *          =120mm      ╲ 向外84mm   (与femur成90°→斜向下45°)
  *                        ● 足端
  *
- *  ┌──────────── 休息状态 (所有舵机=0°) ────────────┐
- *  │ 股节向上53mm+胫节向下84mm → 足端在基座下方 31mm │
- *  │ coxa45 + 股节水平53 + 胫节水平84 = 水平182mm    │
- *  │ 足端距底板: 31-25(基座高出底板)=6mm ≈ 贴地      │
- *  │ 膝角≈90°, 股节≈46° → 舵机全0° → 底板离地≈7mm  │
- *  │ FOOT_REACH=182, INIT_Y=31                       │
- *  └────────────────────────────────────────────────┘
- *
  *  ┌──────────── 站立状态 (ARM 后, 舵机≠0°) ────────┐
- *  │ 腿弯曲使机身抬高+收脚, 获得稳定支撑和运动空间     │
- *  │ 站立 INIY_Y 更大 (机身更高)                     │
- *  │ 站立 FOOT_REACH 更小 (脚更靠近机身)              │
- *  │ FOOT_REACH=110, INIT_Y=80                       │
- *  │                                                  │
- *  │ IK验证:                                          │
- *  │   d = 110-45 = 65mm                             │
- *  │   a = √(65²+80²) ≈ 103mm                        │
- *  │   膝角 = acos((20025-10625)/18000) ≈ 58°        │
- *  │   tibia_servo = 900-585 = 315 → invert → -32°   │
- *  │   股节 = 83° - 51° = 32°,  servo = 320-450      │
- *  │        = -130 → invert → 13°                     │
- *  │   Coxa舵机 ≈ 0° (足端方向不变)                   │
+ *  │ INIT_Y=50, 足端在coxa下方50mm                   │
+ *  │ FOOT_DZ=110 (RM), FOOT_DX=±78 (RR/RF)           │
+ *  │ 膝角≈58°, 股节≈32°                              │
+ *  │ coxa≈0° (足端方向不变)                           │
  *  └────────────────────────────────────────────────┘
  */
 
 /* ---- 休息状态足端 (舵机全0°, 底板贴地) ---- */
-#define FOOT_REACH_REST     182     /* 休息: coxa基座→足端水平距离 */
-#define INIT_Y_REST          31     /* 休息: coxa基座→足端垂直距离 */
+/* 站立时足端在 coxa 下方的基准深度 (mm)。
+ * 机身高度调节通过 body_pos.y 在此基础上偏移:
+ *   init_pos_y = INIT_Y - body_pos.y
+ * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±20mm)。 */
+#define INIT_Y               50
 
-/* ---- 站立状态足端 (ARM后, 机身抬高+收脚) ---- */
-#define FOOT_REACH           110     /* 站立: coxa基座→足端水平距离 */
-#define INIT_Y               80      /* 站立: coxa基座→足端下深度 */
-
-/* 足端在 coxa 基座坐标系中的位置 (站立时)
+/* 足端在 coxa 基座坐标系中的站立位置
  *
- * 由 FOOT_REACH(110mm) 和设计出射角 (RR=135°, RM=90°, RF=45°) 计算:
- *   DX = FOOT_REACH × cos(angle)
- *   DZ = FOOT_REACH × sin(angle)
- * 这些值由硬件结构决定，与 COXA_ANGLE 配套使用。 */
-#define FOOT_DX_RR     -78     /* RR: 110×cos135° */
-#define FOOT_DZ_RR      78     /* RR: 110×sin135° */
+ * 由硬件出射角 (RR=135°, RM=90°, RF=45°) 和腿长计算。
+ * 这些值决定 atan4 零点，与 COXA_ANGLE 配套。 */
+#define FOOT_DX_RR     -98     /* RR: 110×cos135° */
+#define FOOT_DZ_RR      98     /* RR: 110×sin135° */
 
 #define FOOT_DX_RM       0     /* RM: 110×cos90° */
-#define FOOT_DZ_RM     110     /* RM: 110×sin90° */
+#define FOOT_DZ_RM     138     /* RM: 110×sin90° */
 
-#define FOOT_DX_RF      78     /* RF: 110×cos45° */
-#define FOOT_DZ_RF      78     /* RF: 110×sin45° */
+#define FOOT_DX_RF      98     /* RF: 110×cos45° */
+#define FOOT_DZ_RF      98     /* RF: 110×sin45° */
 
-#define FOOT_DX_LR     -78     /* LR: 镜像 */
-#define FOOT_DZ_LR     -78
+#define FOOT_DX_LR     -98     /* LR: 镜像 */
+#define FOOT_DZ_LR     -98  
 
 #define FOOT_DX_LM       0     /* LM: 镜像 */
-#define FOOT_DZ_LM    -110
+#define FOOT_DZ_LM    -138
 
-#define FOOT_DX_LF      78     /* LF: 镜像 */
-#define FOOT_DZ_LF     -78
+#define FOOT_DX_LF      98     /* LF: 镜像 */
+#define FOOT_DZ_LF     -98
 
 /* ==================== 舵机参数配置 ==================== */
 
@@ -506,9 +486,9 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RR].femur_max = SERVO_FEMUR_MAX_RR;
     configs[LEG_RR].tibia_min = SERVO_TIBIA_MIN_RR;
     configs[LEG_RR].tibia_max = SERVO_TIBIA_MAX_RR;
-    configs[LEG_RR].coxa_invert = true;
+    configs[LEG_RR].coxa_invert = false;
     configs[LEG_RR].femur_invert = true;
-    configs[LEG_RR].tibia_invert = false;
+    configs[LEG_RR].tibia_invert = true;
     configs[LEG_RR].coxa_horn_offset = 0;
     configs[LEG_RR].femur_horn_offset = 0;
     configs[LEG_RR].tibia_horn_offset = 0;
@@ -532,9 +512,9 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RM].femur_max = SERVO_FEMUR_MAX_RM;
     configs[LEG_RM].tibia_min = SERVO_TIBIA_MIN_RM;
     configs[LEG_RM].tibia_max = SERVO_TIBIA_MAX_RM;
-    configs[LEG_RM].coxa_invert = true;
+    configs[LEG_RM].coxa_invert = false;
     configs[LEG_RM].femur_invert = true;
-    configs[LEG_RM].tibia_invert = false;
+    configs[LEG_RM].tibia_invert = true;
     configs[LEG_RM].coxa_horn_offset = 0;
     configs[LEG_RM].femur_horn_offset = 0;
     configs[LEG_RM].tibia_horn_offset = 0;
@@ -558,9 +538,9 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RF].femur_max = SERVO_FEMUR_MAX_RF;
     configs[LEG_RF].tibia_min = SERVO_TIBIA_MIN_RF;
     configs[LEG_RF].tibia_max = SERVO_TIBIA_MAX_RF;
-    configs[LEG_RF].coxa_invert = true;
+    configs[LEG_RF].coxa_invert = false;
     configs[LEG_RF].femur_invert = true;
-    configs[LEG_RF].tibia_invert = false;
+    configs[LEG_RF].tibia_invert = true;
     configs[LEG_RF].coxa_horn_offset = 0;
     configs[LEG_RF].femur_horn_offset = 0;
     configs[LEG_RF].tibia_horn_offset = 0;

@@ -120,6 +120,8 @@ void hal_servo_flush(void)
     g_last_servo_count = g_servo_batch.count;  /* 记录调试信息 */
 
     uint8_t board_cnt = pca9685_get_board_count();
+    static uint32_t i2c_fail_count = 0;
+    bool all_ok = true;
 
     /* 处理每块 PCA9685 板：板 0→舵机 ID 0~8, 板 1→舵机 ID 9~17 */
     for (uint8_t b = 0; b < board_cnt; b++) {
@@ -132,17 +134,32 @@ void hal_servo_flush(void)
             if (g_servo_batch.pending[id]) {
                 uint8_t ch = id - id_start;  /* 映射到 PCA9685 通道 0~8 */
                 pulses[ch] = g_servo_batch.pulses[id];
-                g_servo_batch.pending[id] = false;
                 has_pending = true;
             }
         }
 
         if (has_pending) {
-            pca9685_write_all_channels(pca9685_get_board_addr(b), pulses, 16);
+            if (pca9685_write_all_channels(pca9685_get_board_addr(b), pulses, 16)) {
+                /* 写入成功 → 清除 pending */
+                for (uint8_t id = id_start; id <= id_end; id++) {
+                    g_servo_batch.pending[id] = false;
+                }
+            } else {
+                /* 写入失败 → 保留 pending, 下周期重试 */
+                all_ok = false;
+            }
         }
     }
-    
-    g_servo_batch.count = 0;
+
+    if (all_ok) {
+        g_servo_batch.count = 0;
+    } else {
+        i2c_fail_count++;
+        /* 每 50 次失败告警一次 (约 1 秒) */
+        if (i2c_fail_count % 50 == 1) {
+            hal_debug_printf("[WARN] I2C flush fail x%lu\r\n", i2c_fail_count);
+        }
+    }
 }
 
 void hal_servo_free_all(void)
