@@ -286,9 +286,6 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
     bool  arm       = map_to_2pos(state->channels[CRSF_CHANNEL_ARM]);
     int8_t gait_pos = map_to_3pos(state->channels[CRSF_CHANNEL_GAIT]);
     bool  balance   = map_to_2pos(state->channels[CRSF_CHANNEL_BALANCE]);
-#if SPEED_SWITCH_ENABLED
-    int8_t speed_pos = map_to_3pos(state->channels[CRSF_CHANNEL_SPEED]);
-#endif
 
     /* ---- 解锁/上电 : 边沿触发 ---- */
     {
@@ -338,6 +335,19 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         int16_t height_stick = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
         int16_t yaw_stick   = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
 
+#if STRAFE_DIRECTION_INVERT
+        roll_stick = -roll_stick;
+#endif
+#if FORWARD_DIRECTION_INVERT
+        pitch_stick = -pitch_stick;
+#endif
+#if HEIGHT_DIRECTION_INVERT
+        height_stick = -height_stick;
+#endif
+#if TURN_DIRECTION_INVERT
+        yaw_stick = -yaw_stick;
+#endif
+
         /* 机身姿态旋转 (0.1° 单位) */
         ctrl_state->body_rot.x =  (pitch_stick * BODY_ROTATION_MAX) / 500;  /* 俯仰 */
         ctrl_state->body_rot.y = -(yaw_stick   * BODY_ROTATION_MAX) / 500;  /* 偏航, 取反使摇杆方向与机头转向一致 */
@@ -364,8 +374,17 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         int16_t height_ctrl = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
         int16_t turn    = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
 
+#if STRAFE_DIRECTION_INVERT
+        strafe = -strafe;
+#endif
 #if FORWARD_DIRECTION_INVERT
         forward = -forward;
+#endif
+#if HEIGHT_DIRECTION_INVERT
+        height_ctrl = -height_ctrl;
+#endif
+#if TURN_DIRECTION_INVERT
+        turn = -turn;
 #endif
 
         /* 步长映射: 摇杆 -500~+500 → 步长 mm */
@@ -388,28 +407,9 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
          * 强度越大 → 步态周期越短 (频率越高)。
          * 低摇杆 = 短步长 + 低频率 → 精细缓动
          * 高摇杆 = 大步长 + 高频率 → 快速行进 */
-#if SPEED_SWITCH_ENABLED
-        /* CH7 开关: 缩放频率范围 */
-        int16_t period_max = GAIT_PERIOD_MAX_MS;
-        int16_t period_min = GAIT_PERIOD_MIN_MS;
-        int32_t range = period_max - period_min;
-        if (speed_pos == -1) {
-            /* 低速档: 整体偏慢 */
-            period_max = GAIT_PERIOD_MAX_MS + 40;
-            period_min = GAIT_PERIOD_MIN_MS + 40;
-        } else if (speed_pos == 1) {
-            /* 高速档: 整体偏快 */
-            period_max = GAIT_PERIOD_MAX_MS - 30;
-            period_min = GAIT_PERIOD_MIN_MS - 20;
-            if (period_min < 30) period_min = 30;
-        }
-        range = period_max - period_min;
-#else
-        /* 连续变速 (开关禁用): 固定频率范围 */
         const int16_t period_max = GAIT_PERIOD_MAX_MS;
         const int16_t period_min = GAIT_PERIOD_MIN_MS;
         const int32_t range = (int32_t)period_max - (int32_t)period_min;
-#endif
 
         int16_t stick_mag = (forward >= 0) ? forward : -forward;
         int16_t tmp = (strafe >= 0) ? strafe : -strafe;

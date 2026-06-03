@@ -75,7 +75,7 @@
  *   1 = 输入调试：打印 CRSF 链接状态 + 8 通道原始值
  *   2 = 舵机调试：打印 18 路舵机角度/脉宽
  *   3 = 全量调试：打印 IK 解算中间值（会产生大量输出，可能影响控制周期） */
-#define DEBUG_LEVEL             3   /* ★ 生产模式：关闭调试输出 */
+#define DEBUG_LEVEL             0   /* ★ 生产模式：关闭调试输出 */
 
 /* 调试输出间隔（毫秒），避免 USB 输出阻塞控制循环 */
 #define DEBUG_PRINT_INTERVAL_MS 1000
@@ -182,10 +182,8 @@
 #define GAIT_PERIOD_MAX_MS      180    /* 微动: 最慢步频 */
 #define GAIT_PERIOD_MIN_MS       70    /* 满杆: 最快步频 */
 
-/* CH7 保留为频率范围倍率 (可选)
- * 设为 0 禁用 CH7 开关, 始终使用连续变速。
- * 设为 1 则 CH7 三档分别缩放 GAIT_PERIOD_MIN/MAX。 */
-#define SPEED_SWITCH_ENABLED     0
+/* CH7 通道保留 (CRSF_CHANNEL_SPEED)，暂不参与控制。
+ * 连续变速由摇杆幅度自动映射，无需开关干预。 */
 
 /* ---- 腿基座在机身上的安装位置 ----
  *
@@ -254,11 +252,23 @@
 #define COXA_ANGLE_LM       -900    /* 左中:  -90° 正左方 */
 #define COXA_ANGLE_LF       -450    /* 左前:  -45° 前方偏左 */
 
-/* 前进方向取反开关
+/* 前进方向取反开关 (CH2)
  * 如果推摇杆前进时机体后退，设为 1 翻转前进/后退方向。
  * 原因：某些遥控器的 CH2 (Pitch) 输出极性相反 (拉杆=高位, 推杆=低位)。
  * 不要通过翻转 coxa_invert 来修正方向——那会同时破坏转动方向。 */
 #define FORWARD_DIRECTION_INVERT   0
+
+/* 平移方向取反开关 (CH1)
+ * 摇杆左推→右平移 / 右推→左平移 时，设为 1 翻转。 */
+#define STRAFE_DIRECTION_INVERT    1
+
+/* 高度方向取反开关 (CH3)
+ * 摇杆推高→机身下降 / 拉低→机身抬升 时，设为 1 翻转。 */
+#define HEIGHT_DIRECTION_INVERT    0
+
+/* 旋转方向取反开关 (CH4)
+ * 摇杆左推→顺时针转 / 右推→逆时针转 时，设为 1 翻转。 */
+#define TURN_DIRECTION_INVERT      0
 
 /* ---- 初始足端位置 (站立时足端在腿基座坐标系中的坐标) ----
  *
@@ -295,23 +305,23 @@
  *
  * 由硬件出射角 (RR=135°, RM=90°, RF=45°) 和腿长计算。
  * 这些值决定 atan4 零点，与 COXA_ANGLE 配套。 */
-#define FOOT_DX_RR     -98     /* RR: 110×cos135° */
-#define FOOT_DZ_RR      98     /* RR: 110×sin135° */
+#define FOOT_DX_RR     -113     /* RR: 110×cos135° */
+#define FOOT_DZ_RR      113     /* RR: 110×sin135° */
 
 #define FOOT_DX_RM       0     /* RM: 110×cos90° */
-#define FOOT_DZ_RM     138     /* RM: 110×sin90° */
+#define FOOT_DZ_RM     160     /* RM: 110×sin90° */
 
-#define FOOT_DX_RF      98     /* RF: 110×cos45° */
-#define FOOT_DZ_RF      98     /* RF: 110×sin45° */
+#define FOOT_DX_RF      113     /* RF: 110×cos45° */
+#define FOOT_DZ_RF      113     /* RF: 110×sin45° */
 
-#define FOOT_DX_LR     -98     /* LR: 镜像 */
-#define FOOT_DZ_LR     -98  
+#define FOOT_DX_LR     -113     /* LR: 镜像 */
+#define FOOT_DZ_LR     -113  
 
 #define FOOT_DX_LM       0     /* LM: 镜像 */
-#define FOOT_DZ_LM    -138
+#define FOOT_DZ_LM    -160
 
-#define FOOT_DX_LF      98     /* LF: 镜像 */
-#define FOOT_DZ_LF     -98
+#define FOOT_DX_LF      113     /* LF: 镜像 */
+#define FOOT_DZ_LF     -113
 
 /* ==================== 舵机参数配置 ==================== */
 

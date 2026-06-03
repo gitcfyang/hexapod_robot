@@ -15,12 +15,23 @@
  *   完成落地/离地动作。差值 1 是有意的设计，用于平滑腿切换时的速度曲线。
  *   例如 RIPPLE_12: 12 步 = 3 抬腿 + 8 地面 + 1 过渡步。
  */
+/*
+ * 统一单腿运动参数:
+ *   所有步态使用相同的 4 步抬腿 + 8 步支撑 = 每腿相同轨迹。
+ *   区别仅在于各腿的相位编排 (gait_leg_nr) 和周期长度 (steps_in_gait)。
+ *
+ *   抬腿: 4 步二次抛物线, 足端平滑起落
+ *   支撑: 8 步地面扫掠, 占空比 67%
+ */
 static const gait_t gait_table[GAIT_MAX] = {
-    /* GAIT_RIPPLE_12 - 波纹步态12步 (仿生优化版)
-     *   4 抬腿步 + 8 地面步 = 12
-     *   抬腿:支撑速度比 = (120/4):(120/8) = 2:1 (原 2.67:1)
-     *   占空比 = 8/12 = 67% (脚 67% 时间着地)
-     *   抬腿多 1 步 → 足端空中轨迹更平滑、速度更接近支撑速度 */
+    /* GAIT_RIPPLE_12 - 波纹步态 (12步)
+     *
+     * 6 腿依次抬腿, 间隔 2 步 → 形成后→前的波浪。
+     * 任意时刻约 2 条腿在空中, 4 条腿支撑。
+     *
+     *   步 1-4: RR 抬腿    步 3-6: RM 抬腿 (与 RR 重叠 2 步)
+     *   步 5-8: RF 抬腿    步 7-10: LR 抬腿
+     *   步 9-0: LM 抬腿    步 11-2: LF 抬腿         */
     {
         .nom_gait_speed = 100,
         .steps_in_gait = 12,
@@ -31,56 +42,79 @@ static const gait_t gait_table[GAIT_MAX] = {
         .half_lift_height = 3,
         .gait_leg_nr = {1, 3, 5, 7, 9, 11}  // RR, RM, RF, LR, LM, LF
     },
-    
-    /* GAIT_TRIPOD_6 - 三脚步态6步
-     * 组A(RR,RM,RF)和组B(LR,LM,LF)交替
-     * 每组3条腿同时抬起/放下，间隔 steps/2 = 3步 */
+
+    /* GAIT_TRIPOD_6 - 交替三角步态 (12步)
+     *
+     * 对角线编组, 3 腿同时抬/落, 交替三角支撑。
+     * 三角A: RR + RF + LM    三角B: RM + LR + LF
+     *
+     * 单腿运动与 RIPPLE 完全相同 (4 抬 + 8 撑),
+     * 区别是三角组的腿相位一致 (同起同落)。
+     *
+     *   步 0-3: 三角A抬起, 三角B支撑
+     *   步 4-5: 全部支撑 (过渡)
+     *   步 6-9: 三角B抬起, 三角A支撑
+     *   步 10-11: 全部支撑 (过渡)                       */
     {
-        .nom_gait_speed = 150,
-        .steps_in_gait = 6,
-        .nr_lifted_pos = 2,
-        .front_down_pos = 1,
-        .lift_div_factor = 2,
-        .tl_div_factor = 4,
-        .half_lift_height = 3,
-        .gait_leg_nr = {0, 0, 0, 3, 3, 3}  // RR,RM,RF同组; LR,LM,LF同组
-    },
-    
-    /* GAIT_TRIPOD_8 - 三脚步态8步 */
-    {
-        .nom_gait_speed = 150,
-        .steps_in_gait = 8,
-        .nr_lifted_pos = 3,
+        .nom_gait_speed = 100,
+        .steps_in_gait = 12,
+        .nr_lifted_pos = 4,
         .front_down_pos = 2,
         .lift_div_factor = 2,
-        .tl_div_factor = 5,
+        .tl_div_factor = 8,
         .half_lift_height = 3,
-        .gait_leg_nr = {0, 0, 0, 4, 4, 4}  // RR,RM,RF同组; LR,LM,LF同组
+        .gait_leg_nr = {0, 6, 0, 6, 0, 6}  // RR,RF,LM=三角A; RM,LR,LF=三角B
     },
-    
-    /* GAIT_WAVE_24 - 波浪步态24步
-     *   3 抬腿步 + 20 地面步 + 1 过渡步 = 24 */
+
+    /* GAIT_TRIPOD_8 - 交替三角步态 (16步, 更从容版)
+     *
+     * 与上相同的对角线编组, 但周期拉长到 16 步,
+     * 两组抬腿之间有更长的全支撑过渡 (4 步)。
+     *   步 0-3: 三角A抬起    步 4-7: 全部支撑
+     *   步 8-11: 三角B抬起   步 12-15: 全部支撑        */
     {
-        .nom_gait_speed = 80,
+        .nom_gait_speed = 100,
+        .steps_in_gait = 16,
+        .nr_lifted_pos = 4,
+        .front_down_pos = 2,
+        .lift_div_factor = 2,
+        .tl_div_factor = 12,
+        .half_lift_height = 3,
+        .gait_leg_nr = {0, 8, 0, 8, 0, 8}  // RR,RF,LM=三角A; RM,LR,LF=三角B
+    },
+
+    /* GAIT_WAVE_24 - 波浪步态 (24步, 每次仅 1 腿抬起)
+     *
+     * 6 腿严格依次抬腿, 间隔 4 步, 各腿抬腿不重叠。
+     * 任意时刻仅 1 腿在空中, 5 腿支撑 → 极稳极慢。
+     * 单腿仍为 4 步抬腿, 轨迹与 RIPPLE 完全一致。
+     *
+     *   步 0-3: RR    步 4-7: RM    步 8-11: RF
+     *   步 12-15: LR  步 16-19: LM  步 20-23: LF       */
+    {
+        .nom_gait_speed = 100,
         .steps_in_gait = 24,
-        .nr_lifted_pos = 3,
+        .nr_lifted_pos = 4,
         .front_down_pos = 2,
         .lift_div_factor = 2,
         .tl_div_factor = 20,
         .half_lift_height = 3,
-        .gait_leg_nr = {1, 5, 9, 13, 17, 21}
+        .gait_leg_nr = {0, 4, 8, 12, 16, 20}  // 严格依次, 无重叠
     },
-    
-    /* GAIT_TRIPOD_4 - 快速三脚步态4步 */
+
+    /* GAIT_TRIPOD_4 - 快速交替三角步态 (12步, 快节奏版)
+     *
+     * 与 GAIT_TRIPOD_6 参数完全相同, 保留用于未来
+     * 可能的速度区分 (更高 base speed 或不同占空比)。     */
     {
-        .nom_gait_speed = 200,
-        .steps_in_gait = 4,
-        .nr_lifted_pos = 1,
-        .front_down_pos = 1,
+        .nom_gait_speed = 150,
+        .steps_in_gait = 12,
+        .nr_lifted_pos = 4,
+        .front_down_pos = 2,
         .lift_div_factor = 2,
-        .tl_div_factor = 3,
-        .half_lift_height = 1,
-        .gait_leg_nr = {0, 0, 0, 2, 2, 2}  // RR,RM,RF同组; LR,LM,LF同组
+        .tl_div_factor = 8,
+        .half_lift_height = 3,
+        .gait_leg_nr = {0, 6, 0, 6, 0, 6}  // RR,RF,LM=三角A; RM,LR,LF=三角B
     }
 };
 
