@@ -4,7 +4,7 @@
 - MCU: Raspberry Pi Pico (RP2040)
 - 舵机: 18路, 2× PCA9685 (仅用1块, 地址0x40, 右腿9路 ID 0-8)
 - PCA9685: I²C1 GP2/GP3 @400kHz, 内部上拉
-- PWM: 100Hz 数字舵机, PWM_PERIOD_US=8475 (实测校准)
+- PWM: 100Hz 数字舵机, 两片 PCA9685 独立校准
 - 接收器: ELRS CRSF, UART1 GP4/GP5 @420000bps
 - 腿: coxa=45mm, femur=75mm, tibia=120mm
 - 舵机零位: FEMUR_SERVO_ZERO=450, TIBIA_SERVO_ZERO=900
@@ -21,12 +21,12 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ```
 
 ## 关键参数 (hexapod_config.h)
-- 站立: INIT_Y=80mm
+- 站立: INIT_Y=50mm
 - COXA_ANGLE: RR=1350, RM=900, RF=450 (左镜像)
 - FOOT_DX: RR=-78, RM=0, RF=78 (左镜像)
 - FOOT_DZ: RR=78, RM=110, RF=78 (左镜像)
 - 步长: TRAVEL_MAX_FORWARD=140mm, STRAFE=60mm, TURN=60mm
-- 抬腿: LIFT_HEIGHT 10-60mm
+- 抬腿: LIFT_HEIGHT 5-60mm
 - 机身高度调节: BODY_HEIGHT_RANGE_MM=±20mm
 
 ## 仿生连续变速
@@ -39,19 +39,36 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ```
 正常模式:
   CRSF CH1-8 → 两级死区 → 仿生连续变速 → 子步态插值(1200微步)
-  → IK → servo batch → I²C (PCA9685) → 100Hz PWM
+  → IK → servo batch → I²C (PCA9685) → 200Hz PWM
 
 平衡模式:
-  CRSF CH1-8 → body_rot(pitch/roll/yaw) + body_pos.y 直接映射
-  → IK (standing) → servo batch → I²C → 100Hz PWM
+  CRSF CH1-8 → body_rot + body_pos.y 直接映射 (全部取反, 方向已校准)
+  → IK (standing) → servo batch → I²C → 200Hz PWM
 ```
 
+## 平衡模式 body_rot 坐标 (已修复)
+- X=前 Y=上 Z=右 (右手定则)
+- body_rot.x = Roll 横滚 (Rx, 绕 X 前进轴, 摇杆 CH1)
+- body_rot.y = Yaw 偏航 (Ry, 绕 Y 垂直轴, 摇杆 CH4)
+- body_rot.z = Pitch 俯仰 (Rz, 绕 Z 左右轴, 摇杆 CH2)
+- 三轴均取反，使摇杆方向与机身倾斜方向直觉一致
+- 旋转顺序: Ry(Yaw) → Rx(Roll) → Rz(Pitch)
+- 历史: 初始版本 x/z 标注反了 (x=Pitch/z=Roll)，导致 CH1/CH2 效果互换
+
 ## PWM 校准
-- 用 PWM_PERIOD_US (实测周期) 直接计算脉宽计数值
+- 用 PWM_PERIOD_US (每板实测周期) 直接计算脉宽计数值
 - 不依赖 PCA9685 振荡器精度
-- `pulse_to_count = pulse_us × 4096 / PWM_PERIOD_US`
-- 当前: 100Hz → PWM_PERIOD_US=8475
+- `pulse_to_count = pulse_us × 4096 / pwm_period_us`
+- 当前: 200Hz → PWM_PERIOD_US_BOARD0/BOARD1 (示波器实测后填入)
+- 两块 PCA9685 使用独立的校准值，消除器件间振荡器差异
 - I²C 写入失败检测 + 自动重试 + 告警
+
+## 控制频率 (2026-06-03 升级)
+- 控制循环: 100Hz (CONTROL_LOOP_PERIOD_MS=10ms)
+- PCA9685 PWM: 100Hz
+- IK 解算: 100Hz (原 50Hz)，每次更新每帧 PWM 都有新角度
+- I2C 批量写入: ~1.5ms/板，占空比 ~30% (200Hz 下 5ms 周期)
+- 第二块 PCA9685 接入后 I2C 占空比 ~60%，仍有 2ms IK 计算余量（200hz下）
 
 ## 步态
 - RIPPLE_12 (默认): 4抬腿+8支撑=12步, 占空比67%
@@ -76,4 +93,3 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - [ ] 第二块 PCA9685 (左腿9路 ID 9-17)
 - [ ] 电池 ADC 分压器 + BATTERY_CHECK_ENABLED
 - [ ] Core1 双核卸载 IK 计算
-- [ ] 外部 I²C 上拉电阻 (当前仅内部~50kΩ, 400kHz 临界)

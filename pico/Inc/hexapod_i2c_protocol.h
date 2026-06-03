@@ -39,20 +39,24 @@
 
 /* ==================== 舵机参数 ==================== */
 
-/* PWM 实际周期 (微秒)。
+/* 每片 PCA9685 的 PWM 实际周期 (微秒)。
+ *
+ * 两片 PCA9685 的内部振荡器可能有偏差，所以各自用示波器实测后
+ * 填入独立的校准值。代码根据目标板自动选择对应周期。
  *
  * PCA9685 计数器 = 脉宽目标 × 4096 / PWM 周期。
- * 不管 PCA9685 振荡器偏差多大, 用示波器实测周期填在此处,
- * 代码直接按实际周期反算计数值, 保证输出的脉宽绝对准确。
+ * 直接按实际周期反算计数值, 保证输出的脉宽绝对准确。
  *
- *   50Hz 标准: 20000 μs
- *   58Hz 实测: 17241 μs  (1,000,000 / 58)
+ *   200Hz 标称: 5000 μs
+ *   实测值取决于每片 PCA9685 的振荡器精度 (~±15%)。
  *
  * 不要通过改 PCA9685_FREQUENCY 来补偿 — 那是间接修正。
- * 改这个值直接修正脉宽。 */
-#define PWM_PERIOD_US           8475   /* 用示波器实测后修改 */
+ * 改这两个值直接修正脉宽。 */
+// 8475  //4310 
+#define PWM_PERIOD_US_BOARD0    8475   /* 板 0 (0x40) 示波器实测后修改 */
+#define PWM_PERIOD_US_BOARD1    8475   /* 板 1 (0x41) 示波器实测后修改 */
 
-#define PCA9685_FREQUENCY       100      /* 目标频率, 不改 */
+#define PCA9685_FREQUENCY       100      /* 目标频率, 200Hz 匹配控制循环 */
 #define SERVO_PULSE_MIN         500
 #define SERVO_PULSE_MAX         2500
 #define PCA9685_RESOLUTION      4096
@@ -79,5 +83,6 @@ bool pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t co
 void pca9685_scan_bus(void);
 uint8_t pca9685_get_board_count(void);
 uint8_t pca9685_get_board_addr(uint8_t index);
+uint16_t pca9685_get_pwm_period_us(uint8_t board_idx);
 
 #endif /* HEXAPOD_I2C_PROTOCOL_H */

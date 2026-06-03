@@ -323,10 +323,10 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         /* ====== 平衡模式 ======
          *
          * 摇杆映射:
-         *   CH1 (Ail/Roll)  → body_rot.z  机身横滚 Roll
-         *   CH2 (Ele/Pitch) → body_rot.x  机身俯仰 Pitch
+         *   CH1 (Ail/Roll)  → body_rot.x  机身横滚 Roll (绕X轴=前进轴)
+         *   CH2 (Ele/Pitch) → body_rot.z  机身俯仰 Pitch (绕Z轴=左右轴)
          *   CH3 (Throttle)  → body_pos.y  机身高度 (线性)
-         *   CH4 (Rud/Yaw)   → body_rot.y  机身偏航 Yaw
+         *   CH4 (Rud/Yaw)   → body_rot.y  机身偏航 Yaw (绕Y轴=垂直轴)
          *
          * 机器人原地不动 (travel_length 全部置零) */
 
@@ -348,10 +348,13 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         yaw_stick = -yaw_stick;
 #endif
 
-        /* 机身姿态旋转 (0.1° 单位) */
-        ctrl_state->body_rot.x =  (pitch_stick * BODY_ROTATION_MAX) / 500;  /* 俯仰 */
-        ctrl_state->body_rot.y = -(yaw_stick   * BODY_ROTATION_MAX) / 500;  /* 偏航, 取反使摇杆方向与机头转向一致 */
-        ctrl_state->body_rot.z =  (roll_stick  * BODY_ROTATION_MAX) / 500;  /* 横滚 */
+        /* 机身姿态旋转 (0.1° 单位)
+         * body_rot.x = Roll  (绕 X 前进轴, Rx 旋转 YZ 面)
+         * body_rot.z = Pitch (绕 Z 左右轴, Rz 旋转 XY 面) */
+        /* 平衡模式下 Roll/Pitch 方向取反，使摇杆方向与机身倾斜方向直觉一致 */
+        ctrl_state->body_rot.x = -(roll_stick  * BODY_ROTATION_MAX) / 500;  /* 横滚 Roll */
+        ctrl_state->body_rot.y = -(yaw_stick   * BODY_ROTATION_MAX) / 500;  /* 偏航 Yaw */
+        ctrl_state->body_rot.z = -(pitch_stick * BODY_ROTATION_MAX) / 500;  /* 俯仰 Pitch */
 
         /* 机身高度 (线性): 摇杆推高→机身抬升, 摇杆拉低→机身下降 */
         ctrl_state->body_pos.y = (height_stick * BODY_HEIGHT_RANGE_MM) / 500;

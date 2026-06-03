@@ -170,8 +170,9 @@ bool hexapod_ik_leg(const coord3d_t *target_pos,
  * @brief 机身逆运动学
  * 计算机身姿态变化对足端位置的影响
  * 
- * 旋转顺序：先绕Y轴(航向Yaw)，再绕X轴(俯仰Pitch)，最后绕Z轴(横滚Roll)
+ * 旋转顺序：先绕Y轴(航向Yaw)，再绕X轴(横滚Roll)，最后绕Z轴(俯仰Pitch)
  * 坐标约定：X-前, Y-上（机身抬升方向）, Z-右
+ * 物理含义：Rx绕X(前进轴)=Roll横滚, Ry绕Y(垂直轴)=Yaw偏航, Rz绕Z(左右轴)=Pitch俯仰
  * 
  * 输出：在机身的原始零姿态坐标系中，机身运动后腿部基座的新位置。
  * 该值用于从目标足端位置中减去，得到相对于腿部基座的足端位置。
@@ -202,7 +203,7 @@ void hexapod_ik_body(const coord3d_t *body_pos,
     }
 
     /* 预计算三角函数值
-       body_rot->x = Pitch (俯仰), body_rot->y = Yaw (航向), body_rot->z = Roll (横滚) */
+       body_rot->x = Roll (横滚, Rx绕X前进轴), body_rot->y = Yaw (偏航, Ry绕Y垂直轴), body_rot->z = Pitch (俯仰, Rz绕Z左右轴) */
     int16_t sin_pitch = hexapod_sin(body_rot->x);
     int16_t cos_pitch = hexapod_cos(body_rot->x);
     int16_t sin_yaw   = hexapod_sin(body_rot->y);
@@ -215,20 +216,20 @@ void hexapod_ik_body(const coord3d_t *body_pos,
     int32_t py = 0;  /* 腿部基座在Y方向无偏移 */
     int32_t pz = offset_z;
     
-    /* ---- 旋转矩阵: R = Rz(Roll) * Rx(Pitch) * Ry(Yaw) ----
+    /* ---- 旋转矩阵: R = Rz(Pitch) * Rx(Roll) * Ry(Yaw) ----
        将原始腿基座位置旋转到当前机身姿态下的世界坐标 */
-    
-    /* 第一步: 绕Y轴旋转 (Yaw) */
+
+    /* 第一步: 绕Y轴旋转 (Yaw 偏航) */
     int32_t x1 = (px * cos_yaw + pz * sin_yaw) / 10000;
     int32_t y1 = py;
     int32_t z1 = (-px * sin_yaw + pz * cos_yaw) / 10000;
-    
-    /* 第二步: 绕X轴旋转 (Pitch) */
+
+    /* 第二步: 绕X轴旋转 (Roll 横滚) */
     int32_t x2 = x1;
     int32_t y2 = (y1 * cos_pitch + z1 * sin_pitch) / 10000;
     int32_t z2 = (-y1 * sin_pitch + z1 * cos_pitch) / 10000;
-    
-    /* 第三步: 绕Z轴旋转 (Roll) */
+
+    /* 第三步: 绕Z轴旋转 (Pitch 俯仰) */
     int32_t x3 = (x2 * cos_roll + y2 * sin_roll) / 10000;
     int32_t y3 = (-x2 * sin_roll + y2 * cos_roll) / 10000;
     int32_t z3 = z2;

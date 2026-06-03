@@ -158,10 +158,10 @@
 /* ---- CRSF 摇杆→控制量 缩放参数 ----
  * 摇杆范围 -500~+500, 映射到实际运动参数 */
 #define TRAVEL_MAX_FORWARD_MM   140     /* 满杆步长 (mm)，约体长1/3 */
-#define TRAVEL_MAX_STRAFE_MM     60     /* 满杆平移步长 (mm) */
+#define TRAVEL_MAX_STRAFE_MM     90     /* 满杆平移步长 (mm) */
 #define TRAVEL_MAX_TURN_MM       60    /* 满杆旋转步长 (mm) */
 #define LIFT_SPEED_MM_PER_TICK   40      /* 升降速度 (mm/周期), 油门杆用 */
-#define LIFT_HEIGHT_MIN_MM      10      /* 最低抬腿高度 (mm) */
+#define LIFT_HEIGHT_MIN_MM      5      /* 最低抬腿高度 (mm) */
 #define LIFT_HEIGHT_MAX_MM      60     /* 最高抬腿高度 (mm) */
 
 /* ---- 仿生连续变速 ----
@@ -180,7 +180,7 @@
  *       高摇杆 = 大步长 + 高频率 → 快速行进
  *       两者叠加产生自然的加速度曲线。 */
 #define GAIT_PERIOD_MAX_MS      180    /* 微动: 最慢步频 */
-#define GAIT_PERIOD_MIN_MS       70    /* 满杆: 最快步频 */
+#define GAIT_PERIOD_MIN_MS       50    /* 满杆: 最快步频 */
 
 /* CH7 通道保留 (CRSF_CHANNEL_SPEED)，暂不参与控制。
  * 连续变速由摇杆幅度自动映射，无需开关干预。 */

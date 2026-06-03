@@ -65,7 +65,7 @@ typedef struct {
     /* 机身位置 */
     coord3d_t   body_pos;           // 机身位置
     coord3d_t   body_rot_offset;    // 机身旋转偏移
-    coord3d_t   body_rot;           // 机身旋转 (X-俯仰, Y-旋转, Z-滚转)
+    coord3d_t   body_rot;           // 机身旋转 (X-横滚 Roll, Y-偏航 Yaw, Z-俯仰 Pitch)
     
     /* 步态控制 */
     uint8_t     gait_type;          // 步态类型

@@ -25,12 +25,16 @@
 static const uint8_t PCA9685_CANDIDATE_ADDRS[] = {0x40, 0x41};
 
 /* 运行时检测结果 */
-static uint8_t g_board_addrs[2] = {0};
-static uint8_t g_board_count = 0;
+static uint8_t  g_board_addrs[2] = {0};
+static uint8_t  g_board_count = 0;
+static uint16_t g_board_pwm_period_us[2] = {PWM_PERIOD_US_BOARD0, PWM_PERIOD_US_BOARD1};
 
 uint8_t pca9685_get_board_count(void) { return g_board_count; }
 uint8_t pca9685_get_board_addr(uint8_t index) {
     return (index < g_board_count) ? g_board_addrs[index] : 0;
+}
+uint16_t pca9685_get_pwm_period_us(uint8_t board_idx) {
+    return (board_idx < 2) ? g_board_pwm_period_us[board_idx] : PWM_PERIOD_US_BOARD0;
 }
 
 /* ==================== 内部帮助函数 ==================== */
@@ -209,14 +213,13 @@ uint16_t pca9685_angle_to_pulse(int16_t angle)
 
 /**
  * @brief 将脉宽（微秒）转换为PCA9685的12位计数值
- *
- * 使用 PWM_PERIOD_US (用户实测周期) 计算, 直接保证输出脉宽准确,
- * 不依赖 PCA9685 振荡器精度。
+ * @param pulse_us       目标脉宽 (微秒)
+ * @param pwm_period_us  该 PCA9685 板的实测 PWM 周期 (微秒)
  */
-static inline uint16_t pulse_to_count(uint16_t pulse_us)
+static inline uint16_t pulse_to_count(uint16_t pulse_us, uint16_t pwm_period_us)
 {
-    if (pulse_us >= PWM_PERIOD_US) return PCA9685_RESOLUTION - 1;
-    return (uint16_t)(((uint32_t)pulse_us * PCA9685_RESOLUTION) / PWM_PERIOD_US);
+    if (pulse_us >= pwm_period_us) return PCA9685_RESOLUTION - 1;
+    return (uint16_t)(((uint32_t)pulse_us * PCA9685_RESOLUTION) / pwm_period_us);
 }
 
 /**
@@ -229,21 +232,30 @@ bool pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t co
 {
     if (!pulses || count == 0) return false;
     if (count > 16) count = 16;
-    
+
+    /* 查找该地址对应的板索引，获取其校准周期 */
+    uint16_t pwm_period_us = PWM_PERIOD_US_BOARD0;  /* 默认 */
+    for (uint8_t i = 0; i < g_board_count; i++) {
+        if (g_board_addrs[i] == addr) {
+            pwm_period_us = g_board_pwm_period_us[i];
+            break;
+        }
+    }
+
     /* 构建数据：寄存器地址 + 64字节（16通道 × 4字节）
        自动递增模式下，从 LED0_ON_L 开始写入 */
     uint8_t data[65];
     data[0] = PCA9685_LED0_ON_L;
-    
+
     for (uint8_t ch = 0; ch < 16; ch++) {
-        uint16_t off_count = pulse_to_count(pulses[ch]);
+        uint16_t off_count = pulse_to_count(pulses[ch], pwm_period_us);
         uint8_t idx = 1 + ch * 4;
         data[idx]     = 0;                              // ON_L = 0
         data[idx + 1] = 0;                              // ON_H = 0
         data[idx + 2] = (uint8_t)(off_count & 0xFF);    // OFF_L
         data[idx + 3] = (uint8_t)((off_count >> 8) & 0x0F); // OFF_H
     }
-    
+
     int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, data, sizeof(data), false);
     return (ret == (int)sizeof(data));
 }
@@ -269,14 +281,15 @@ bool pca9685_set_servo_pulse(uint8_t servo_id, uint16_t pulse_us)
     /* 目标板不存在则静默跳过 */
     if (board_idx >= g_board_count) return false;
 
-    uint8_t pca_addr = g_board_addrs[board_idx];
-    
+    uint8_t  pca_addr       = g_board_addrs[board_idx];
+    uint16_t pwm_period_us  = g_board_pwm_period_us[board_idx];
+
     /* 限幅 */
     if (pulse_us < SERVO_PULSE_MIN) pulse_us = SERVO_PULSE_MIN;
     if (pulse_us > SERVO_PULSE_MAX) pulse_us = SERVO_PULSE_MAX;
-    
+
     /* 转换为12位计数值 */
-    uint16_t off_count = pulse_to_count(pulse_us);
+    uint16_t off_count = pulse_to_count(pulse_us, pwm_period_us);
     
     /* 写入LEDn_OFF寄存器
      * PCA9685_LED0_ON_L + 4*channel 为起始寄存器
