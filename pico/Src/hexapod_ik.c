@@ -204,12 +204,12 @@ void hexapod_ik_body(const coord3d_t *body_pos,
 
     /* 预计算三角函数值
        body_rot->x = Roll (横滚, Rx绕X前进轴), body_rot->y = Yaw (偏航, Ry绕Y垂直轴), body_rot->z = Pitch (俯仰, Rz绕Z左右轴) */
-    int16_t sin_pitch = hexapod_sin(body_rot->x);
-    int16_t cos_pitch = hexapod_cos(body_rot->x);
+    int16_t sin_roll  = hexapod_sin(body_rot->x);
+    int16_t cos_roll  = hexapod_cos(body_rot->x);
     int16_t sin_yaw   = hexapod_sin(body_rot->y);
     int16_t cos_yaw   = hexapod_cos(body_rot->y);
-    int16_t sin_roll  = hexapod_sin(body_rot->z);
-    int16_t cos_roll  = hexapod_cos(body_rot->z);
+    int16_t sin_pitch = hexapod_sin(body_rot->z);
+    int16_t cos_pitch = hexapod_cos(body_rot->z);
     
     /* 腿基座相对于机身中心的原始位置 */
     int32_t px = offset_x;
@@ -226,12 +226,12 @@ void hexapod_ik_body(const coord3d_t *body_pos,
 
     /* 第二步: 绕X轴旋转 (Roll 横滚) */
     int32_t x2 = x1;
-    int32_t y2 = (y1 * cos_pitch + z1 * sin_pitch) / 10000;
-    int32_t z2 = (-y1 * sin_pitch + z1 * cos_pitch) / 10000;
+    int32_t y2 = (y1 * cos_roll + z1 * sin_roll) / 10000;
+    int32_t z2 = (-y1 * sin_roll + z1 * cos_roll) / 10000;
 
     /* 第三步: 绕Z轴旋转 (Pitch 俯仰) */
-    int32_t x3 = (x2 * cos_roll + y2 * sin_roll) / 10000;
-    int32_t y3 = (-x2 * sin_roll + y2 * cos_roll) / 10000;
+    int32_t x3 = (x2 * cos_pitch + y2 * sin_pitch) / 10000;
+    int32_t y3 = (-x2 * sin_pitch + y2 * cos_pitch) / 10000;
     int32_t z3 = z2;
     
     /* 输出结果：旋转后的腿基座世界位置 + 机身平移

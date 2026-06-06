@@ -191,9 +191,11 @@ static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index, int16_t gait
     coord3d_t gait_pos;
     int16_t lift_height;
 
+    /* 站立条件: balance_mode 或 (前进=0 且 平移=0)。
+     * 注意: travel_length.y (转向) 不参与判断 — 转向通过 body_rot.y 实现，
+     * 不需要触发步态序列 (抬腿/支撑)。 */
     bool stand_still = robot->state.balance_mode ||
                        ((robot->state.travel_length.x == 0) &&
-                        (robot->state.travel_length.y == 0) &&
                         (robot->state.travel_length.z == 0));
 
     if (stand_still) {
@@ -325,8 +327,8 @@ void hexapod_update(hexapod_t *robot)
         /* 步态步进（仅行走时推进，站立时不推进也不重置时钟） */
         if (gait_elapsed >= gait_period) {
             if (!robot->state.balance_mode) {
+                /* 步态推进仅由前进/平移触发；转向通过 body_rot.y 实现，不推进步态 */
                 bool need_step = (robot->state.travel_length.x != 0) ||
-                                (robot->state.travel_length.y != 0) ||
                                 (robot->state.travel_length.z != 0);
 
                 if (need_step) {

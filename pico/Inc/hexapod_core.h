@@ -66,7 +66,7 @@ void hexapod_set_body_position(hexapod_t *robot, const coord3d_t *pos);
 /**
  * @brief 设置机身旋转
  * @param robot 机器人实例
- * @param rot 旋转角度（X-俯仰, Y-航向, Z-横滚）
+ * @param rot 旋转角度（X-横滚, Y-航向, Z-俯仰）
  */
 void hexapod_set_body_rotation(hexapod_t *robot, const coord3d_t *rot);
 
