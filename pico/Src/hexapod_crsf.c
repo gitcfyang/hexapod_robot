@@ -399,11 +399,9 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
          * 替代了原来的积分器, 响应更直接, 中位→高度不变 */
         ctrl_state->body_pos.y = (height_ctrl * BODY_HEIGHT_RANGE_MM) / 500;
 
-        /* 正常模式下:
-         *   Roll/Pitch 无姿态旋转，但 Yaw (CH4 转向) 通过 body_rot.y 实现。
-         *   travel_length.y 保留用于调试，但不再独立触发步态。 */
+        /* 正常模式下无姿态旋转（转向由步态引擎处理 travel_length.y）*/
         ctrl_state->body_rot.x = 0;
-        ctrl_state->body_rot.y = -(turn * BODY_ROTATION_MAX) / 500;  /* 偏航, 取反使摇杆方向与机头转向一致 */
+        ctrl_state->body_rot.y = 0;
         ctrl_state->body_rot.z = 0;
 
         /* ---- 仿生连续变速：摇杆幅度 → 步态频率 ----

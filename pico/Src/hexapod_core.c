@@ -191,12 +191,12 @@ static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index, int16_t gait
     coord3d_t gait_pos;
     int16_t lift_height;
 
-    /* 站立条件: balance_mode 或 (前进=0 且 平移=0)。
-     * 注意: travel_length.y (转向) 不参与判断 — 转向通过 body_rot.y 实现，
-     * 不需要触发步态序列 (抬腿/支撑)。 */
     bool stand_still = robot->state.balance_mode ||
                        ((robot->state.travel_length.x == 0) &&
+                        (robot->state.travel_length.y == 0) &&
                         (robot->state.travel_length.z == 0));
+
+    const leg_config_t *cfg = &robot->leg_configs[leg_index];
 
     if (stand_still) {
         gait_pos.x = 0;
@@ -204,12 +204,32 @@ static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index, int16_t gait
         gait_pos.z = 0;
         lift_height = 0;
     } else {
+        /* ---- 转向步态：将 travel_length.y 转换为每条腿的切向位移 ----
+         *
+         * 正常模式下 CH4 转向通过步态抬腿/支撑实现（非机身旋转）。
+         * 原理：绕 Y 轴的旋转 → 每条腿的足端需沿切向移动。
+         *   右腿 (Z>0): 右转→向后(-X), 左转→向前(+X)
+         *   左腿 (Z<0): 右转→向前(+X), 左转→向后(-X)
+         * 位移量与腿到机体中心的距离成正比。
+         *
+         * 参考半径 100mm: 满杆转向 (60mm) 时最远腿位移 ≈ 60*239/100 ≈ 143mm，
+         *   与 TRAVEL_MAX_FORWARD_MM (140mm) 量级一致。
+         * 通过临时覆写 travel_length 让步态引擎自动将转向分配到抬腿/支撑各阶段。 */
+        coord3d_t saved_travel = robot->state.travel_length;
+        int32_t turn_y = saved_travel.y;
+
+        if (turn_y != 0) {
+            robot->state.travel_length.x += -(turn_y * cfg->init_pos_z) / 100;
+            robot->state.travel_length.z += (turn_y * cfg->init_pos_x) / 100;
+        }
+
         hexapod_gait_sequence(&robot->state, leg_index, &gait_pos, &lift_height, gait_sub_phase);
+
+        robot->state.travel_length = saved_travel;
     }
-    
+
     /* 计算目标足端位置 */
     coord3d_t target_foot;
-    const leg_config_t *cfg = &robot->leg_configs[leg_index];
     
     /* 初始位置 + 步态偏移 */
     target_foot.x = cfg->init_pos_x + gait_pos.x;
@@ -327,8 +347,8 @@ void hexapod_update(hexapod_t *robot)
         /* 步态步进（仅行走时推进，站立时不推进也不重置时钟） */
         if (gait_elapsed >= gait_period) {
             if (!robot->state.balance_mode) {
-                /* 步态推进仅由前进/平移触发；转向通过 body_rot.y 实现，不推进步态 */
                 bool need_step = (robot->state.travel_length.x != 0) ||
+                                (robot->state.travel_length.y != 0) ||
                                 (robot->state.travel_length.z != 0);
 
                 if (need_step) {
