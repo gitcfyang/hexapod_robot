@@ -54,9 +54,9 @@
  * 改这两个值直接修正脉宽。 */
 // 8475  //4310 
 #define PWM_PERIOD_US_BOARD0    8475   /* 板 0 (0x40) 示波器实测后修改 */
-#define PWM_PERIOD_US_BOARD1    8475   /* 板 1 (0x41) 示波器实测后修改 */
+#define PWM_PERIOD_US_BOARD1    9434   /* 板 1 (0x41) 示波器实测后修改 */
 
-#define PCA9685_FREQUENCY       100      /* 目标频率, 200Hz 匹配控制循环 */
+#define PCA9685_FREQUENCY       100      /* 目标频率, 100Hz 匹配控制循环 */
 #define SERVO_PULSE_MIN         500
 #define SERVO_PULSE_MAX         2500
 #define PCA9685_RESOLUTION      4096
