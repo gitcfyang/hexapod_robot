@@ -31,7 +31,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 
 ## 仿生连续变速
 - 摇杆幅度连续映射到步态周期 (替代 CH7 三段开关)
-- GAIT_PERIOD_MAX=180ms → MIN=70ms
+- GAIT_PERIOD_MAX=180ms → MIN=45ms
 - 低摇杆 = 短步长 + 低频率, 高摇杆 = 大步长 + 高频率
 - CH7 保留为可选频率范围倍率 (SPEED_SWITCH_ENABLED=0)
 
@@ -39,11 +39,11 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ```
 正常模式:
   CRSF CH1-8 → 两级死区 → 仿生连续变速 → 子步态插值(1200微步)
-  → IK → servo batch → I²C (PCA9685) → 200Hz PWM
+  → IK → servo batch → I²C (PCA9685) → 100Hz PWM
 
 平衡模式:
   CRSF CH1-8 → body_rot + body_pos.y 直接映射 (全部取反, 方向已校准)
-  → IK (standing) → servo batch → I²C → 200Hz PWM
+  → IK (standing) → servo batch → I²C → 100Hz PWM
 ```
 
 ## 平衡模式 body_rot 坐标 (已修复)
@@ -90,6 +90,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ## 待完善
 - [ ] 用 !C 实测每条腿的 horn_offset
 - [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
-- [ ] 第二块 PCA9685 (左腿9路 ID 9-17)
 - [ ] 电池 ADC 分压器 + BATTERY_CHECK_ENABLED
 - [ ] Core1 双核卸载 IK 计算
+- [ ] 加入 imu ，自动调整机身
+- [ ] 加入 足端传感器 ， 自动进行步态调整

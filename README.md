@@ -9,6 +9,37 @@
 - **接收器**: ELRS CRSF (UART)
 - **腿节**: Coxa 45mm / Femur 75mm / Tibia 120mm
 
+## 结构
+
+```
+hexapod_robot/
+├── README.md
+├── STATUS.md                         # 详细固件状态与参数说明
+├── pico/                             # RP2040 固件
+│   ├── CMakeLists.txt                # CMake 构建配置
+│   ├── hexapod_pico.c                # 入口：主循环、调试输出
+│   ├── Inc/                          # 头文件
+│   │   ├── hexapod_config.h          #   机械参数、舵机映射、CRSF 通道
+│   │   ├── hexapod_types.h           #   数据结构定义
+│   │   ├── hexapod_core.h            #   核心控制与机器人实例
+│   │   ├── hexapod_ik.h              #   逆运动学 (IK)
+│   │   ├── hexapod_gait.h            #   步态引擎
+│   │   ├── hexapod_math.h            #   三角函数查表
+│   │   ├── hexapod_crsf.h            #   CRSF 协议解析
+│   │   ├── hexapod_hal.h             #   硬件抽象层接口
+│   │   └── hexapod_i2c_protocol.h    #   PCA9685 I²C 协议
+│   └── Src/                          # 实现文件
+│       ├── hexapod_core.c            #   控制循环、IK 集成、转向步态
+│       ├── hexapod_ik.c              #   单腿 IK + 机身旋转矩阵
+│       ├── hexapod_gait.c            #   波纹/三角/波浪步态序列
+│       ├── hexapod_math.c            #   sin/cos/acos/atan4 查表实现
+│       ├── hexapod_crsf.c            #   ELRS 通道解析、摇杆映射
+│       ├── hexapod_hal_pico.c        #   Pico 硬件驱动 (I²C/UART/舵机)
+│       └── hexapod_i2c_protocol.c    #   PWM 校准、批量写入
+└── tools/
+    └── ik_gait_debug.py              # IK + 步态 Python 仿真可视化
+```
+
 ## 控制
 
 | 模式 | CH1 (Roll) | CH2 (Pitch) | CH3 (Throttle) | CH4 (Yaw) |

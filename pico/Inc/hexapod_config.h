@@ -147,7 +147,7 @@
  * 摇杆满量程 (±500) 映射到的机身高度偏移。
  * body_pos.y = stick * BODY_HEIGHT_RANGE_MM / 500
  * 正值抬升机身 (腿向下伸展), 负值降低机身 (腿向上收缩) */
-#define BODY_HEIGHT_RANGE_MM      30
+#define BODY_HEIGHT_RANGE_MM      40
 
 /* 机身姿态旋转范围 (0.1° 单位)
  * 摇杆满量程 (±500) 映射到的机身旋转角。
@@ -160,7 +160,7 @@
 #define TRAVEL_MAX_FORWARD_MM   140     /* 满杆步长 (mm)，约体长1/3 */
 #define TRAVEL_MAX_STRAFE_MM     90     /* 满杆平移步长 (mm) */
 #define TRAVEL_MAX_TURN_MM       60    /* 满杆旋转步长 (mm) */
-#define LIFT_SPEED_MM_PER_TICK   40      /* 升降速度 (mm/周期), 油门杆用 */
+#define LIFT_SPEED_MM_PER_TICK   100      /* 升降速度 (mm/周期), 油门杆用 */
 #define LIFT_HEIGHT_MIN_MM      5      /* 最低抬腿高度 (mm) */
 #define LIFT_HEIGHT_MAX_MM      60     /* 最高抬腿高度 (mm) */
 
@@ -180,7 +180,7 @@
  *       高摇杆 = 大步长 + 高频率 → 快速行进
  *       两者叠加产生自然的加速度曲线。 */
 #define GAIT_PERIOD_MAX_MS      180    /* 微动: 最慢步频 */
-#define GAIT_PERIOD_MIN_MS       50    /* 满杆: 最快步频 */
+#define GAIT_PERIOD_MIN_MS       45    /* 满杆: 最快步频 */
 
 /* CH7 通道保留 (CRSF_CHANNEL_SPEED)，暂不参与控制。
  * 连续变速由摇杆幅度自动映射，无需开关干预。 */
@@ -299,7 +299,7 @@
  * 机身高度调节通过 body_pos.y 在此基础上偏移:
  *   init_pos_y = INIT_Y - body_pos.y
  * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±20mm)。 */
-#define INIT_Y               50
+#define INIT_Y               60
 
 /* 足端在 coxa 基座坐标系中的站立位置
  *
