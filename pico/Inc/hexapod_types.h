@@ -57,6 +57,14 @@ typedef struct {
     uint8_t  gait_leg_nr[CNT_LEGS]; // 每条腿的初始位置
 } gait_t;
 
+/* IMU 传感器数据 (0.1° 单位) */
+typedef struct {
+    int16_t roll;       /* 横滚 (绕 X 前进轴) */
+    int16_t pitch;      /* 俯仰 (绕 Z 左右轴) */
+    int16_t yaw;        /* 偏航 (绕 Y 垂直轴) */
+    bool    valid;      /* 数据有效标志 */
+} imu_data_t;
+
 /* 控制状态结构体 */
 typedef struct {
     bool        robot_on;           // 机器人开关状态

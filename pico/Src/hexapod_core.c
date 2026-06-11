@@ -61,7 +61,12 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
 
     hal_debug_init();
     hal_input_init(INPUT_TYPE_CRSF);  /* 使用 CRSF 接收器输入 */
-    
+
+    /* IMU 姿态传感器 — 失败不阻塞启动，仅禁用姿态补偿 */
+#if IMU_ENABLED
+    hal_imu_init();
+#endif
+
     robot->initialized = true;
     robot->servos_enabled = false;
     robot->last_update_time = hal_get_tick_ms();
@@ -236,11 +241,15 @@ static void compute_leg_ik(hexapod_t *robot, leg_index_t leg_index, int16_t gait
     target_foot.y = cfg->init_pos_y + gait_pos.y;
     target_foot.z = cfg->init_pos_z + gait_pos.z;
     
-    /* IK解算 */
+    /* IK解算 — 叠加 IMU 姿态补偿到用户摇杆指令 */
     ik_solution_t solution;
+    coord3d_t effective_body_rot;
+    effective_body_rot.x = robot->state.body_rot.x + robot->state.body_rot_offset.x;
+    effective_body_rot.y = robot->state.body_rot.y + robot->state.body_rot_offset.y;
+    effective_body_rot.z = robot->state.body_rot.z + robot->state.body_rot_offset.z;
     bool ok = hexapod_ik_complete(&target_foot,
                                  &robot->state.body_pos,
-                                 &robot->state.body_rot,
+                                 &effective_body_rot,
                                  leg_index,
                                  cfg,
                                  &solution);
@@ -317,6 +326,19 @@ void hexapod_update(hexapod_t *robot)
 
     /* 读取输入 (直接覆写 travel_length) */
     hal_input_update(&robot->state);
+
+    /* ---- IMU 姿态补偿 ----
+     * 读取 BNO055 实际姿态，取反后写入 body_rot_offset。
+     * IK 解算时叠加 body_rot + body_rot_offset → 自动抵消机身倾斜。
+     * Yaw 不补偿，避免与操作员转向指令冲突。 */
+#if IMU_ENABLED
+    imu_data_t imu;
+    if (hal_imu_read(&imu) && imu.valid) {
+        robot->state.body_rot_offset.x = -(imu.roll  * IMU_COMPENSATION_GAIN) / 10;
+        robot->state.body_rot_offset.z = -(imu.pitch * IMU_COMPENSATION_GAIN) / 10;
+        robot->state.body_rot_offset.y = 0;  /* Yaw 不补偿 */
+    }
+#endif
 
     /* 机器人开关状态变化处理 */
     if (robot->state.robot_on != robot->state.prev_robot_on) {

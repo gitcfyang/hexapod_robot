@@ -8,6 +8,7 @@
 
 #include "hexapod_hal.h"
 #include "hexapod_config.h"
+#include "bno055.h"
 #include "hexapod_i2c_protocol.h"
 #include "hexapod_core.h"
 #include "hexapod_gait.h"
@@ -886,4 +887,70 @@ uint8_t hal_debug_get_last_servo_count(void)
 bool hal_is_calibration_active(void)
 {
     return g_calib_active;
+}
+
+/* ==================== IMU 姿态传感器接口 ==================== */
+
+static bool g_imu_available = false;
+
+bool hal_imu_init(void)
+{
+#if IMU_ENABLED
+    g_imu_available = bno055_init(BNO055_I2C_ADDR);
+    if (g_imu_available) {
+        hal_debug_printf("IMU: BNO055 detected at 0x%02X\r\n", BNO055_I2C_ADDR);
+    } else {
+        hal_debug_printf("WARNING: BNO055 not found at 0x%02X, IMU disabled\r\n",
+                         BNO055_I2C_ADDR);
+    }
+    return g_imu_available;
+#else
+    g_imu_available = false;
+    return false;
+#endif
+}
+
+bool hal_imu_read(imu_data_t *data)
+{
+    if (!data) return false;
+
+#if IMU_ENABLED
+    if (!g_imu_available) {
+        data->valid = false;
+        return false;
+    }
+
+    bno055_euler_t raw;
+    if (!bno055_read_euler(&raw)) {
+        data->valid = false;
+        return false;
+    }
+
+    /* BNO055 欧拉角: 1° = 16 LSB → 代码 0.1° = raw * 10 / 16
+     *
+     * BNO055 输出约定 (Windows 默认, UNIT_SEL bit0=0):
+     *   Roll  → 绕 Y 轴 (左右倾斜)
+     *   Pitch → 绕 X 轴 (前后倾斜)
+     *   Heading → 绕 Z 轴
+     *
+     * 机器人坐标映射:
+     *   body_rot.x = Roll  (绕 X 前进轴) ← BNO055 Roll  (Y 轴)
+     *   body_rot.z = Pitch (绕 Z 左右轴) ← BNO055 Pitch (X 轴)
+     *   body_rot.y = Yaw   (绕 Y 垂直轴) ← BNO055 Heading
+     *
+     * 注意: BNO055 Roll/Pitch 轴与机器人 Roll/Pitch 轴是交叉映射的。
+     * BNO055 的 Roll 是绕自身 Y 轴 → 机器人绕 X 轴 (Roll)
+     * BNO055 的 Pitch 是绕自身 X 轴 → 机器人绕 Z 轴 (Pitch)
+     * 这是因为 BNO055 芯片方向和机器人安装方向可能存在旋转。 */
+
+    data->roll  = (raw.roll  * 10) / 16;   /* BNO055 Y → Robot X (Roll) */
+    data->pitch = (raw.pitch * 10) / 16;   /* BNO055 X → Robot Z (Pitch) */
+    data->yaw   = (raw.heading * 10) / 16; /* 暂不使用，保留 */
+    data->valid = true;
+
+    return true;
+#else
+    data->valid = false;
+    return false;
+#endif
 }

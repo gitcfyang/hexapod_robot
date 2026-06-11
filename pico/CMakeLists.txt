@@ -44,6 +44,7 @@ add_executable(hexapod_pico
     Src/hexapod_hal_pico.c
     Src/hexapod_i2c_protocol.c
     Src/hexapod_crsf.c
+    Src/bno055.c
 )
 
 pico_set_program_name(hexapod_pico "hexapod_pico")

@@ -6,6 +6,7 @@
 - PCA9685: I²C1 GP2/GP3 @400kHz, 内部上拉
 - PWM: 100Hz 数字舵机, 两片 PCA9685 独立校准
 - 接收器: ELRS CRSF, UART1 GP4/GP5 @420000bps
+- IMU: BNO055 9轴姿态传感器, I²C1 GP2/GP3 (共享), 地址 0x28 (可选)
 - 腿: coxa=45mm, femur=75mm, tibia=120mm
 - 舵机零位: FEMUR_SERVO_ZERO=450, TIBIA_SERVO_ZERO=900
 - 底板: coxa基座高出底板25mm
@@ -39,11 +40,11 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ```
 正常模式:
   CRSF CH1-8 → 两级死区 → 仿生连续变速 → 子步态插值(1200微步)
-  → IK → servo batch → I²C (PCA9685) → 100Hz PWM
+  → [IMU body_rot_offset 取反叠加] → IK → servo batch → I²C (PCA9685) → 100Hz PWM
 
 平衡模式:
   CRSF CH1-8 → body_rot + body_pos.y 直接映射 (全部取反, 方向已校准)
-  → IK (standing) → servo batch → I²C → 100Hz PWM
+  → [IMU body_rot_offset 取反叠加] → IK (standing) → servo batch → I²C → 100Hz PWM
 ```
 
 ## 平衡模式 body_rot 坐标 (已修复)
@@ -54,6 +55,18 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 三轴均取反，使摇杆方向与机身倾斜方向直觉一致
 - 旋转顺序: Ry(Yaw) → Rx(Roll) → Rz(Pitch)
 - 历史: 初始版本 x/z 标注反了 (x=Pitch/z=Roll)，导致 CH1/CH2 效果互换
+
+## IMU 姿态补偿 (BNO055, 2026-06-11 新增)
+- BNO055 9轴 IMU, 与 PCA9685 共享 I²C1 (GP2/GP3), 地址 0x28
+- 工作模式: NDOF (9-DOF 融合), 100Hz 欧拉角输出
+- 补偿通道: body_rot_offset (Roll/Pitch 取反, Yaw=0 不补偿)
+- 叠加点: compute_leg_ik() 中 effective_body_rot = body_rot + body_rot_offset
+- 启用: IMU_ENABLED=1 (hexapod_config.h)
+- 增益: IMU_COMPENSATION_GAIN (×10, 默认 10=1:1 直接补偿)
+- 驱动: bno055.h/c, 通过 hal_imu_init()/hal_imu_read() 封装
+- 容错: 传感器未检测到时打印警告, 固件正常运行 (无补偿)
+- 坐标映射: BNO055 Roll(Y轴) → Robot Roll(X轴), BNO055 Pitch(X轴) → Robot Pitch(Z轴)
+-           (具体正负号取决于 IMU 安装方向, 在 hal_imu_read() 中调整)
 
 ## PWM 校准
 - 用 PWM_PERIOD_US (每板实测周期) 直接计算脉宽计数值
@@ -92,5 +105,5 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
 - [ ] 电池 ADC 分压器 + BATTERY_CHECK_ENABLED
 - [ ] Core1 双核卸载 IK 计算
-- [ ] 加入 imu ，自动调整机身
+- [x] 加入 IMU (BNO055 I²C 驱动 + body_rot_offset 姿态补偿) — 待实测验证
 - [ ] 加入 足端传感器 ， 自动进行步态调整

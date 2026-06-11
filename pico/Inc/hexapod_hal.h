@@ -161,6 +161,21 @@ void hal_led_set(uint8_t led_id, bool state);
  */
 void hal_led_blink(uint8_t led_id, uint8_t times);
 
+/* ==================== IMU 姿态传感器接口 ==================== */
+
+/**
+ * @brief 初始化 IMU 姿态传感器 (BNO055)
+ * @return true 表示传感器就绪，false 表示未检测到 (姿态补偿不可用)
+ */
+bool hal_imu_init(void);
+
+/**
+ * @brief 读取 IMU 姿态数据
+ * @param data 输出姿态数据 (0.1° 单位, valid 标志指示数据是否可信)
+ * @return true 表示读取成功
+ */
+bool hal_imu_read(imu_data_t *data);
+
 /* ==================== 舵机ID映射（用户需要定义） ==================== */
 
 /**

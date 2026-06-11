@@ -7,6 +7,7 @@
 - **MCU**: Raspberry Pi Pico (RP2040)
 - **舵机**: 18 路数字舵机，2× PCA9685 驱动
 - **接收器**: ELRS CRSF (UART)
+- **IMU**: BNO055 9轴姿态传感器 (I²C 0x28, 可选)
 - **腿节**: Coxa 45mm / Femur 75mm / Tibia 120mm
 
 ## 结构
@@ -27,15 +28,17 @@ hexapod_robot/
 │   │   ├── hexapod_math.h            #   三角函数查表
 │   │   ├── hexapod_crsf.h            #   CRSF 协议解析
 │   │   ├── hexapod_hal.h             #   硬件抽象层接口
-│   │   └── hexapod_i2c_protocol.h    #   PCA9685 I²C 协议
+│   │   ├── hexapod_i2c_protocol.h    #   PCA9685 I²C 协议
+│   │   └── bno055.h                  #   BNO055 IMU 寄存器映射
 │   └── Src/                          # 实现文件
 │       ├── hexapod_core.c            #   控制循环、IK 集成、转向步态
 │       ├── hexapod_ik.c              #   单腿 IK + 机身旋转矩阵
 │       ├── hexapod_gait.c            #   波纹/三角/波浪步态序列
 │       ├── hexapod_math.c            #   sin/cos/acos/atan4 查表实现
 │       ├── hexapod_crsf.c            #   ELRS 通道解析、摇杆映射
-│       ├── hexapod_hal_pico.c        #   Pico 硬件驱动 (I²C/UART/舵机)
-│       └── hexapod_i2c_protocol.c    #   PWM 校准、批量写入
+│       ├── hexapod_hal_pico.c        #   Pico 硬件驱动 (I²C/UART/舵机/IMU)
+│       ├── hexapod_i2c_protocol.c    #   PWM 校准、批量写入
+│       └── bno055.c                  #   BNO055 I²C 驱动 (NDOF 融合)
 └── tools/
     └── ik_gait_debug.py              # IK + 步态 Python 仿真可视化
 ```
@@ -50,6 +53,20 @@ hexapod_robot/
 - CH5: 解锁/上电
 - CH6: 步态切换（波纹 / 三角 / 波浪）
 - CH8: 平衡模式开关
+
+## IMU 姿态补偿 (可选)
+
+启用 `IMU_ENABLED=1` 后，BNO055 实时测量机身倾斜角度，通过 `body_rot_offset` 自动叠加到 IK 解算，实现机身自动调平：
+
+```
+BNO055 (I²C 0x28) → 欧拉角读取 → body_rot_offset (取反)
+                                               ↓
+CRSF 摇杆 → body_rot ─────────────→ [ + ] → IK 旋转矩阵 → 舵机
+```
+
+- Roll/Pitch 补偿生效，Yaw 不补偿（避免与转向冲突）
+- 两种模式（正常/平衡）均受益
+- 传感器未检测到时自动降级，不影响基本功能
 
 ## 编译
 
