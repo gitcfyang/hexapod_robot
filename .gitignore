@@ -1,5 +1,5 @@
-# Build outputs — ignore everything except UF2 firmware image
-pico/build/*
+# Build outputs
+pico/build/
 
 # IDE / Editor
 .vscode/
