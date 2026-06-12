@@ -1,5 +1,6 @@
 # Build outputs
 pico/build/
+tools/__pycache__/
 
 # IDE / Editor
 .vscode/
