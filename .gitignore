@@ -1,6 +1,5 @@
 # Build outputs — ignore everything except UF2 firmware image
 pico/build/*
-!pico/build/hexapod_pico.uf2
 
 # IDE / Editor
 .vscode/
