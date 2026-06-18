@@ -60,7 +60,11 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
     }
 
     hal_debug_init();
-    hal_input_init(INPUT_TYPE_CRSF);  /* 使用 CRSF 接收器输入 */
+#if INPUT_CONTROL_MODE == 0
+    hal_input_init(INPUT_TYPE_CRSF);  /* CRSF 接收器 (ELRS) */
+#else
+    hal_input_init(INPUT_TYPE_SERIAL);  /* USB CDC 串口命令 */
+#endif
 
     /* IMU 姿态传感器 — 失败不阻塞启动，仅禁用姿态补偿 */
 #if IMU_ENABLED

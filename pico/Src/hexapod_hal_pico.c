@@ -405,57 +405,68 @@ bool hal_input_init(input_type_t type)
 {
     static bool init_done = false;
     static input_type_t current_type = INPUT_TYPE_CRSF;
-    
+
     /* 如果是首次初始化，或者模式切换了，需要重新配置 */
     if (init_done && type == current_type) {
         return true;  /* 同模式重复调用，直接返回 */
     }
-    
+
     /* 如果之前已初始化且模式不同，先停用UART中断 */
     if (init_done) {
+#if INPUT_CONTROL_MODE == 0
         uart_set_irq_enables(INPUT_UART_ID, false, false);
         irq_set_enabled(UART1_IRQ, false);
         uart_deinit(INPUT_UART_ID);
+#endif
     }
-    
+
+#if INPUT_CONTROL_MODE == 0
     g_crsf_mode = (type == INPUT_TYPE_CRSF);
+#else
+    g_crsf_mode = false;  /* USB 串口模式：不启用 UART1 */
+#endif
     current_type = type;
-    
+
     /* 初始化/重置 CRSF 解析器 */
     crsf_parser_init(&g_crsf_parser);
     crsf_state_init(&g_crsf_state);
-    
+
+#if INPUT_CONTROL_MODE == 0
     if (g_crsf_mode) {
         /* CRSF 模式：420000 baud */
         uart_init(INPUT_UART_ID, INPUT_UART_BAUD_CRSF);
         gpio_set_function(INPUT_UART_TX_PIN, GPIO_FUNC_UART);
         gpio_set_function(INPUT_UART_RX_PIN, GPIO_FUNC_UART);
-        
+
         /* 设置 UART 为 8N1（CRSF 使用 8 数据位） */
         uart_set_format(INPUT_UART_ID, 8, 1, UART_PARITY_NONE);
-        
+
         irq_set_exclusive_handler(UART1_IRQ, crsf_uart_irq_handler);
         irq_set_enabled(UART1_IRQ, true);
         uart_set_irq_enables(INPUT_UART_ID, true, false);
-        
+
         hal_debug_printf("CRSF input initialized (420000 baud)\r\n");
     } else {
         /* 串口命令模式：115200 baud */
         uart_init(INPUT_UART_ID, INPUT_UART_BAUD_SERIAL);
         gpio_set_function(INPUT_UART_TX_PIN, GPIO_FUNC_UART);
         gpio_set_function(INPUT_UART_RX_PIN, GPIO_FUNC_UART);
-        
+
         irq_set_exclusive_handler(UART1_IRQ, input_uart_irq_handler);
         irq_set_enabled(UART1_IRQ, true);
         uart_set_irq_enables(INPUT_UART_ID, true, false);
-        
+
         /* 清空串口接收缓冲 */
         input_rx_head = 0;
         input_rx_tail = 0;
-        
+
         hal_debug_printf("Serial input initialized (115200 baud)\r\n");
     }
-    
+#else
+    /* USB CDC 串口模式：无需 UART1 硬件，USB 虚拟串口由 stdio 提供 */
+    hal_debug_printf("USB CDC Serial input mode (no UART1)\r\n");
+#endif
+
     init_done = true;
     return true;
 }
@@ -678,6 +689,35 @@ bool hal_input_update(control_state_t *ctrl_state)
 {
     if (!ctrl_state) return false;
 
+#if INPUT_CONTROL_MODE == 1
+    /* ========== USB CDC 串口模式 ==========
+     * 仅通过 USB 虚拟串口接收命令，无 UART1 硬件参与。
+     * 非阻塞轮询：getchar_timeout_us(0) 无数据立即返回。 */
+    {
+        static uint8_t usb_buf[16];
+        static uint8_t usb_len = 0;
+
+        int ch = getchar_timeout_us(0);
+        while (ch != PICO_ERROR_TIMEOUT) {
+            if (ch == '\n' || ch == '\r') {
+                if (usb_len > 0) {
+                    parse_serial_command(ctrl_state, usb_buf, usb_len);
+                    usb_len = 0;
+                    return true;
+                }
+            } else if (usb_len < sizeof(usb_buf)) {
+                usb_buf[usb_len++] = (uint8_t)ch;
+            }
+            ch = getchar_timeout_us(0);
+        }
+    }
+    return false;
+
+#else
+    /* ========== CRSF 模式 ==========
+     * USB CDC 命令在 CRSF 链路断开时可用作后备控制，
+     * 但 CRSF 激活时会覆写 control_state。 */
+
     /* ---- USB CDC 串口命令 (始终可用，独立于输入模式) ----
      * 通过 Pico 的 USB 虚拟串口接收命令，无需额外硬件。
      * 非阻塞轮询：getchar_timeout_us(0) 无数据立即返回。
@@ -732,11 +772,11 @@ bool hal_input_update(control_state_t *ctrl_state)
         uint8_t cmd_buf[16];
         uint8_t cmd_len = 0;
         bool cmd_ready = false;
-        
+
         while (input_rx_head != input_rx_tail) {
             uint8_t byte = input_rx_buf[input_rx_tail];
             input_rx_tail = (input_rx_tail + 1) % INPUT_BUF_SIZE;
-            
+
             if (byte == '\n' || byte == '\r') {
                 if (cmd_len > 0) {
                     cmd_ready = true;
@@ -746,13 +786,14 @@ bool hal_input_update(control_state_t *ctrl_state)
                 cmd_buf[cmd_len++] = byte;
             }
         }
-        
+
         if (cmd_ready) {
             return parse_serial_command(ctrl_state, cmd_buf, cmd_len);
         }
     }
-    
+
     return false;
+#endif
 }
 
 void hal_input_allow_interrupts(bool allow)

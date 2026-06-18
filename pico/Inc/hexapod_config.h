@@ -97,6 +97,11 @@
 /* 调试输出间隔（毫秒），避免 USB 输出阻塞控制循环 */
 #define DEBUG_PRINT_INTERVAL_MS 1000
 
+/* 输入控制模式:
+ *   0 = CRSF 接收器 (ELRS, UART1 @420000 baud)
+ *   1 = USB CDC 串口命令 (USB 虚拟串口, 无需额外硬件) */
+#define INPUT_CONTROL_MODE      0   /* ★ 0=CRSF, 1=USB Serial */
+
 /* 无舵机调试模式：PRODUCTION=0 要求舵机硬件就绪才启动 */
 #define HEADLESS_MODE           0   /* ★ 生产模式：舵机必须正常 */
 

@@ -142,13 +142,17 @@ int main(void)
     /* 硬件信息打印 */
     hal_debug_printf("\r\n");
     hal_debug_printf("Servo: PCA9685 x2 via I2C (GP2/GP3)\r\n");
+#if INPUT_CONTROL_MODE == 0
     hal_debug_printf("Input: CRSF (ELRS) via UART1 (GP4/GP5) @420000 baud\r\n");
-    hal_debug_printf("       Serial via UART1 @115200 baud (switch to INPUT_TYPE_SERIAL)\r\n");
+#else
+    hal_debug_printf("Input: USB CDC Serial (no UART1 required)\r\n");
+#endif
     hal_debug_printf("Battery: ADC0 (GP26)\r\n");
     hal_debug_printf("Buzzer: GP15\r\n");
     hal_debug_printf("LED: GP25 (built-in)\r\n");
     hal_debug_printf("Debug: USB CDC\r\n");
 
+#if INPUT_CONTROL_MODE == 0
     /* 打印 CRSF 摇杆映射 */
     hal_debug_printf("\r\nCRSF Channel Mapping:\r\n");
     hal_debug_printf("  Normal mode (CH8=LOW):\r\n");
@@ -162,6 +166,14 @@ int main(void)
     hal_debug_printf("    CH7 (SWC): Speed  CH8 (SWD): Balance\r\n");
 
     hal_debug_printf("\r\nWaiting for ELRS link...\r\n");
+#else
+    hal_debug_printf("\r\nUSB Serial Commands:\r\n");
+    hal_debug_printf("  Movement: !F !B !L !R !Q !E !S\r\n");
+    hal_debug_printf("  State:   !O(arm) !G<n>(gait) !T(balance) !U/!D(lift)\r\n");
+    hal_debug_printf("  Servo:   !P<id> <angle> !W<id> !Z !A\r\n");
+    hal_debug_printf("  Calib:   !C[<id>] !+/- !N !D\r\n");
+    hal_debug_printf("\r\nReady for USB commands.\r\n");
+#endif
     hal_debug_printf("Send '!V' to toggle debug level (current=%u)\r\n", hal_debug_get_level());
 
     /* 启动提示音 */
@@ -183,19 +195,23 @@ int main(void)
             hexapod_update(&g_robot);
             last_update = now;
 
+#if INPUT_CONTROL_MODE == 0
             /* 统计 CRSF 帧到达数 */
             if (hal_debug_get_level() >= 1) {
                 frame_delta_total += hal_debug_get_crsf_frame_delta();
             }
+#endif
         }
 
         /* ---- 分级调试输出 ---- */
         if (hal_debug_get_level() >= 1 && (now - last_debug_time >= DEBUG_PRINT_INTERVAL_MS)) {
             last_debug_time = now;
 
-            /* Level 1: 接收器原始数据 */
+#if INPUT_CONTROL_MODE == 0
+            /* Level 1: CRSF 接收器原始数据 */
             const crsf_state_t *crsf = (const crsf_state_t *)hal_debug_get_crsf_state();
             debug_print_crsf(crsf);
+#endif
 
             /* Level 2: 控制量映射 */
             if (hal_debug_get_level() >= 2) {
@@ -208,11 +224,13 @@ int main(void)
                 debug_print_ik_angles();
             }
 
-            /* 帧率统计 */
+#if INPUT_CONTROL_MODE == 0
+            /* CRSF 帧率统计 */
             hal_debug_printf("[DBG] FPS:%lu LVL:%u\r\n",
                         frame_delta_total * 1000 / DEBUG_PRINT_INTERVAL_MS,
                         hal_debug_get_level());
             frame_delta_total = 0;
+#endif
         }
 
         /* ---- 每2秒运行状态摘要 ---- */
@@ -229,7 +247,11 @@ int main(void)
                             state->leg_lift_height);
                 hal_led_set(0, true);
             } else {
+#if INPUT_CONTROL_MODE == 0
                 hal_debug_printf("[IDLE] Waiting for Arm signal...\r\n");
+#else
+                hal_debug_printf("[IDLE] Send !O to arm, !F/!B/!L/!R to move\r\n");
+#endif
                 hal_led_set(0, false);
 
                 /* 待机时每5秒闪一下 */
