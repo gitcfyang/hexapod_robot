@@ -31,7 +31,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 机身高度调节: BODY_HEIGHT_RANGE_MM=±20mm
 
 ## 仿生连续变速
-- 摇杆幅度连续映射到步态周期 (替代 CH7 三段开关)
+- 摇杆幅度连续映射到步态周期 (替代原设计 CH7 三段开关)
 - GAIT_PERIOD_MAX=180ms → MIN=45ms
 - 低摇杆 = 短步长 + 低频率, 高摇杆 = 大步长 + 高频率
 - CH7 保留为可选频率范围倍率 (SPEED_SWITCH_ENABLED=0)
@@ -47,16 +47,15 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
   → [IMU body_rot_offset 取反叠加] → IK (standing) → servo batch → I²C → 100Hz PWM
 ```
 
-## 平衡模式 body_rot 坐标 (已修复)
+## 平衡模式 body_rot 坐标
 - X=前 Y=上 Z=右 (右手定则)
 - body_rot.x = Roll 横滚 (Rx, 绕 X 前进轴, 摇杆 CH1)
 - body_rot.y = Yaw 偏航 (Ry, 绕 Y 垂直轴, 摇杆 CH4)
 - body_rot.z = Pitch 俯仰 (Rz, 绕 Z 左右轴, 摇杆 CH2)
 - 三轴均取反，使摇杆方向与机身倾斜方向直觉一致
 - 旋转顺序: Ry(Yaw) → Rx(Roll) → Rz(Pitch)
-- 历史: 初始版本 x/z 标注反了 (x=Pitch/z=Roll)，导致 CH1/CH2 效果互换
 
-## IMU 姿态补偿 (BNO055, 2026-06-11 新增)
+## IMU 姿态补偿
 - BNO055 9轴 IMU, 与 PCA9685 共享 I²C1 (GP2/GP3), 地址 0x28
 - 工作模式: NDOF (9-DOF 融合), 100Hz 欧拉角输出
 - 补偿通道: body_rot_offset (Roll/Pitch 取反, Yaw=0 不补偿)
@@ -76,7 +75,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 两块 PCA9685 使用独立的校准值，消除器件间振荡器差异
 - I²C 写入失败检测 + 自动重试 + 告警
 
-## 控制频率 (2026-06-03 升级)
+## 控制频率
 - 控制循环: 100Hz (CONTROL_LOOP_PERIOD_MS=10ms)
 - PCA9685 PWM: 100Hz
 - IK 解算: 100Hz (原 50Hz)，每次更新每帧 PWM 都有新角度
