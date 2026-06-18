@@ -121,7 +121,8 @@ void hal_servo_flush(void)
     g_last_servo_count = g_servo_batch.count;  /* 记录调试信息 */
 
     uint8_t board_cnt = pca9685_get_board_count();
-    static uint32_t i2c_fail_count = 0;
+    static uint32_t i2c_fail_total = 0;
+    static uint8_t  i2c_fail_consecutive = 0;
     bool all_ok = true;
 
     /* 处理每块 PCA9685 板：板 0→舵机 ID 0~8, 板 1→舵机 ID 9~17 */
@@ -154,11 +155,25 @@ void hal_servo_flush(void)
 
     if (all_ok) {
         g_servo_batch.count = 0;
+        i2c_fail_consecutive = 0;  /* 成功则清零连续失败计数 */
     } else {
-        i2c_fail_count++;
+        i2c_fail_total++;
+        i2c_fail_consecutive++;
+
         /* 每 50 次失败告警一次 (约 1 秒) */
-        if (i2c_fail_count % 50 == 1) {
-            hal_debug_printf("[WARN] I2C flush fail x%lu\r\n", i2c_fail_count);
+        if (i2c_fail_total % 50 == 1) {
+            hal_debug_printf("[WARN] I2C flush fail total=%lu consec=%u\r\n",
+                             i2c_fail_total, i2c_fail_consecutive);
+        }
+
+        /* 连续失败 3 次 (约 60ms) → 执行 I2C 总线恢复
+         * 标准恢复流程：发送 9 个 SCL 脉冲释放被卡死的 SDA，
+         * 然后重新初始化 I2C 外设。整个过程约 1-2ms。 */
+        if (i2c_fail_consecutive >= 3) {
+            hal_debug_printf("[WARN] I2C consecutive fail %u, recovering bus...\r\n",
+                             i2c_fail_consecutive);
+            pca9685_i2c_recover();
+            i2c_fail_consecutive = 0;
         }
     }
 }

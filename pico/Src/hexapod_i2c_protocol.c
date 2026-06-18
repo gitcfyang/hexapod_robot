@@ -337,6 +337,82 @@ void pca9685_free_all(void)
     }
 }
 
+/* ==================== I2C 总线恢复 ==================== */
+
+/**
+ * @brief I2C 总线恢复：当 SDA 被从设备拉死时，发送 9 个 SCL 时钟脉冲释放总线
+ *
+ * 标准 I2C 恢复流程（来自 I2C 规范 3.1.16）：
+ *   1. 将 SCL/SDA 临时配置为 GPIO 开漏输出
+ *   2. 发送最多 9 个 SCL 脉冲，让卡死的从设备完成未完成的字节传输
+ *   3. 发送 STOP 条件 (SDA 低→高 当 SCL 为高)
+ *   4. 重新初始化 I2C 外设并恢复引脚功能
+ *
+ * 调用时机：连续多次 I2C 写入失败后。
+ */
+void pca9685_i2c_recover(void)
+{
+    printf("[I2C] Bus recovery started...\r\n");
+
+    /* 禁用 I2C 外设，释放引脚 */
+    i2c_deinit(PCA9685_I2C_INSTANCE);
+
+    /* 将 SDA/SCL 配置为 GPIO 开漏输出（模拟 I2C 电气特性） */
+    gpio_init(PCA9685_I2C_SDA_PIN);
+    gpio_init(PCA9685_I2C_SCL_PIN);
+    gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_OUT);
+    gpio_set_dir(PCA9685_I2C_SCL_PIN, GPIO_OUT);
+    gpio_put(PCA9685_I2C_SDA_PIN, 1);
+    gpio_put(PCA9685_I2C_SCL_PIN, 1);
+    sleep_us(10);
+
+    /* 检查 SDA 是否确实被拉低（被从设备卡住） */
+    gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_IN);
+    bool sda_stuck = !gpio_get(PCA9685_I2C_SDA_PIN);
+    gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_OUT);
+    gpio_put(PCA9685_I2C_SDA_PIN, 1);
+
+    if (sda_stuck) {
+        printf("[I2C] SDA stuck LOW, sending recovery clocks...\r\n");
+
+        /* 发送最多 9 个 SCL 脉冲。
+         * 每个脉冲让从设备释放 1 bit。9 个脉冲 = 完整 1 字节 + ACK。
+         * 在任意时刻 SDA 被释放，剩余的脉冲无害。 */
+        for (int i = 0; i < 9; i++) {
+            gpio_put(PCA9685_I2C_SCL_PIN, 0);
+            sleep_us(20);
+            gpio_put(PCA9685_I2C_SCL_PIN, 1);
+            sleep_us(20);
+
+            /* 检查 SDA 是否已释放 */
+            gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_IN);
+            bool released = gpio_get(PCA9685_I2C_SDA_PIN);
+            gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_OUT);
+            if (released) {
+                printf("[I2C] SDA released after %d clocks\r\n", i + 1);
+                break;
+            }
+        }
+    }
+
+    /* 发送 STOP 条件：SDA 从低跳高，SCL 保持高 */
+    gpio_put(PCA9685_I2C_SCL_PIN, 1);
+    sleep_us(10);
+    gpio_put(PCA9685_I2C_SDA_PIN, 0);
+    sleep_us(10);
+    gpio_put(PCA9685_I2C_SDA_PIN, 1);
+    sleep_us(10);
+
+    /* 重新初始化 I2C 外设 */
+    i2c_init(PCA9685_I2C_INSTANCE, PCA9685_I2C_BAUD);
+    gpio_set_function(PCA9685_I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(PCA9685_I2C_SDA_PIN);
+    gpio_pull_up(PCA9685_I2C_SCL_PIN);
+
+    printf("[I2C] Bus recovery complete\r\n");
+}
+
 /* ==================== 调试工具 ==================== */
 
 void pca9685_scan_bus(void)

@@ -73,7 +73,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - `pulse_to_count = pulse_us × 4096 / pwm_period_us`
 - 当前: 200Hz → PWM_PERIOD_US_BOARD0/BOARD1 (示波器实测后填入)
 - 两块 PCA9685 使用独立的校准值，消除器件间振荡器差异
-- I²C 写入失败检测 + 自动重试 + 告警
+- I²C 写入失败检测 + 自动重试 + 连续 3 次失败自动总线恢复 (I2C spec 3.1.16)
 
 ## 控制频率
 - 控制循环: 100Hz (CONTROL_LOOP_PERIOD_MS=10ms)
@@ -81,6 +81,39 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - IK 解算: 100Hz (原 50Hz)，每次更新每帧 PWM 都有新角度
 - I2C 批量写入: ~1.5ms/板，占空比 ~30% (200Hz 下 5ms 周期)
 - 第二块 PCA9685 接入后 I2C 占空比 ~60%，仍有 2ms IK 计算余量（200hz下）
+
+## 输入控制模式
+- 编译期开关: `INPUT_CONTROL_MODE` (hexapod_config.h)
+  - `0` = CRSF 接收器 (ELRS, UART1 @420000 baud) — 默认
+  - `1` = USB CDC 串口命令 (USB 虚拟串口, 无需 UART1)
+- 两种模式互斥，无运行时冲突
+- USB 串口命令列表: `!F` `!B` `!L` `!R` `!Q` `!E` `!S` (运动), `!O` (解锁), `!G<n>` (步态), `!T` (平衡), `!U/!D` (抬腿), `!V` (调试), `!C` (校准), `!P` `!W` `!Z` `!A` (舵机直控)
+
+## 鲁棒性保护 (watchdog-i2c-recovery)
+
+### 硬件看门狗
+- RP2040 硬件 Watchdog，超时 1500ms
+- 主循环每迭代喂狗
+- 任何死锁 (I2C 卡死 / ISR 风暴) 在 1.5s 内自动复位
+- 调试器挂接时自动暂停 (pause_on_debug=1)
+
+### I2C 总线恢复
+- 连续 3 次 I2C 写入失败 → 自动执行总线恢复 (`pca9685_i2c_recover`)
+- 恢复流程: 检测 SDA 是否被拉低 → 发送 9 个 SCL 脉冲释放 → STOP 条件 → 重新初始化 I2C
+- 标准 I2C 规范 3.1.16 流程，耗时约 1-2ms
+- 成功后连续失败计数归零，正常继续
+
+### 电路保护建议 (防止 ESD 击穿)
+- **已发生事件**: 2026-06 手触碰板子 → ESD 静电击穿外部 QSPI Flash 芯片 → Pico 无法启动 (仅能进 BOOTSEL 大容量模式)
+- **最小保护方案** (成本 < ¥5):
+  - I2C SDA/SCL (GP2/GP3) 各串联 100Ω 限流电阻
+  - 3.3V 对地并联 TVS 管 (SMAJ3.3A / PESD3V3)
+  - 板子装盒或贴绝缘胶带，裸露 GPIO 是 ESD 直接入口
+- **强烈建议**:
+  - 舵机独立供电 (2S LiPo → 7.4V → 舵机电源轨)，Pico 单独供电
+  - PCA9685 端 SDA/SCL 各上拉 2.2kΩ 到 PCA9685 VCC，限制反灌电流
+  - 3.3V 输出对地加 100μF 电解 + 0.1μF 陶瓷，抑制舵机 EMI
+- **进阶**: SRV05-4 ESD 阵列 / I2C 光耦隔离 (ADUM1250) / 共模扼流圈
 
 ## 步态
 - RIPPLE_12 (默认): 4抬腿+8支撑=12步, 占空比67%
@@ -105,4 +138,6 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - [ ] 电池 ADC 分压器 + BATTERY_CHECK_ENABLED
 - [ ] Core1 双核卸载 IK 计算
 - [x] 加入 IMU (BNO055 I²C 驱动 + body_rot_offset 姿态补偿) — 待实测验证
-- [ ] 加入 足端传感器 ， 自动进行步态调整
+- [x] 硬件看门狗 + I2C 总线自动恢复
+- [ ] Pico 换新 → 加电路保护 (I2C 串联电阻 + TVS + 绝缘)
+- [ ] 加入 足端传感器，自动进行步态调整

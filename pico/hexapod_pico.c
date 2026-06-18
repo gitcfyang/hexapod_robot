@@ -16,6 +16,7 @@
 
 #include "pico/stdlib.h"
 #include "pico/time.h"
+#include "hardware/watchdog.h"
 #include "hexapod_core.h"
 #include "hexapod_config.h"
 #include "hexapod_crsf.h"
@@ -181,6 +182,12 @@ int main(void)
     uint16_t startup_durations[] = {100, 100, 200};
     hal_play_sound(3, startup_notes, startup_durations);
 
+    /* ---- 硬件看门狗 ----
+     * 超时 1500ms：任何死锁（I2C 卡死、ISR 风暴）都将在 1.5s 内自动复位。
+     * pause_on_debug=1：调试器挂接时暂停看门狗，防止断点触发复位。 */
+    watchdog_enable(1500, 1);
+    hal_debug_printf("Watchdog enabled (1500ms timeout)\r\n");
+
     /* 主循环 */
     uint32_t last_status_time = 0;
     uint32_t last_debug_time  = 0;
@@ -188,6 +195,7 @@ int main(void)
     uint32_t frame_delta_total = 0;
 
     while (1) {
+        watchdog_update();
         uint32_t now = to_ms_since_boot(get_absolute_time());
 
         /* ---- 每20ms控制循环 ---- */
