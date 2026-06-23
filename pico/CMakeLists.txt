@@ -51,7 +51,7 @@ pico_set_program_name(hexapod_pico "hexapod_pico")
 pico_set_program_version(hexapod_pico "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(hexapod_pico 0)
+pico_enable_stdio_uart(hexapod_pico 1)
 pico_enable_stdio_usb(hexapod_pico 1)
 
 # Add the standard library to the build

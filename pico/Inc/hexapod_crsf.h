@@ -57,10 +57,11 @@
 #define CRSF_CHANNEL_BALANCE      7   // 平衡模式
 #endif
 
-/* CRSF 通道值范围（PWM us 等效值） */
-#define CRSF_CH_VALUE_MIN         500
-#define CRSF_CH_VALUE_MID         1000
-#define CRSF_CH_VALUE_MAX         1500
+/* CRSF 通道值范围（标准 11-bit 编码，对应 ELRS 输出）
+ * 摇杆: 172(Min) ~ 992(Mid) ~ 1811(Max)，跨度 ~819 每侧 */
+#define CRSF_CH_VALUE_MIN         172
+#define CRSF_CH_VALUE_MID         992
+#define CRSF_CH_VALUE_MAX         1811
 
 /* 死区参数：优先使用 hexapod_config.h 中的配置，否则使用默认值 */
 #ifndef CRSF_CH_VALUE_DEADBAND

@@ -8,6 +8,8 @@
 - **舵机**: 18 路数字舵机，2× PCA9685 驱动
 - **接收器**: ELRS CRSF (UART)
 - **IMU**: BNO055 9轴姿态传感器 (I²C 0x28, 可选)
+- **I²C**: I2C1, GP6 (SDA) / GP7 (SCL) @400kHz
+  - ⚠️ **PCA9685 必须用 3.3V 供电！** 5V 供电会导致 I2C 电平倒灌烧毁 RP2040 GPIO
 - **腿节**: Coxa 45mm / Femur 75mm / Tibia 120mm
 
 ## 结构
