@@ -93,3 +93,6 @@ USB CDC 串口命令：
 ## 状态
 
 > ⚠️ **项目仍在持续开发中，功能和接口可能随时变动。**
+
+## License
+This project is licensed under the GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.
