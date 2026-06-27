@@ -859,7 +859,7 @@ void hal_debug_printf(const char *format, ...)
 
 /* ==================== 蜂鸣器实现（GPIO 高低电平驱动，本地 GPIO，不走 I2C） ==================== */
 
-#define BUZZER_PIN              15
+#define BUZZER_PIN              13   /* GP13: 原 GP15 已改用于 I2C SCL */
 
 void hal_play_sound(uint8_t note_count,
                    const uint16_t *notes,
@@ -880,6 +880,76 @@ void hal_play_sound(uint8_t note_count,
         gpio_put(BUZZER_PIN, 0);
         sleep_ms(50);
     }
+}
+
+/* ==================== 足端微动开关实现（6路 GPIO 输入，上拉，落地→GND=低电平） ==================== */
+
+/*
+ * 六足机器人每条腿的足端安装微动开关，用于检测足端是否接触地面。
+ *
+ * 电气连接：
+ *   微动开关一端接 GPIO，另一端接 GND。
+ *   GPIO 启用内部上拉 (~50kΩ)，开关断开时读为高电平 (未着地)，
+ *   开关闭合时读为低电平 (足端着地)。
+ *
+ * GPIO 分配 (连续引脚，便于排线):
+ *   GP16 → 腿 0 (RR) 右后
+ *   GP17 → 腿 1 (RM) 右中
+ *   GP18 → 腿 2 (RF) 右前
+ *   GP19 → 腿 3 (LR) 左后
+ *   GP20 → 腿 4 (LM) 左中
+ *   GP21 → 腿 5 (LF) 左前
+ */
+
+#define FOOT_SW_PIN_RR   16
+#define FOOT_SW_PIN_RM   17
+#define FOOT_SW_PIN_RF   18
+#define FOOT_SW_PIN_LR   19
+#define FOOT_SW_PIN_LM   20
+#define FOOT_SW_PIN_LF   21
+
+/* 快速查找表：leg_index → GPIO 引脚号 */
+static const uint8_t g_foot_sw_pins[6] = {
+    FOOT_SW_PIN_RR,  /* LEG_RR = 0 */
+    FOOT_SW_PIN_RM,  /* LEG_RM = 1 */
+    FOOT_SW_PIN_RF,  /* LEG_RF = 2 */
+    FOOT_SW_PIN_LR,  /* LEG_LR = 3 */
+    FOOT_SW_PIN_LM,  /* LEG_LM = 4 */
+    FOOT_SW_PIN_LF   /* LEG_LF = 5 */
+};
+
+static bool g_foot_sw_initialized = false;
+
+void hal_foot_switch_init(void)
+{
+    for (uint8_t i = 0; i < 6; i++) {
+        gpio_init(g_foot_sw_pins[i]);
+        gpio_set_dir(g_foot_sw_pins[i], GPIO_IN);
+        gpio_pull_up(g_foot_sw_pins[i]);  /* 内部上拉，开关闭合→GND 读低 */
+    }
+    g_foot_sw_initialized = true;
+}
+
+bool hal_foot_switch_read(leg_index_t leg, bool *contact)
+{
+    if (!g_foot_sw_initialized || !contact) return false;
+    if (leg >= CNT_LEGS) return false;
+
+    /* 低电平 = 开关闭合 = 足端着地 */
+    *contact = !gpio_get(g_foot_sw_pins[leg]);
+    return true;
+}
+
+uint8_t hal_foot_switch_read_all(bool contacts[6])
+{
+    if (!g_foot_sw_initialized || !contacts) return 0;
+
+    uint8_t count = 0;
+    for (uint8_t i = 0; i < 6; i++) {
+        contacts[i] = !gpio_get(g_foot_sw_pins[i]);
+        if (contacts[i]) count++;
+    }
+    return count;  /* 返回着地足数 */
 }
 
 /* ==================== LED实现（本地GPIO，不走I2C） ==================== */

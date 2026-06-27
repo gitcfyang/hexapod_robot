@@ -3,12 +3,14 @@
 ## 硬件
 - MCU: Raspberry Pi Pico (RP2040)
 - 舵机: 18路, 2× PCA9685 (仅用1块, 地址0x40, 右腿9路 ID 0-8)
-- PCA9685: I²C1 GP6(SDA)/GP7(SCL) @400kHz, 内部上拉
+- PCA9685: I²C1 GP14(SDA)/GP15(SCL) @400kHz, 内部上拉
   - **⚠️ PCA9685 必须供 3.3V**（不可 5V！5V I2C 上拉会击穿 RP2040 的 GPIO）
-  - 2026-06 曾因 PCA9685 模块 5V I2C 上拉倒灌，烧坏 2 块 Pico 的 GP2/GP3，已改至 GP6/GP7
+  - 2026-06 曾因 PCA9685 模块 5V I2C 上拉倒灌，烧坏 2 块 Pico 的 GP2/GP3，已改至 GP14/GP15 (PCB 靠近 PCA9685)
 - PWM: 100Hz 数字舵机, 两片 PCA9685 独立校准
 - 接收器: ELRS CRSF, UART1 GP4/GP5 @420000bps
-- IMU: BNO055 9轴姿态传感器, I²C1 GP6/GP7 (共享), 地址 0x28 (可选)
+- IMU: BNO055 9轴姿态传感器, I²C1 GP14/GP15 (共享), 地址 0x28 (可选)
+- 蜂鸣器: GP13 (有源蜂鸣器，原 GP15 已改用于 I2C SCL)
+- 足端传感器: 6× 微动开关 GP16~GP21 (输入上拉，开关→GND 闭合读低)
 - 腿: coxa=45mm, femur=75mm, tibia=120mm
 - 舵机零位: FEMUR_SERVO_ZERO=450, TIBIA_SERVO_ZERO=900
 - 底板: coxa基座高出底板25mm
@@ -59,7 +61,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 旋转顺序: Ry(Yaw) → Rx(Roll) → Rz(Pitch)
 
 ## IMU 姿态补偿
-- BNO055 9轴 IMU, 与 PCA9685 共享 I²C1 (GP6/GP7), 地址 0x28
+- BNO055 9轴 IMU, 与 PCA9685 共享 I²C1 (GP14/GP15), 地址 0x28
 - 工作模式: NDOF (9-DOF 融合), 100Hz 欧拉角输出
 - 补偿通道: body_rot_offset (Roll/Pitch 取反, Yaw=0 不补偿)
 - 叠加点: compute_leg_ik() 中 effective_body_rot = body_rot + body_rot_offset
@@ -112,9 +114,9 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - **已发生事件 1** (2026-06): 手触碰板子 → ESD 静电击穿外部 QSPI Flash 芯片 → Pico 无法启动 (仅能进 BOOTSEL 大容量模式)
 - **已发生事件 2** (2026-06): PCA9685 模块用 5V 供电 → I2C 上拉到 5V → 5V 倒灌入 GP2/GP3 → **烧毁 2 块 Pico**
   - 表现: Pico USB 可枚举但串口无法打开、GPIO 检测不到 I2C 设备、芯片严重发热
-  - 已修复: I2C 复用引脚从 GP2/GP3 改为 **GP6/GP7**，PCA9685 改为 **3.3V 供电**
+  - 已修复: I2C 复用引脚从 GP2/GP3 改为 **GP14/GP15** (PCB 靠近 PCA9685)，PCA9685 改为 **3.3V 供电**
 - **最小保护方案** (成本 < ¥5):
-  - I2C SDA/SCL (GP6/GP7) 各串联 100Ω 限流电阻
+  - I2C SDA/SCL (GP14/GP15) 各串联 100Ω 限流电阻
   - 3.3V 对地并联 TVS 管 (SMAJ3.3A / PESD3V3)
   - PCA9685 用 3.3V 供电，不可 5V。若舵机需要 5V PWM，须加 I2C 电平转换模块 (TXS0104E / BSS138 MOSFET)
   - 板子装盒或贴绝缘胶带，裸露 GPIO 是 ESD 直接入口

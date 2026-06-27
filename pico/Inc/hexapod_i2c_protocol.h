@@ -17,8 +17,8 @@
 
 #define PCA9685_I2C_INSTANCE    i2c1
 #define PCA9685_I2C_BAUD        400000
-#define PCA9685_I2C_SDA_PIN     6    /* 从 GP2 改 GP6，避开已损坏引脚 */
-#define PCA9685_I2C_SCL_PIN     7    /* 从 GP3 改 GP7，避开已损坏引脚 */
+#define PCA9685_I2C_SDA_PIN     14   /* GP14: PCB 走线靠近 PCA9685，减少干扰 */
+#define PCA9685_I2C_SCL_PIN     15   /* GP15: PCB 走线靠近 PCA9685，减少干扰 */
 #define PCA9685_I2C_TIMEOUT_US  5000
 
 /* ==================== PCA9685器件配置 ==================== */

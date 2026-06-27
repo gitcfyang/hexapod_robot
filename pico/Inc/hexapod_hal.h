@@ -176,6 +176,30 @@ bool hal_imu_init(void);
  */
 bool hal_imu_read(imu_data_t *data);
 
+/* ==================== 足端微动开关接口 ==================== */
+
+/**
+ * @brief 初始化足端微动开关 GPIO
+ * @note 6 路 GPIO 配置为输入 + 内部上拉，开关→GND 闭合时读取低电平
+ *       GP16=RR GP17=RM GP18=RF GP19=LR GP20=LM GP21=LF
+ */
+void hal_foot_switch_init(void);
+
+/**
+ * @brief 读取单腿足端开关状态
+ * @param leg 腿索引 (LEG_RR ~ LEG_LF)
+ * @param contact 输出：true = 足端着地 (开关闭合)
+ * @return true 表示读取成功
+ */
+bool hal_foot_switch_read(leg_index_t leg, bool *contact);
+
+/**
+ * @brief 读取 6 路足端开关状态
+ * @param contacts 输出数组 [RR, RM, RF, LR, LM, LF]，true = 着地
+ * @return 着地足数 (0~6)
+ */
+uint8_t hal_foot_switch_read_all(bool contacts[6]);
+
 /* ==================== 舵机ID映射（用户需要定义） ==================== */
 
 /**

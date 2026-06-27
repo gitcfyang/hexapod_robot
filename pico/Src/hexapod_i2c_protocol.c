@@ -5,8 +5,8 @@
  *       I2C总线仅用于舵机PWM输出，不传输任何其他信号
  * 
  * 连接方式：
- *   Pico GP6(SDA) - PCA9685#1 SDI - PCA9685#2 SDI（共用总线）
- *   Pico GP7(SCL) - PCA9685#1 SCL - PCA9685#2 SCL（共用总线）
+ *   Pico GP14(SDA) - PCA9685#1 SDI - PCA9685#2 SDI（共用总线）
+ *   Pico GP15(SCL) - PCA9685#1 SCL - PCA9685#2 SCL（共用总线）
  *   ⚠️ PCA9685 须用 3.3V 供电！5V I2C 会烧毁 RP2040 GPIO！
  *   PCA9685#1 ADDR接GND -> 地址0x40
  *   PCA9685#2 ADDR接VCC -> 地址0x41

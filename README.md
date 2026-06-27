@@ -8,8 +8,11 @@
 - **舵机**: 18 路数字舵机，2× PCA9685 驱动
 - **接收器**: ELRS CRSF (UART)
 - **IMU**: BNO055 9轴姿态传感器 (I²C 0x28, 可选)
-- **I²C**: I2C1, GP6 (SDA) / GP7 (SCL) @400kHz
+- **I²C**: I2C1, GP14 (SDA) / GP15 (SCL) @400kHz
   - ⚠️ **PCA9685 必须用 3.3V 供电！** 5V 供电会导致 I2C 电平倒灌烧毁 RP2040 GPIO
+  - GP14/GP15 在 PCB 上靠近 PCA9685 布局，减少走线干扰
+- **足端传感器**: 6× 微动开关，GP16~GP21 (输入上拉，落地→GND)
+- **蜂鸣器**: GP13 (有源蜂鸣器，高电平驱动)
 - **腿节**: Coxa 45mm / Femur 75mm / Tibia 120mm
 
 ## 结构
@@ -38,7 +41,7 @@ hexapod_robot/
 │       ├── hexapod_gait.c            #   波纹/三角/波浪步态序列
 │       ├── hexapod_math.c            #   sin/cos/acos/atan4 查表实现
 │       ├── hexapod_crsf.c            #   ELRS 通道解析、摇杆映射
-│       ├── hexapod_hal_pico.c        #   Pico 硬件驱动 (I²C/UART/舵机/IMU)
+│       ├── hexapod_hal_pico.c        #   Pico 硬件驱动 (I²C/UART/舵机/IMU/足端开关)
 │       ├── hexapod_i2c_protocol.c    #   PWM 校准、批量写入
 │       └── bno055.c                  #   BNO055 I²C 驱动 (NDOF 融合)
 └── tools/
