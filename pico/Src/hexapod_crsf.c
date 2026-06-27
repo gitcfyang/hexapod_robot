@@ -12,8 +12,8 @@
  *     CH3 (Throttle)  → 机身高度 (线性直接映射)
  *     CH4 (Rud/Yaw)   → 原地旋转 (Turn)
  *     CH5 (SWA)       → 解锁/上电 (ARM)
- *     CH6 (SWB)       → 步态选择 (三段开关)
- *     CH7 (SWC)       → 速度控制 (三段开关)
+ *     CH6 (SWB)       → 步态选择 (三段: 低位=三角6, 中位=三角8, 高位=波浪24)
+ *     CH7 (SWC)       → 站立姿态 (三段: 低位=窄, 中位=正常, 高位=宽)
  *     CH8 (SWD)       → 平衡模式 (二段开关)
  *
  *   平衡模式 (CH8=高位):
@@ -298,21 +298,32 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         prev_arm = arm;
     }
 
-    /* ---- 步态选择 ---- */
+    /* ---- 步态选择 ----
+     * CH6 三段: 低位=三角6步, 中位=三角8步, 高位=波浪24步 */
     if (gait_pos == -1) {
-        if (ctrl_state->gait_type != GAIT_RIPPLE_12) {
-            ctrl_state->gait_type = GAIT_RIPPLE_12;
-            hexapod_gait_select(GAIT_RIPPLE_12, ctrl_state);
-        }
-    } else if (gait_pos == 0) {
         if (ctrl_state->gait_type != GAIT_TRIPOD_6) {
             ctrl_state->gait_type = GAIT_TRIPOD_6;
             hexapod_gait_select(GAIT_TRIPOD_6, ctrl_state);
+        }
+    } else if (gait_pos == 0) {
+        if (ctrl_state->gait_type != GAIT_TRIPOD_8) {
+            ctrl_state->gait_type = GAIT_TRIPOD_8;
+            hexapod_gait_select(GAIT_TRIPOD_8, ctrl_state);
         }
     } else {
         if (ctrl_state->gait_type != GAIT_WAVE_24) {
             ctrl_state->gait_type = GAIT_WAVE_24;
             hexapod_gait_select(GAIT_WAVE_24, ctrl_state);
+        }
+    }
+
+    /* ---- 站立姿态调整 (CH7 三段) ----
+     * 低位=窄(80%), 中位=正常(100%), 高位=宽(120%) */
+    {
+        int8_t stance_pos = map_to_3pos(state->channels[CRSF_CHANNEL_SPEED]);
+        if (stance_pos != ctrl_state->stance_mode) {
+            ctrl_state->stance_mode = stance_pos;
+            /* hexapod_apply_stance() 由主循环在 hal_input_update 返回后调用 */
         }
     }
 

@@ -622,6 +622,16 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
         case 'U': ctrl_state->leg_lift_height += 5; if (ctrl_state->leg_lift_height > 100) ctrl_state->leg_lift_height = 100; break;
         case 'D': ctrl_state->leg_lift_height -= 5; if (ctrl_state->leg_lift_height < 20)  ctrl_state->leg_lift_height = 20;  break;
         case 'T': ctrl_state->balance_mode = !ctrl_state->balance_mode; hal_debug_printf("Balance: %d\r\n", ctrl_state->balance_mode); break;
+        case 'M':
+            /* !M<n>  站立姿态: -1=窄, 0=正常, 1=宽 */
+            if (len >= 3) {
+                int8_t m = (int8_t)parse_int(buf, 2, len);
+                if (m >= -1 && m <= 1) {
+                    ctrl_state->stance_mode = m;
+                    hal_debug_printf("Stance: %d\r\n", m);
+                }
+            }
+            break;
         case 'V': { uint8_t lvl = hal_debug_get_level(); lvl = (lvl + 1) % 4; hal_debug_set_level(lvl); } break;
 
         /* ---- 舵机直控 (硬件排查) ---- */

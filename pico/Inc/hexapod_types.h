@@ -90,9 +90,15 @@ typedef struct {
     uint8_t     input_time_delay;   // 输入延迟（"潜行"效果）
     uint16_t    speed_control;      // 可调延迟
     uint8_t     force_gait_step_cnt;// 强制步进计数
-    
+
     /* 腿部初始角度（动态调整选项） */
     int16_t     coxa_init_angle[CNT_LEGS];
+
+    /* 站立姿态调整（CH7 三段开关 / !M 命令） */
+    int8_t      stance_mode;            // 目标: -1=窄, 0=正常, +1=宽
+    int32_t     current_stance_scale;   // 当前缩放 (×100, 10000=100%), 逐周期向目标插值
+    int16_t     orig_init_pos_x[CNT_LEGS];  // 原始站立 X 位置（缩放基准）
+    int16_t     orig_init_pos_z[CNT_LEGS];  // 原始站立 Z 位置（缩放基准）
 } control_state_t;
 
 /* 机器人配置结构体 */

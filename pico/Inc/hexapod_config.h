@@ -138,8 +138,24 @@
 #define CRSF_CHANNEL_HEIGHT       2   // CH3: 正常=机身高度, 平衡=机身高度
 #define CRSF_CHANNEL_ARM          4   // CH5: 解锁 (二段开关)
 #define CRSF_CHANNEL_GAIT         5   // CH6: 步态 (三段开关)
-#define CRSF_CHANNEL_SPEED        6   // CH7: 速度 (三段开关)
+#define CRSF_CHANNEL_SPEED        6   // CH7: 站立姿态 (三段: -1=窄80%, 0=正常100%, +1=宽120%)
 #define CRSF_CHANNEL_BALANCE      7   // CH8: 平衡模式 (二段开关)
+
+/* ---- 站立姿态缩放 (CH7) ---- */
+#define STANCE_DEFAULT_MODE       -1   /* 上电默认: -1=窄, 0=正常, +1=宽 */
+#define STANCE_SCALE_NARROW      80   /* 窄姿态: 80% (足端靠近机身) */
+#define STANCE_SCALE_NORMAL     100   /* 正常姿态: 100% */
+#define STANCE_SCALE_WIDE       120   /* 宽姿态: 120% (足端远离机身) */
+
+/* 姿态切换过渡速度 (×100 单位/控制周期, 10ms)
+ * 值越小越平滑。30×100/10ms → 极值切换需 ~1.3s，
+ * 确保每条腿在步态抬腿期间逐步挪到新位置，避免擦地。 */
+#define STANCE_TRANSITION_SPEED  30
+
+/* 单腿每周期最大位移 (mm)，防止着地后首次抬起时骤跳。
+ * 设太小 → 切换慢；设太大 → 空中骤跳。
+ * 2mm/周期 = 200mm/s，足够跟踪 STANCE_TRANSITION_SPEED=30 的节奏。 */
+#define STANCE_MAX_STEP_MM        2
 
 /* ---- CRSF 死区参数 ----
  *
@@ -169,7 +185,7 @@
  * 摇杆满量程 (±500) 映射到的机身高度偏移。
  * body_pos.y = stick * BODY_HEIGHT_RANGE_MM / 500
  * 正值抬升机身 (腿向下伸展), 负值降低机身 (腿向上收缩) */
-#define BODY_HEIGHT_RANGE_MM      40
+#define BODY_HEIGHT_RANGE_MM      90
 
 /* 机身姿态旋转范围 (0.1° 单位)
  * 摇杆满量程 (±500) 映射到的机身旋转角。
@@ -179,8 +195,8 @@
 
 /* ---- CRSF 摇杆→控制量 缩放参数 ----
  * 摇杆范围 -500~+500, 映射到实际运动参数 */
-#define TRAVEL_MAX_FORWARD_MM   140     /* 满杆步长 (mm)，约体长1/3 */
-#define TRAVEL_MAX_STRAFE_MM     90     /* 满杆平移步长 (mm) */
+#define TRAVEL_MAX_FORWARD_MM   150     /* 满杆步长 (mm)，约体长1/3 */
+#define TRAVEL_MAX_STRAFE_MM     110     /* 满杆平移步长 (mm) */
 #define TRAVEL_MAX_TURN_MM       60    /* 满杆旋转步长 (mm) */
 #define LIFT_SPEED_MM_PER_TICK   100      /* 升降速度 (mm/周期), 油门杆用 */
 #define LIFT_HEIGHT_MIN_MM      5      /* 最低抬腿高度 (mm) */
@@ -201,8 +217,8 @@
  *       低摇杆 = 短步长 + 低频率 → 精细缓动
  *       高摇杆 = 大步长 + 高频率 → 快速行进
  *       两者叠加产生自然的加速度曲线。 */
-#define GAIT_PERIOD_MAX_MS      180    /* 微动: 最慢步频 */
-#define GAIT_PERIOD_MIN_MS       45    /* 满杆: 最快步频 */
+#define GAIT_PERIOD_MAX_MS      190    /* 微动: 最慢步频 */
+#define GAIT_PERIOD_MIN_MS       50    /* 满杆: 最快步频 */
 
 /* CH7 通道保留 (CRSF_CHANNEL_SPEED)，暂不参与控制。
  * 连续变速由摇杆幅度自动映射，无需开关干预。 */
@@ -320,8 +336,8 @@
 /* 站立时足端在 coxa 下方的基准深度 (mm)。
  * 机身高度调节通过 body_pos.y 在此基础上偏移:
  *   init_pos_y = INIT_Y - body_pos.y
- * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±20mm)。 */
-#define INIT_Y               60
+ * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±70mm)。 */
+#define INIT_Y               50
 
 /* 足端在 coxa 基座坐标系中的站立位置
  *
@@ -373,50 +389,50 @@
  * Coxa 暂时放宽到 ±90°，用 !W 找到实际机械极限后再收紧 */
 #define SERVO_COXA_MIN_RR   -900    /* Coxa 逆时针极限 (暂定) */
 #define SERVO_COXA_MAX_RR   900     /* Coxa 顺时针极限 (暂定) */
-#define SERVO_FEMUR_MIN_RR  -900    /* Femur 逆时针极限 (暂定) */
+#define SERVO_FEMUR_MIN_RR  -590    /* Femur 逆时针极限 (暂定) */
 #define SERVO_FEMUR_MAX_RR  900     /* Femur 顺时针极限 (暂定) */
-#define SERVO_TIBIA_MIN_RR  -900    /* Tibia 逆时针极限 (暂定) */
+#define SERVO_TIBIA_MIN_RR  -695    /* Tibia 逆时针极限 (暂定) */
 #define SERVO_TIBIA_MAX_RR  900     /* Tibia 顺时针极限 (暂定) */
 
 /* ---- 右中腿 (RM) 舵机限位 ---- */
 #define SERVO_COXA_MIN_RM   -900
 #define SERVO_COXA_MAX_RM   900
-#define SERVO_FEMUR_MIN_RM  -900
+#define SERVO_FEMUR_MIN_RM  -600
 #define SERVO_FEMUR_MAX_RM  900
-#define SERVO_TIBIA_MIN_RM  -900
+#define SERVO_TIBIA_MIN_RM  -687
 #define SERVO_TIBIA_MAX_RM  900
 
 /* ---- 右前腿 (RF) 舵机限位 ---- */
 #define SERVO_COXA_MIN_RF   -900
 #define SERVO_COXA_MAX_RF   900
-#define SERVO_FEMUR_MIN_RF  -900
+#define SERVO_FEMUR_MIN_RF  -610
 #define SERVO_FEMUR_MAX_RF  900
-#define SERVO_TIBIA_MIN_RF  -900
+#define SERVO_TIBIA_MIN_RF  -627
 #define SERVO_TIBIA_MAX_RF  900
 
 /* ---- 左后腿 (LR) 舵机限位 ---- */
 #define SERVO_COXA_MIN_LR   -900
 #define SERVO_COXA_MAX_LR   900
 #define SERVO_FEMUR_MIN_LR  -900
-#define SERVO_FEMUR_MAX_LR  900
+#define SERVO_FEMUR_MAX_LR  660
 #define SERVO_TIBIA_MIN_LR  -900
-#define SERVO_TIBIA_MAX_LR  900
+#define SERVO_TIBIA_MAX_LR  695
 
 /* ---- 左中腿 (LM) 舵机限位 ---- */
 #define SERVO_COXA_MIN_LM   -900
 #define SERVO_COXA_MAX_LM   900
 #define SERVO_FEMUR_MIN_LM  -900
-#define SERVO_FEMUR_MAX_LM  900
+#define SERVO_FEMUR_MAX_LM  665
 #define SERVO_TIBIA_MIN_LM  -900
-#define SERVO_TIBIA_MAX_LM  900
+#define SERVO_TIBIA_MAX_LM  697
 
 /* ---- 左前腿 (LF) 舵机限位 ---- */
 #define SERVO_COXA_MIN_LF   -900
 #define SERVO_COXA_MAX_LF   900
 #define SERVO_FEMUR_MIN_LF  -900
-#define SERVO_FEMUR_MAX_LF  900
+#define SERVO_FEMUR_MAX_LF  650
 #define SERVO_TIBIA_MIN_LF  -900
-#define SERVO_TIBIA_MAX_LF  900
+#define SERVO_TIBIA_MAX_LF  735
 
 /* ==================== 舵机ID映射 ==================== */
 
@@ -521,7 +537,7 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RR].coxa_invert = false;
     configs[LEG_RR].femur_invert = true;
     configs[LEG_RR].tibia_invert = true;
-    configs[LEG_RR].coxa_horn_offset = 0;
+    configs[LEG_RR].coxa_horn_offset = -10;
     configs[LEG_RR].femur_horn_offset = 0;
     configs[LEG_RR].tibia_horn_offset = 0;
 
@@ -547,9 +563,9 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RM].coxa_invert = false;
     configs[LEG_RM].femur_invert = true;
     configs[LEG_RM].tibia_invert = true;
-    configs[LEG_RM].coxa_horn_offset = 0;
-    configs[LEG_RM].femur_horn_offset = 0;
-    configs[LEG_RM].tibia_horn_offset = 0;
+    configs[LEG_RM].coxa_horn_offset = -10;
+    configs[LEG_RM].femur_horn_offset = -20;
+    configs[LEG_RM].tibia_horn_offset = 8;
 
     /* 右前腿 (RF):
      *   offset = (104, 63), coxa_angle = +45°
@@ -573,9 +589,9 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_RF].coxa_invert = false;
     configs[LEG_RF].femur_invert = true;
     configs[LEG_RF].tibia_invert = true;
-    configs[LEG_RF].coxa_horn_offset = 0;
-    configs[LEG_RF].femur_horn_offset = 0;
-    configs[LEG_RF].tibia_horn_offset = 0;
+    configs[LEG_RF].coxa_horn_offset = -10;
+    configs[LEG_RF].femur_horn_offset = -10;
+    configs[LEG_RF].tibia_horn_offset = 68;
 
     /* 左后腿 (LR) — 与 RR 镜像:
      *   offset = (-104, -63), coxa_angle = -45°
@@ -599,8 +615,8 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_LR].coxa_invert = false;
     configs[LEG_LR].femur_invert = false;
     configs[LEG_LR].tibia_invert = false;
-    configs[LEG_LR].coxa_horn_offset = 0;
-    configs[LEG_LR].femur_horn_offset = 0;
+    configs[LEG_LR].coxa_horn_offset = -15;
+    configs[LEG_LR].femur_horn_offset = 55;
     configs[LEG_LR].tibia_horn_offset = 0;
 
     /* 左中腿 (LM) — 与 RM 镜像:
@@ -624,9 +640,9 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_LM].coxa_invert = false;
     configs[LEG_LM].femur_invert = false;
     configs[LEG_LM].tibia_invert = false;
-    configs[LEG_LM].coxa_horn_offset = 0;
-    configs[LEG_LM].femur_horn_offset = 0;
-    configs[LEG_LM].tibia_horn_offset = 0;
+    configs[LEG_LM].coxa_horn_offset = 10;
+    configs[LEG_LM].femur_horn_offset = 85;
+    configs[LEG_LM].tibia_horn_offset = 2;
 
     /* 左前腿 (LF) — 与 RF 镜像:
      *   offset = (104, -63), coxa_angle = +45°
@@ -649,9 +665,9 @@ static inline void hexapod_get_default_config(leg_config_t *configs)
     configs[LEG_LF].coxa_invert = false;
     configs[LEG_LF].femur_invert = false;
     configs[LEG_LF].tibia_invert = false;
-    configs[LEG_LF].coxa_horn_offset = 0;
-    configs[LEG_LF].femur_horn_offset = 0;
-    configs[LEG_LF].tibia_horn_offset = 0;
+    configs[LEG_LF].coxa_horn_offset = -10;
+    configs[LEG_LF].femur_horn_offset = 60;
+    configs[LEG_LF].tibia_horn_offset = 40;
 }
 
 #endif /* HEXAPOD_CONFIG_H */

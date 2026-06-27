@@ -24,19 +24,20 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ```
 
 ## 关键参数 (hexapod_config.h)
-- 站立: INIT_Y=50mm
+- 站立: INIT_Y=60mm (DEFAULT_INIT_Y=80 在 hexapod_core.h)
+- DEFAULT_INIT_Y=80mm, INIT_Y 是 config 级宏
 - COXA_ANGLE: RR=1350, RM=900, RF=450 (左镜像)
-- FOOT_DX: RR=-78, RM=0, RF=78 (左镜像)
-- FOOT_DZ: RR=78, RM=110, RF=78 (左镜像)
-- 步长: TRAVEL_MAX_FORWARD=140mm, STRAFE=60mm, TURN=60mm
+- FOOT_DX: RR=-113, RM=0, RF=113 (左镜像)
+- FOOT_DZ: RR=113, RM=160, RF=113 (左镜像)
+- 步长: TRAVEL_MAX_FORWARD=150mm, STRAFE=110mm, TURN=60mm
 - 抬腿: LIFT_HEIGHT 5-60mm
-- 机身高度调节: BODY_HEIGHT_RANGE_MM=±20mm
+- 机身高度调节: BODY_HEIGHT_RANGE_MM=±90mm
 
 ## 仿生连续变速
-- 摇杆幅度连续映射到步态周期 (替代原设计 CH7 三段开关)
-- GAIT_PERIOD_MAX=180ms → MIN=45ms
+- 摇杆幅度连续映射到步态周期
+- GAIT_PERIOD_MAX=190ms → MIN=50ms
 - 低摇杆 = 短步长 + 低频率, 高摇杆 = 大步长 + 高频率
-- CH7 保留为可选频率范围倍率 (SPEED_SWITCH_ENABLED=0)
+- CH7 重新定义为站立姿态三段开关 (窄/正常/宽)，不再用于速度控制
 
 ## 控制链路
 ```
@@ -89,7 +90,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
   - `0` = CRSF 接收器 (ELRS, UART1 @420000 baud) — 默认
   - `1` = USB CDC 串口命令 (USB 虚拟串口, 无需 UART1)
 - 两种模式互斥，无运行时冲突
-- USB 串口命令列表: `!F` `!B` `!L` `!R` `!Q` `!E` `!S` (运动), `!O` (解锁), `!G<n>` (步态), `!T` (平衡), `!U/!D` (抬腿), `!V` (调试), `!C` (校准), `!P` `!W` `!Z` `!A` (舵机直控)
+- USB 串口命令列表: `!F` `!B` `!L` `!R` `!Q` `!E` `!S` (运动), `!O` (解锁), `!G<n>` (步态), `!M<n>` (站立姿态 -1/0/1), `!T` (平衡), `!U/!D` (抬腿), `!V` (调试), `!C` (校准), `!P` `!W` `!Z` `!A` (舵机直控)
 - CRSF 通道值范围: 172(Min) ~ 992(Mid) ~ 1811(Max)，标准 11-bit 编码
   - 曾配置为 750~1000~1250 → 摇杆 30% 即饱和，已修复为 ELRS 标准值
 
@@ -124,20 +125,50 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - **进阶**: SRV05-4 ESD 阵列 / I2C 光耦隔离 (ADUM1250) / 共模扼流圈
 
 ## 步态
-- RIPPLE_12 (默认): 4抬腿+8支撑=12步, 占空比67%
-- TRIPOD_6: 2抬腿+4支撑=6步, 交替三脚
-- WAVE_24: 3抬腿+20支撑=24步, 极慢波浪
-- TRIPOD_8 / TRIPOD_4: 备选
+- RIPPLE_12: 4抬腿+8支撑=12步, 占空比67% (串口 `!G0`)
+- TRIPOD_6: 交替三角, 12步周期 (`!G1`, **CH6 低位默认**)
+- TRIPOD_8: 三角从容版, 16步周期 (`!G2`, **CH6 中位**)
+- WAVE_24: 极慢波浪, 每次仅1腿抬起 (`!G3`, **CH6 高位**)
+- TRIPOD_4: 快速三角, 1.5× 速度 (`!G4`, 仅串口)
 - 抬腿高度: 0→峰值→0 二次曲线 (无跳变)
 - 地面支撑: 位移取反 (与抬腿方向相反, 已修复)
 - 子步态插值: 1 gait step = 100 sub-units, 连续轨迹
 
-## 调试工具 （已修复）
+### CH6 步态开关 (三段)
+| 开关位 | 步态 | 串口 |
+|:---:|------|:---:|
+| 低位 | TRIPOD_6 (三角 6 步) | `!G1` |
+| 中位 | TRIPOD_8 (三角 8 步) | `!G2` |
+| 高位 | WAVE_24 (波浪 24 步) | `!G3` |
+
+### CH7 站立姿态开关 (三段) ★新增
+| 开关位 | 姿态 | 缩放 | 串口 |
+|:---:|------|:---:|:---:|
+| 低位 | 窄 (足端靠近机身) | 80% | `!M -1` |
+| 中位 | 正常 | 100% | `!M 0` |
+| 高位 | 宽 (足端外扩) | 120% | `!M 1` |
+
+**过渡机制**:
+- 静止时切换: 仅插值全局缩放值，不动腿（避免擦地）
+- 行走中切换: 仅抬起的腿逐步向新位置挪，着地腿保持不动
+- 单腿每周期限步长 2mm，防止长时间着地后抬起时骤跳
+- 过渡速度 30×100/周期，极值切换约 1.3s 完成
+
+### horn_offset 校准 ★新增
+- 公式: `最终舵机角度 = IK 计算角度 + horn_offset`（invert 之后叠加）
+- 校准: `!A` 看输出 → `!P<id> <angle>` 找最佳位置 → offset = 最佳 − IK输出
+- 位置: hexapod_config.h 每条腿的 `coxa/femur/tibia_horn_offset` 字段
+
+## 调试工具
 - USB CDC 串口命令 (CRSF 模式下也可用)
 - `!C`: 交互式舵机校准模式
 - `!V`: 切换调试等级 (0-3)
 - `!P<id> <ang>` / `!W<id>` / `!Z` / `!A`: 舵机直控
 - `!O`: 解锁, `!F/B/L/R`: 运动, `!S`: 停止
+- `!M<n>`: 站立姿态切换 (-1=窄, 0=正常, 1=宽)
+- `!G<n>`: 步态切换 (0-4)
+- **tools/serial_console.py**: USB 串口交互控制台，快捷舵机微调 `!P<id> <angle>`，命令历史 ↑↓
+  - 2026-06 修复: 添加 termios 完整配置 (CLOCAL/CREAD/8N1/raw)，解决 USB CDC 连接失败问题
 - tools/ik_gait_debug.py: Python 仿真可视化
 
 ## 待完善
@@ -147,5 +178,8 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - [ ] Core1 双核卸载 IK 计算
 - [x] 加入 IMU (BNO055 I²C 驱动 + body_rot_offset 姿态补偿) — 待实测验证
 - [x] 硬件看门狗 + I2C 总线自动恢复
+- [x] CH7 站立姿态三段开关 (窄/正常/宽, 平滑过渡)
+- [x] horn_offset 校准机制 (invert 后叠加, 每关节独立)
+- [x] serial_console.py 串口通信修复 (termios 配置)
 - [ ] Pico 换新 → 加电路保护 (I2C 串联电阻 + TVS + 绝缘)
 - [ ] 加入 足端传感器，自动进行步态调整

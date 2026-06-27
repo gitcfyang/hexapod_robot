@@ -46,6 +46,28 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
     /* 初始化腿部角度 */
     for (int i = 0; i < CNT_LEGS; i++) {
         robot->state.coxa_init_angle[i] = configs[i].coxa_angle;
+        /* 保存原始站立位置作为 stance 缩放的基准 */
+        robot->state.orig_init_pos_x[i] = configs[i].init_pos_x;
+        robot->state.orig_init_pos_z[i] = configs[i].init_pos_z;
+    }
+
+    /* 站立姿态初始化 —— 直接设到目标值，不依赖 lift gate */
+    robot->state.stance_mode = STANCE_DEFAULT_MODE;
+    {
+        int32_t init_scale;
+        switch (robot->state.stance_mode) {
+            case -1: init_scale = (int32_t)STANCE_SCALE_NARROW * 100; break;
+            case  1: init_scale = (int32_t)STANCE_SCALE_WIDE   * 100; break;
+            default:  init_scale = (int32_t)STANCE_SCALE_NORMAL * 100; break;
+        }
+        robot->state.current_stance_scale = init_scale;
+        /* 所有腿初始化到同一位置，避免部分在旧值部分在新值 */
+        for (int i = 0; i < CNT_LEGS; i++) {
+            robot->leg_configs[i].init_pos_x =
+                (int16_t)(((int32_t)robot->state.orig_init_pos_x[i] * init_scale) / 10000);
+            robot->leg_configs[i].init_pos_z =
+                (int16_t)(((int32_t)robot->state.orig_init_pos_z[i] * init_scale) / 10000);
+        }
     }
     
     /* 初始化舵机硬件 */
@@ -316,6 +338,7 @@ void hexapod_update(hexapod_t *robot)
      * 校准通过直接 PCA9685 写入控制舵机，IK 管线在此模式下不运行。 */
     if (hal_is_calibration_active()) {
         hal_input_update(&robot->state);
+        hexapod_apply_stance(robot);
         return;
     }
 
@@ -330,6 +353,9 @@ void hexapod_update(hexapod_t *robot)
 
     /* 读取输入 (直接覆写 travel_length) */
     hal_input_update(&robot->state);
+
+    /* 应用站立姿态调整（CH7 三段开关或串口命令触发） */
+    hexapod_apply_stance(robot);
 
     /* ---- IMU 姿态补偿 ----
      * 读取 BNO055 实际姿态，取反后写入 body_rot_offset。
@@ -474,6 +500,75 @@ void hexapod_rotate_leg_init_angles(hexapod_t *robot, int16_t delta_angle)
         robot->state.coxa_init_angle[i] += delta_angle;
         /* 同步更新 leg_configs，使 IK 解算使用新的角度 */
         robot->leg_configs[i].coxa_angle = robot->state.coxa_init_angle[i];
+    }
+}
+
+/**
+ * @brief 根据 stance_mode 逐周期插值缩放站立位置 (XZ 平面)
+ *
+ *        核心规则：只移动抬起的腿，着地支撑腿严格不动。
+ *        静止时无腿抬起 → 姿态切换暂存，行走后抬腿即生效。
+ *        每腿每周期有步长上限，防止长时间着地后抬起时骤跳。
+ *
+ *        stance_mode: -1=窄(80%),  0=正常(100%),  +1=宽(120%)
+ *        过渡速度由 STANCE_TRANSITION_SPEED 控制。
+ */
+void hexapod_apply_stance(hexapod_t *robot)
+{
+    if (!robot) return;
+
+    /* 1. 确定目标缩放值 (×100) */
+    int32_t target_scale;
+    switch (robot->state.stance_mode) {
+        case -1: target_scale = (int32_t)STANCE_SCALE_NARROW * 100; break;
+        case  1: target_scale = (int32_t)STANCE_SCALE_WIDE   * 100; break;
+        default:  target_scale = (int32_t)STANCE_SCALE_NORMAL * 100; break;
+    }
+
+    /* 2. 插值：当前 → 目标 (每周期移动 STANCE_TRANSITION_SPEED) */
+    int32_t cur = robot->state.current_stance_scale;
+    if (cur < target_scale) {
+        cur += STANCE_TRANSITION_SPEED;
+        if (cur > target_scale) cur = target_scale;
+    } else if (cur > target_scale) {
+        cur -= STANCE_TRANSITION_SPEED;
+        if (cur < target_scale) cur = target_scale;
+    }
+    robot->state.current_stance_scale = cur;
+
+    /* 3. 静止时无腿真正抬起 → 不更新任何 init_pos，等行走后自动跟上 */
+    bool is_moving = (robot->state.travel_length.x != 0 ||
+                      robot->state.travel_length.y != 0 ||
+                      robot->state.travel_length.z != 0);
+    if (!is_moving) {
+        return;
+    }
+
+    /* 4. 逐腿向目标推进 —— 仅在抬腿时移动，着地不动 */
+    for (int i = 0; i < CNT_LEGS; i++) {
+        uint8_t gait_pos;
+        bool is_lifted = hexapod_gait_get_leg_position(&robot->state, (leg_index_t)i, &gait_pos);
+
+        if (!is_lifted) {
+            /* 着地支撑中 → 绝对不动 */
+            continue;
+        }
+
+        /* 抬腿中 → 向目标逐步移动，限单周期步长防止骤跳 */
+        int16_t target_x = (int16_t)(((int32_t)robot->state.orig_init_pos_x[i] * cur) / 10000);
+        int16_t target_z = (int16_t)(((int32_t)robot->state.orig_init_pos_z[i] * cur) / 10000);
+
+        int32_t dx = (int32_t)target_x - (int32_t)robot->leg_configs[i].init_pos_x;
+        int32_t dz = (int32_t)target_z - (int32_t)robot->leg_configs[i].init_pos_z;
+
+        /* 每周期最多移动 STANCE_MAX_STEP_MM (mm)，防止骤跳 */
+        if (dx > STANCE_MAX_STEP_MM)  dx = STANCE_MAX_STEP_MM;
+        if (dx < -STANCE_MAX_STEP_MM) dx = -STANCE_MAX_STEP_MM;
+        if (dz > STANCE_MAX_STEP_MM)  dz = STANCE_MAX_STEP_MM;
+        if (dz < -STANCE_MAX_STEP_MM) dz = -STANCE_MAX_STEP_MM;
+
+        robot->leg_configs[i].init_pos_x += (int16_t)dx;
+        robot->leg_configs[i].init_pos_z += (int16_t)dz;
     }
 }
 

@@ -148,6 +148,14 @@ void hexapod_adjust_leg_positions(hexapod_t *robot, uint16_t xz_length);
 void hexapod_adjust_to_body_height(hexapod_t *robot);
 
 /**
+ * @brief 逐周期插值缩放站立位置 (XZ 平面)
+ *        向 stance_mode 目标平滑过渡，避免足端擦地。
+ *        stance_mode: -1=窄(80%), 0=正常(100%), +1=宽(120%)
+ * @param robot 机器人实例
+ */
+void hexapod_apply_stance(hexapod_t *robot);
+
+/**
  * @brief 重置腿部初始角度
  * @param robot 机器人实例
  */

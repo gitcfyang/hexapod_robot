@@ -42,7 +42,8 @@ hexapod_robot/
 │       ├── hexapod_i2c_protocol.c    #   PWM 校准、批量写入
 │       └── bno055.c                  #   BNO055 I²C 驱动 (NDOF 融合)
 └── tools/
-    └── ik_gait_debug.py              # IK + 步态 Python 仿真可视化
+    ├── ik_gait_debug.py              # IK + 步态 Python 仿真可视化
+    └── serial_console.py             # USB 串口交互控制台 (舵机微调/步态/姿态切换)
 ```
 
 ## 控制
@@ -53,7 +54,8 @@ hexapod_robot/
 | 平衡 | 机身横滚 | 机身俯仰 | 机身高度 | 机身偏航 |
 
 - CH5: 解锁/上电
-- CH6: 步态切换（波纹 / 三角 / 波浪）
+- CH6: 步态切换 (低=三角6 / 中=三角8 / 高=波浪24)
+- CH7: 站立姿态 (低=窄80% / 中=正常100% / 高=宽120%)
 - CH8: 平衡模式开关
 
 ## IMU 姿态补偿 (可选)
@@ -89,6 +91,11 @@ USB CDC 串口命令：
 | `!P<id> <ang>` | 单舵机角度控制 |
 | `!O` / `!S` | 解锁 / 停止 |
 | `!F` / `!B` / `!L` / `!R` | 方向移动 |
+| `!G<n>` | 步态切换 (0-4) |
+| `!M<n>` | 站立姿态 (-1=窄, 0=正常, 1=宽) |
+| `!A` | 打印全部 18 路舵机角度 |
+
+快捷用法: `python3 tools/serial_console.py` 可直接输入 `<id> <angle>` (自动加 `!P` 前缀)
 
 详见 [STATUS.md](STATUS.md)。
 
