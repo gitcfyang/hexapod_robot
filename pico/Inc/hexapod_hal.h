@@ -96,7 +96,8 @@ typedef enum {
     INPUT_TYPE_SERIAL,   // 串口命令
     INPUT_TYPE_BLUETOOTH,// 蓝牙
     INPUT_TYPE_WIFI,     // WiFi
-    INPUT_TYPE_CRSF      // CRSF接收器 (ELRS)
+    INPUT_TYPE_CRSF,     // CRSF接收器 (ELRS)
+    INPUT_TYPE_AUTO      // 自动检测: CRSF 优先, 无信号则退至 PS2
 } input_type_t;
 
 /**

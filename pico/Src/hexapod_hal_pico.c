@@ -13,6 +13,9 @@
 #include "hexapod_core.h"
 #include "hexapod_gait.h"
 #include "hexapod_crsf.h"
+#if PS2_ENABLED
+#include "hexapod_ps2.h"
+#endif
 #include <stdio.h>
 #include <stdarg.h>
 #include <string.h>
@@ -270,6 +273,29 @@ static bool g_crsf_mode = false;           // true=CRSF模式, false=串口命�
 static uint32_t g_last_crsf_frame_ms = 0;  // 最后CRSF帧时间
 static uint32_t g_last_crsf_frame_count = 0; // 上次查询时的帧计数（调试用）
 
+/* PS2 状态 (PS2_ENABLED) */
+#if PS2_ENABLED
+ps2_state_t g_ps2_state;          /* 非 static: 供 hexapod_ps2.c extern 引用 */
+static bool g_ps2_initialized = false;
+
+/* 运行时输入模式
+ *  0 = INPUT_MODE_CRSF — 强制 CRSF
+ *  1 = INPUT_MODE_PS2  — 强制 PS2
+ *  2 = INPUT_MODE_AUTO — 自动检测 (CRSF 优先, 无信号退至 PS2) */
+#define INPUT_MODE_CRSF    0
+#define INPUT_MODE_PS2     1
+#define INPUT_MODE_AUTO    2
+static uint8_t  g_input_mode = INPUT_MODE_AUTO;
+static uint32_t g_mode_switch_time_ms = 0;   /* 进入当前模式的时间 */
+
+/* 自动检测超时 (ms): 进入 CRSF 模式后此时间内无有效帧 → 尝试 PS2 */
+#define AUTO_DETECT_CRSF_TIMEOUT_MS   500
+/* PS2 模式下此时间内无数据 → 回到 CRSF 重试 */
+#define AUTO_DETECT_PS2_TIMEOUT_MS   2000
+/* 模式切换冷却: 两次切换的最小间隔 */
+#define MODE_SWITCH_COOLDOWN_MS      1000
+#endif
+
 /* ==================== 舵机校准模式 ==================== */
 static bool     g_calib_active = false;
 static uint8_t  g_calib_servo = 0;
@@ -482,6 +508,29 @@ bool hal_input_init(input_type_t type)
     hal_debug_printf("USB CDC Serial input mode (no UART1)\r\n");
 #endif
 
+#if PS2_ENABLED
+    /* PS2 接口初始化: 仅配置 GPIO, 不阻断 CRSF
+     * 无论当前是 CRSF/AUTO/PS2 模式都初始化, 便于运行时切换 */
+    if (!g_ps2_initialized) {
+        ps2_init();
+        memset(&g_ps2_state, 0, sizeof(g_ps2_state));
+        g_ps2_initialized = true;
+    }
+
+    /* 设置运行时模式 */
+    if (type == INPUT_TYPE_PS2) {
+        g_input_mode = INPUT_MODE_PS2;
+        g_mode_switch_time_ms = hal_get_tick_ms();
+        hal_debug_printf("PS2 input mode (forced)\r\n");
+    } else if (type == INPUT_TYPE_AUTO) {
+        g_input_mode = INPUT_MODE_AUTO;
+        g_mode_switch_time_ms = hal_get_tick_ms();
+        hal_debug_printf("Input auto-detect mode (CRSF first, PS2 fallback)\r\n");
+    } else {
+        g_input_mode = INPUT_MODE_CRSF;
+    }
+#endif
+
     init_done = true;
     return true;
 }
@@ -634,8 +683,82 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             break;
         case 'V': { uint8_t lvl = hal_debug_get_level(); lvl = (lvl + 1) % 4; hal_debug_set_level(lvl); } break;
 
+        /* ---- 输入模式切换 (PS2_ENABLED) ---- */
+#if PS2_ENABLED
+        case 'M':
+            /* !MODE crsf → 强制 CRSF 模式
+             * !MODE ps2  → 强制 PS2 模式
+             * !MODE auto → 自动检测 (CRSF 优先) */
+            if (len >= 6) {
+                if (buf[2] == 'O' && buf[3] == 'D' && buf[4] == 'E') {
+                    /* buf[5] 可能是空格 */
+                    uint8_t p = 5;
+                    while (p < len && buf[p] == ' ') p++;
+                    if (p + 3 < len && buf[p] == 'c' && buf[p+1] == 'r'
+                        && buf[p+2] == 's' && buf[p+3] == 'f') {
+                        g_input_mode = INPUT_MODE_CRSF;
+                        g_mode_switch_time_ms = hal_get_tick_ms();
+                        hal_debug_printf("[MODE] Switched to CRSF\r\n");
+                    } else if (p + 2 < len && buf[p] == 'p' && buf[p+1] == 's'
+                               && buf[p+2] == '2') {
+                        g_input_mode = INPUT_MODE_PS2;
+                        g_mode_switch_time_ms = hal_get_tick_ms();
+                        hal_debug_printf("[MODE] Switched to PS2\r\n");
+                    } else if (p + 3 < len && buf[p] == 'a' && buf[p+1] == 'u'
+                               && buf[p+2] == 't' && buf[p+3] == 'o') {
+                        g_input_mode = INPUT_MODE_AUTO;
+                        g_mode_switch_time_ms = hal_get_tick_ms();
+                        g_crsf_state.link_connected = false;
+                        g_ps2_state.connected = false;
+                        hal_debug_printf("[MODE] Switched to AUTO (CRSF first)\r\n");
+                    }
+                }
+            }
+            break;
+
         /* ---- 舵机直控 (硬件排查) ---- */
         case 'P': {
+            /* ---- !PS2: PS2 手柄原始状态调试输出 ---- */
+#if PS2_ENABLED
+            if (len >= 3 && buf[2] == 'S' && (len == 3 || buf[3] == '2')) {
+                if (!g_ps2_initialized) {
+                    hal_debug_printf("[PS2] Not initialized\r\n");
+                } else {
+                    const ps2_state_t *s = ps2_get_state();
+                    if (!s) {
+                        hal_debug_printf("[PS2] No controller connected\r\n");
+                    } else {
+                        hal_debug_printf("=== PS2 Controller State ===\r\n");
+                        hal_debug_printf("ID: 0x%02X (%s)  Buttons: 0x%04X\r\n",
+                            s->id, s->analog_mode ? "analog" : "digital", s->buttons);
+                        hal_debug_printf("Pressed:");
+                        if (!(s->buttons & PSB_SELECT))   hal_debug_printf(" SEL");
+                        if (!(s->buttons & PSB_L3))       hal_debug_printf(" L3");
+                        if (!(s->buttons & PSB_R3))       hal_debug_printf(" R3");
+                        if (!(s->buttons & PSB_START))    hal_debug_printf(" START");
+                        if (!(s->buttons & PSB_PAD_UP))   hal_debug_printf(" UP");
+                        if (!(s->buttons & PSB_PAD_RIGHT)) hal_debug_printf(" RIGHT");
+                        if (!(s->buttons & PSB_PAD_DOWN)) hal_debug_printf(" DOWN");
+                        if (!(s->buttons & PSB_PAD_LEFT)) hal_debug_printf(" LEFT");
+                        if (!(s->buttons & PSB_L2))       hal_debug_printf(" L2");
+                        if (!(s->buttons & PSB_R2))       hal_debug_printf(" R2");
+                        if (!(s->buttons & PSB_L1))       hal_debug_printf(" L1");
+                        if (!(s->buttons & PSB_R1))       hal_debug_printf(" R1");
+                        if (!(s->buttons & PSB_TRIANGLE)) hal_debug_printf(" TRI");
+                        if (!(s->buttons & PSB_CIRCLE))   hal_debug_printf(" CIR");
+                        if (!(s->buttons & PSB_CROSS))    hal_debug_printf(" X");
+                        if (!(s->buttons & PSB_SQUARE))   hal_debug_printf(" SQ");
+                        hal_debug_printf("\r\nSticks: LX=%3u LY=%3u RX=%3u RY=%3u  "
+                            "Frames: %lu  Mode: %s\r\n",
+                            s->joy_lx, s->joy_ly, s->joy_rx, s->joy_ry,
+                            s->frame_count,
+                            g_input_mode == INPUT_MODE_PS2 ? "PS2" :
+                            g_input_mode == INPUT_MODE_CRSF ? "CRSF" : "AUTO");
+                    }
+                }
+                break;
+            }
+#endif /* PS2_ENABLED */
             /* !P<servo_id> <angle>  例: !P0 900  */
             if (len < 5) { hal_debug_printf("Usage: !P<id> <angle>\r\n"); break; }
             uint8_t sid = (uint8_t)parse_int(buf, 2, len);
@@ -765,9 +888,61 @@ bool hal_input_update(control_state_t *ctrl_state)
         }
     }
 
+    uint32_t now = hal_get_tick_ms();
+
+#if PS2_ENABLED
+    /* ========== 自动检测模式切换 ========== */
+    if (g_input_mode == INPUT_MODE_AUTO) {
+        uint32_t crsf_elapsed = (g_last_crsf_frame_ms > 0)
+            ? (now - g_last_crsf_frame_ms) : (now - g_mode_switch_time_ms);
+
+        if (crsf_elapsed > AUTO_DETECT_CRSF_TIMEOUT_MS) {
+            /* CRSF 无信号 → 尝试 PS2 */
+            if (!g_ps2_state.connected) {
+                /* 首次切换到 PS2: 尝试进入模拟模式 */
+                if (ps2_enter_analog_mode(&g_ps2_state)) {
+                    hal_debug_printf("[AUTO] CRSF timeout, switched to PS2\r\n");
+                    g_input_mode = INPUT_MODE_PS2;
+                    g_mode_switch_time_ms = now;
+                }
+            } else {
+                g_input_mode = INPUT_MODE_PS2;
+                g_mode_switch_time_ms = now;
+                hal_debug_printf("[AUTO] Using cached PS2 connection\r\n");
+            }
+        }
+    } else if (g_input_mode == INPUT_MODE_PS2 && g_ps2_state.connected) {
+        /* PS2 模式下若长时间无数据 → 回 CRSF 重试 */
+        uint32_t ps2_elapsed = now - g_ps2_state.last_read_ms;
+        if (ps2_elapsed > AUTO_DETECT_PS2_TIMEOUT_MS) {
+            if ((now - g_mode_switch_time_ms) > MODE_SWITCH_COOLDOWN_MS) {
+                g_input_mode = INPUT_MODE_AUTO;
+                g_mode_switch_time_ms = now;
+                g_ps2_state.connected = false;
+                hal_debug_printf("[AUTO] PS2 timeout, retrying CRSF...\r\n");
+            }
+        }
+    }
+
+    /* ========== PS2 模式: 轮询手柄 ========== */
+    if ((g_input_mode == INPUT_MODE_PS2 || g_input_mode == INPUT_MODE_AUTO)
+        && g_ps2_initialized) {
+
+        if (ps2_read_gamepad(&g_ps2_state)) {
+            /* 如果在 AUTO 模式且 PS2 读取成功, 切换到 PS2 */
+            if (g_input_mode == INPUT_MODE_AUTO) {
+                g_input_mode = INPUT_MODE_PS2;
+                g_mode_switch_time_ms = now;
+            }
+            /* 映射到控制状态 */
+            ps2_to_control(&g_ps2_state, ctrl_state);
+            return true;
+        }
+    }
+#endif /* PS2_ENABLED */
+
     if (g_crsf_mode) {
         /* ========== CRSF 模式 ========== */
-        uint32_t now = hal_get_tick_ms();
 
         /* 检查是否有新帧 - 使用 last_frame_time_ms 检测 */
         uint32_t last_frame_time = g_crsf_state.last_frame_time_ms;
@@ -776,6 +951,13 @@ bool hal_input_update(control_state_t *ctrl_state)
 
             /* 检查链接状态 */
             if (g_crsf_state.link_connected) {
+#if PS2_ENABLED
+                /* CRSF 有信号: 重置自动检测, 锁定 CRSF */
+                if (g_input_mode == INPUT_MODE_AUTO) {
+                    g_input_mode = INPUT_MODE_CRSF;
+                    g_mode_switch_time_ms = now;
+                }
+#endif
                 /* 将 CRSF 状态映射到机器人控制 */
                 crsf_to_control(&g_crsf_state, ctrl_state);
                 return true;

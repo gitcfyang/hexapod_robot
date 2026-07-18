@@ -11,6 +11,7 @@
 - IMU: BNO055 9轴姿态传感器, I²C1 GP14/GP15 (共享), 地址 0x28 (可选)
 - 蜂鸣器: GP13 (有源蜂鸣器，原 GP15 已改用于 I2C SCL)
 - 足端传感器: 6× 微动开关 GP16~GP21 (输入上拉，开关→GND 闭合读低)
+- PS2 接收器: bit-bang SPI GP6~GP9, 支持 CRSF/PS2 自动检测切换
 - 腿: coxa=45mm, femur=75mm, tibia=120mm
 - 舵机零位: FEMUR_SERVO_ZERO=450, TIBIA_SERVO_ZERO=900
 - 底板: coxa基座高出底板25mm
