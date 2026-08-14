@@ -1,5 +1,7 @@
 # Build outputs
 pico/build/
+# 固件产物由 GitHub Actions 自动生成并上传 Release, 不入库
+*.uf2
 tools/__pycache__/
 
 # IDE / Editor
