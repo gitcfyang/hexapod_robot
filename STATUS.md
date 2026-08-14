@@ -2,19 +2,34 @@
 
 ## 硬件
 - MCU: Raspberry Pi Pico (RP2040)
-- 舵机: 18路, 2× PCA9685 (仅用1块, 地址0x40, 右腿9路 ID 0-8)
+- 舵机: 18路, 2× PCA9685
+  - **PCB 定版地址**: 0x40 (ADDR=GND) = 左腿组 ID 9-17; 0x41 (ADDR=VCC) = 右腿组 ID 0-8
+  - **物理通道 (LEDn)**: 左板 0x40 从前至后 LED7~LED15 (LF 7/8/9, LM 10/11/12, LR 13/14/15)
+    右板 0x41 从前至后 LED8~LED0 (RF 8/7/6, RM 5/4/3, RR 2/1/0)
+  - 映射表: `pca9685_servo_to_channel()` + `pca9685_get_board_idx_by_addr()` (hexapod_i2c_protocol.c)
 - PCA9685: I²C1 GP14(SDA)/GP15(SCL) @400kHz, 内部上拉
   - **⚠️ PCA9685 必须供 3.3V**（不可 5V！5V I2C 上拉会击穿 RP2040 的 GPIO）
-  - 2026-06 曾因 PCA9685 模块 5V I2C 上拉倒灌，烧坏 2 块 Pico 的 GP2/GP3，已改至 GP14/GP15 (PCB 靠近 PCA9685)
+  - 2026-06 曾因 PCA9685 模块 5V I2C 上拉倒灌，烧坏 2 块 Pico 的 GP2/GP3
 - PWM: 100Hz 数字舵机, 两片 PCA9685 独立校准
 - 接收器: ELRS CRSF, UART1 GP4/GP5 @420000bps
-- IMU: BNO055 9轴姿态传感器, I²C1 GP14/GP15 (共享), 地址 0x28 (可选)
-- 蜂鸣器: GP13 (有源蜂鸣器，原 GP15 已改用于 I2C SCL)
+- PS2 接收器: bit-bang SPI GP6~GP9 (DAT/CMD/SEL/CLK), CRSF/PS2 自动检测切换
+- IMU: BNO055 9轴姿态传感器, I²C1 GP14/GP15 (共享), 地址 0x29 (!I2C 实测确认)
+  - BOOT/INT 接口: GP27/GP28 预留 (暂不使用)
+- 蜂鸣器: GP13 无源蜂鸣器 (PWM 方波, notes 数组=频率 Hz, 0=休止)
+- 双 LED: GP25 绿色 (状态), GP12 红色 (报警) — 功能分离
+- 直流电机: GP2/GP3 (PWM 调速 10kHz, 占空比 0~1000×0.1%)
+- 舵机供电: GP10 左/GP11 右 (高电平=供电), 低压/过压自动断电
+- 电池: GP26 ADC, 分压 15/115 (R1=100kΩ, R2=15kΩ), 2S 18650
+  - 阈值: 过压 8.8V / 警告 7.0V / 截止 6.6V / 恢复 7.3V
+  - 上电先检测电压再开舵机供电; 运行时每 1s 监测
+  - ⚠️ 当前 BATTERY_CHECK_ENABLED=0 临时禁用 (ADC 分压电路排查中), 修复后改回 1
+- 外部扩展: GP0/GP1 预留 UART (上位机/传感器), GP22 闲置带外部输出
+  - CMake 已关闭 stdio UART (pico_enable_stdio_uart=0), 调试输出仅走 USB CDC, 保证 GP0/GP1 空闲
 - 足端传感器: 6× 微动开关 GP16~GP21 (输入上拉，开关→GND 闭合读低)
-- PS2 接收器: bit-bang SPI GP6~GP9, 支持 CRSF/PS2 自动检测切换
 - 腿: coxa=45mm, femur=75mm, tibia=120mm
 - 舵机零位: FEMUR_SERVO_ZERO=450, TIBIA_SERVO_ZERO=900
 - 底板: coxa基座高出底板25mm
+- ⚠️ I2C 总线上存在未知设备 0x70 (!I2C 全扫描发现, 待确认是否预期)
 
 ## IK 公式 (hexapod_ik.c)
 ```
@@ -62,7 +77,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 旋转顺序: Ry(Yaw) → Rx(Roll) → Rz(Pitch)
 
 ## IMU 姿态补偿
-- BNO055 9轴 IMU, 与 PCA9685 共享 I²C1 (GP14/GP15), 地址 0x28
+- BNO055 9轴 IMU, 与 PCA9685 共享 I²C1 (GP14/GP15), 地址 0x29
 - 工作模式: NDOF (9-DOF 融合), 100Hz 欧拉角输出
 - 补偿通道: body_rot_offset (Roll/Pitch 取反, Yaw=0 不补偿)
 - 叠加点: compute_leg_ik() 中 effective_body_rot = body_rot + body_rot_offset
@@ -77,9 +92,16 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 用 PWM_PERIOD_US (每板实测周期) 直接计算脉宽计数值
 - 不依赖 PCA9685 振荡器精度
 - `pulse_to_count = pulse_us × 4096 / pwm_period_us`
-- 当前: 200Hz → PWM_PERIOD_US_BOARD0/BOARD1 (示波器实测后填入)
+- 当前: 100Hz → PWM_PERIOD_US_BOARD0=8475 (0x40 左板), BOARD1=9434 (0x41 右板), 待 !PER 实测校准
 - 两块 PCA9685 使用独立的校准值，消除器件间振荡器差异
 - I²C 写入失败检测 + 自动重试 + 连续 3 次失败自动总线恢复 (I2C spec 3.1.16)
+
+### !PER 无示波器周期校准 ★新增
+- `!PER` 进入: 6 个 coxa 舵机置 90° (1500µs), femur/tibia 不发送指令, 主循环 IK 暂停
+- `!PER0 <us>` / `!PER1 <us>`: 设置左板 0x40 / 右板 0x41 周期, **实时生效** (立即重写 coxa)
+- 校准原理: 配置周期 ≠ 实际周期 → 摆臂偏离正确 90°; 调整至摆臂到位即得实测周期
+- `!PERS` 重新置 90°, `!PERQ` 退出并打印最终值 (填入 hexapod_i2c_protocol.h)
+- 运行时设置函数: `pca9685_set_pwm_period_us()` (限幅 5000~15000µs)
 
 ## 控制频率
 - 控制循环: 100Hz (CONTROL_LOOP_PERIOD_MS=10ms)
@@ -170,19 +192,35 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - `!O`: 解锁, `!F/B/L/R`: 运动, `!S`: 停止
 - `!M<n>`: 站立姿态切换 (-1=窄, 0=正常, 1=宽)
 - `!G<n>`: 步态切换 (0-4)
-- **tools/serial_console.py**: USB 串口交互控制台，快捷舵机微调 `!P<id> <angle>`，命令历史 ↑↓
-  - 2026-06 修复: 添加 termios 完整配置 (CLOCAL/CREAD/8N1/raw)，解决 USB CDC 连接失败问题
+- **tools/serial_console.py**: USB 串口交互控制台 (2026-08 重写为手动行编辑器)
+  - 半行输入不被串口数据打断 (固件消息到达时自动恢复正在输入的内容)
+  - ↑↓ 命令历史, 退格, Ctrl+C 清行, Ctrl+D 退出, 超长命令截断 (15 字符)
+  - 串口数据实时显示 (select 双路监听, 无需回车才刷新)
+  - `!M -1` 与 `!M-1` 均可 (固件 parse_int 跳过前导空格)
 - tools/ik_gait_debug.py: Python 仿真可视化
 
 ## 待完善
 - [ ] 用 !C 实测每条腿的 horn_offset
 - [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
-- [ ] 电池 ADC 分压器 + BATTERY_CHECK_ENABLED
+- [ ] 用 !PER 实测两块 PCA9685 的 PWM_PERIOD_US 并填入 hexapod_i2c_protocol.h
+- [x] 电池 ADC 分压器 (15/115) + 上电检测 + 运行监测 + 过压/过放断舵机供电
+  - ⚠️ ADC 分压电路有问题的排查期间 BATTERY_CHECK_ENABLED=0, 修复后改回 1
+- [ ] ADC 分压电路修复 (读数异常)
 - [ ] Core1 双核卸载 IK 计算
 - [x] 加入 IMU (BNO055 I²C 驱动 + body_rot_offset 姿态补偿) — 待实测验证
+  - 地址已改为 0x29 (!I2C 实测确认), IMU_ENABLED 仍为 0
 - [x] 硬件看门狗 + I2C 总线自动恢复
 - [x] CH7 站立姿态三段开关 (窄/正常/宽, 平滑过渡)
 - [x] horn_offset 校准机制 (invert 后叠加, 每关节独立)
-- [x] serial_console.py 串口通信修复 (termios 配置)
-- [ ] Pico 换新 → 加电路保护 (I2C 串联电阻 + TVS + 绝缘)
-- [ ] 加入 足端传感器，自动进行步态调整
+- [x] serial_console.py 重写为手动行编辑器 (半行恢复/历史/实时显示)
+- [x] PS2 接收器支持 (bit-bang SPI GP6~GP9, 自动检测切换, 扩展键保留) — 当前 PS2_ENABLED=0
+- [x] PCB 定版 GPIO 同步 (舵机供电/直流电机/双LED/无源蜂鸣器/电池保护)
+- [x] PCA9685 物理通道映射 (0x40 左板 LED7-15, 0x41 右板 LED8-0)
+- [x] !I2C 总线检测命令 (PCA9685/BNO055 定向检测 + 全扫描 + 供电引脚状态)
+- [x] !PER 无示波器 PWM 周期校准模式
+- [x] CMake 显式链接全部 hardware_* 库, 关闭 stdio UART 释放 GP0/GP1
+- [ ] 确认 I2C 总线 0x70 未知设备 (全扫描发现)
+- [ ] 直流电机功能实际应用 (预留接口已就绪)
+- [ ] 外部 UART (GP0/GP1) 上位机协议设计
+- [ ] 足端传感器接入步态逻辑, 自动进行步态调整
+- [ ] IMU BOOT/INT 引脚 (GP27/GP28) 接线验证

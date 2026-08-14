@@ -86,6 +86,43 @@ uint16_t hal_get_battery_voltage(void);
  */
 bool hal_check_battery(void);
 
+/* ==================== 舵机供电控制接口 ==================== */
+
+/**
+ * @brief 初始化舵机供电控制引脚
+ * @note GP10 = 左侧舵机供电, GP11 = 右侧舵机供电 (高电平=供电)
+ *       初始化为低电平 (断电状态), 待电池检测通过后再上电
+ */
+void hal_servo_power_init(void);
+
+/**
+ * @brief 控制舵机供电
+ * @param side 0=左侧 (GP10), 1=右侧 (GP11)
+ * @param enable true=供电, false=断电
+ */
+void hal_servo_power_set(uint8_t side, bool enable);
+
+/**
+ * @brief 控制全部舵机供电 (两侧同时)
+ * @param enable true=供电, false=断电
+ */
+void hal_servo_power_set_all(bool enable);
+
+/* ==================== 直流电机接口 (GP2/GP3, PWM 调速) ==================== */
+
+/**
+ * @brief 初始化直流电机 GPIO (PWM 输出)
+ * @note GP2 = 电机1, GP3 = 电机2, PWM 频率 10kHz
+ */
+void hal_dc_motor_init(void);
+
+/**
+ * @brief 设置直流电机速度 (占空比)
+ * @param motor 0=电机1 (GP2), 1=电机2 (GP3)
+ * @param duty_percent 占空比 0~1000 (0.1% 单位, 0=停转, 1000=全速)
+ */
+void hal_dc_motor_set(uint8_t motor, uint16_t duty_percent);
+
 /* ==================== 输入设备接口 ==================== */
 
 /**
@@ -120,6 +157,14 @@ bool hal_input_update(control_state_t *ctrl_state);
  */
 void hal_input_allow_interrupts(bool allow);
 
+/**
+ * @brief 非阻塞轮询 USB CDC 串口命令
+ * @param ctrl_state 控制状态 (可为 NULL, 此时仅 !I2C 等硬件诊断命令可用)
+ * @return true 表示处理了一条完整命令
+ * @note 用于启动等待/初始化失败循环中保持诊断命令可用
+ */
+bool hal_poll_usb_commands(control_state_t *ctrl_state);
+
 /* ==================== 调试输出接口 ==================== */
 
 /**
@@ -137,27 +182,33 @@ void hal_debug_printf(const char *format, ...);
 /* ==================== 蜂鸣器/声音接口 ==================== */
 
 /**
- * @brief 播放音符
+ * @brief 播放音符 (无源蜂鸣器, PWM 产生方波)
  * @param note_count 音符数量
- * @param notes 音符频率数组
+ * @param notes 音符频率数组 (Hz, 0=休止)
  * @param durations 持续时间数组（毫秒）
+ * @note GP13 (PWM6B) 驱动无源蜂鸣器, 通过改变 PWM 频率发声
  */
-void hal_play_sound(uint8_t note_count, 
+void hal_play_sound(uint8_t note_count,
                    const uint16_t *notes,
                    const uint16_t *durations);
 
 /* ==================== LED指示接口 ==================== */
 
+/* LED ID 定义:
+ *   0 = 绿色 (Pico 板载 GP25) — 状态指示 (心跳/运行状态)
+ *   1 = 红色 (GP12)           — 错误/报警指示 (低电压/I2C故障)
+ * 两者功能分离: 绿=正常状态, 红=异常告警 */
+
 /**
  * @brief 设置LED状态
- * @param led_id LED ID
+ * @param led_id 0=绿色(GP25), 1=红色(GP12)
  * @param state true为亮，false为灭
  */
 void hal_led_set(uint8_t led_id, bool state);
 
 /**
  * @brief LED闪烁
- * @param led_id LED ID
+ * @param led_id 0=绿色(GP25), 1=红色(GP12)
  * @param times 闪烁次数
  */
 void hal_led_blink(uint8_t led_id, uint8_t times);
@@ -248,5 +299,12 @@ uint8_t hal_debug_get_level(void);
  * @return true 表示校准模式激活中（主循环应跳过 servo flush）
  */
 bool hal_is_calibration_active(void);
+
+/**
+ * @brief 查询 PCA9685 PWM 周期校准模式是否激活 (!PER)
+ * @return true 表示周期校准模式激活中（主循环应跳过 IK/舵机输出,
+ *         由 !PER 命令独占 coxa 舵机）
+ */
+bool hal_is_period_calib_active(void);
 
 #endif /* HEXAPOD_HAL_H */

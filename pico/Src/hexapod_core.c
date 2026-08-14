@@ -83,7 +83,11 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
 
     hal_debug_init();
 #if INPUT_CONTROL_MODE == 0
+#if PS2_ENABLED
+    hal_input_init(INPUT_TYPE_AUTO);  /* 自动检测: CRSF 优先, PS2 降级 */
+#else
     hal_input_init(INPUT_TYPE_CRSF);  /* CRSF 接收器 (ELRS) */
+#endif
 #else
     hal_input_init(INPUT_TYPE_SERIAL);  /* USB CDC 串口命令 */
 #endif
@@ -336,7 +340,7 @@ void hexapod_update(hexapod_t *robot)
 
     /* 校准模式：仅处理输入（串口命令），跳过所有舵机更新。
      * 校准通过直接 PCA9685 写入控制舵机，IK 管线在此模式下不运行。 */
-    if (hal_is_calibration_active()) {
+    if (hal_is_calibration_active() || hal_is_period_calib_active()) {
         hal_input_update(&robot->state);
         hexapod_apply_stance(robot);
         return;

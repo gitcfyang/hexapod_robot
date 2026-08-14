@@ -64,9 +64,41 @@
 
 /* ==================== 安全配置 ==================== */
 
-/* 电池低压保护：设为 1 启用，设为 0 禁用
- * 启用后，当电池电压低于 MIN_VOLTAGE_MV (定义在 hexapod_core.h) 时自动停止 */
-#define BATTERY_CHECK_ENABLED   0   /* 电池接好 ADC 后改为 1 */
+/* 电池电压保护总开关：设为 1 启用，设为 0 完全禁用
+ * 此开关统一控制三处电压保护:
+ *   1. 上电启动检测 (hexapod_pico.c) — 电压异常拒绝舵机供电
+ *   2. 运行电压监测 (hexapod_pico.c) — 每 1s 分级报警/断电
+ *   3. 核心循环检查 (hexapod_core.c) — 紧急停止
+ * 设为 0 时: 跳过 ADC 读取, 舵机供电无条件开启, 无任何电压报警。
+ * ⚠️ 仅当 ADC 分压电路故障排查期间使用, 分压修复后应改回 1 */
+#define BATTERY_CHECK_ENABLED   0   /* ★ ADC 分压有问题的临时关闭 */
+
+/* ==================== 电池检测配置 (GP26 ADC, 2S 18650) ==================== */
+
+/* 分压电阻: R1=100kΩ (电池+), R2=15kΩ (地), ADC 抽头在 R2
+ * ADC 电压 = 电池电压 × R2/(R1+R2) = 电池 × 15/115
+ * → 电池电压 = ADC 电压 × 115/15 ≈ 7.67×
+ * 电池 8.4V (满) → ADC 1.10V;  6.6V (空) → ADC 0.86V  (安全范围) */
+#define BATTERY_ADC_PIN         26
+#define BATTERY_ADC_INPUT       0
+#define ADC_REF_VOLTAGE         3300
+#define ADC_RESOLUTION          4095
+#define BATTERY_DIVIDER_RATIO   7.667f    /* 115/15, 2S 18650 */
+
+/* 2S 18650 电压阈值 (mV)
+ *   8.4V = 充满 (4.2V/节)
+ *   8.8V = 过压保护阈值 — 断开舵机供电 + 红灯蜂鸣报警
+ *          (高于满电 8.4V; 可捕获误接 3S 电池 9V+ 或电源故障)
+ *   7.4V = 标称
+ *   7.0V = 低电压警告 (3.5V/节) — 红灯闪烁 + 蜂鸣提示, 建议尽快回充
+ *   6.6V = 保护截止 (3.3V/节) — 断开舵机供电, 防止过放损坏电池 */
+#define BATTERY_OVERVOLTAGE_MV  8800
+#define BATTERY_WARNING_MV      7000
+#define BATTERY_CUTOFF_MV       6600
+#define BATTERY_RECOVERY_MV     7300    /* 电压回升到此值以上才重新接通舵机供电 */
+
+/* 电压监测间隔 (ms) */
+#define BATTERY_CHECK_INTERVAL_MS   1000
 
 /* ==================== IMU 姿态传感器配置 ==================== */
 
@@ -77,8 +109,9 @@
 
 /* BNO055 I2C 地址 (7-bit)
  *   COM3 接 GND → 0x28 (默认)
- *   COM3 接 VCC → 0x29 */
-#define BNO055_I2C_ADDR         0x28
+ *   COM3 接 VCC → 0x29
+ *   PCB 实测: 本板 BNO055 应答在 0x29 (!I2C 检测确认) */
+#define BNO055_I2C_ADDR         0x29
 
 /* IMU 补偿增益 (×10, 10 = 1:1 直接补偿)
  * 增益 < 10 → 欠补偿 (响应平缓, 适合高速运动)
@@ -106,14 +139,14 @@
 #define HEADLESS_MODE           0   /* ★ 生产模式：舵机必须正常 */
 
 /* PCA9685 舵机板数量 (1 或 2)
- *   1 = 仅一块板 (地址 0x40)，控制右半身 9 路舵机 (ID 0-8)
+ *   1 = 仅一块板 (地址 0x40)，控制左半身 9 路舵机 (ID 9-17)
  *   2 = 两块板 (地址 0x40 + 0x41)，控制全部 18 路舵机 (ID 0-17) */
 #define PCA9685_BOARD_COUNT     2   /* 接好第二块板后改为 2 */
 
 /* PS2 无线手柄支持: 设为 1 启用，设为 0 禁用 (零开销)
  * 启用后可通过 bit-bang SPI (GP6~GP9) 连接 PS2 接收器。
  * 支持 CRSF/PS2 自动检测和 !MODE 命令切换。 */
-#define PS2_ENABLED             1   /* ★ 接好 PS2 接收器后保持 1，否则改 0 */
+#define PS2_ENABLED             0   /* ★ 接好 PS2 接收器后保持 1，否则改 0 */
 
 /* ==================== CRSF 通道映射 ====================
  *
@@ -444,18 +477,17 @@
 /*
  * 每个舵机的全局 ID (0~17)，对应 hal_servo_set_angle 的 servo_id 参数。
  *
- * PCA9685 分配:
- *   板 0 (0x40): 舵机 ID 0~8  (右半身 RR+RM+RF, 3腿 × 3关节 = 9 路)
- *   板 1 (0x41): 舵机 ID 9~17 (左半身 LR+LM+LF, 3腿 × 3关节 = 9 路)
+ * PCA9685 分配 (PCB 定版):
+ *   板 0x40 (ADDR=GND): 舵机 ID 9~17 (左半身 LR+LM+LF, 3腿 × 3关节 = 9 路)
+ *   板 0x41 (ADDR=VCC): 舵机 ID 0~8  (右半身 RR+RM+RF, 3腿 × 3关节 = 9 路)
  *
  * 每腿 3 关节顺序: Coxa(0) → Femur(1) → Tibia(2)
  *
- * 接线对应关系:
- *   PCA9685 #1 CH0 → 舵机 0 (RR Coxa)
- *   PCA9685 #1 CH1 → 舵机 1 (RR Femur)
- *   PCA9685 #1 CH2 → 舵机 2 (RR Tibia)
- *   ...以此类推...
- *   PCA9685 #2 CH0 → 舵机 9 (LR Coxa)
+ * 物理通道映射 (PCB 定版, 见 pca9685_servo_to_channel):
+ *   左侧板 0x40 (ID 9~17): 从前至后 LED7~LED15
+ *     LF: LED7,8,9  → LM: LED10,11,12 → LR: LED13,14,15
+ *   右侧板 0x41 (ID 0~8): 从前至后 LED8~LED0
+ *     RF: LED8,7,6  → RM: LED5,4,3    → RR: LED2,1,0
  */
 #define SERVO_RR_COXA       0     /* 右后 Coxa  */
 #define SERVO_RR_FEMUR      1     /* 右后 Femur */

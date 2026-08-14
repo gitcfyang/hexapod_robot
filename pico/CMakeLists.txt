@@ -44,6 +44,7 @@ add_executable(hexapod_pico
     Src/hexapod_hal_pico.c
     Src/hexapod_i2c_protocol.c
     Src/hexapod_crsf.c
+    Src/hexapod_ps2.c
     Src/bno055.c
 )
 
@@ -51,15 +52,24 @@ pico_set_program_name(hexapod_pico "hexapod_pico")
 pico_set_program_version(hexapod_pico "0.1")
 
 # Modify the below lines to enable/disable output over UART/USB
-pico_enable_stdio_uart(hexapod_pico 1)
+# 注意: stdio UART 默认占用 UART0 = GP0(TX)/GP1(RX),
+# 而 PCB 定版中 GP0/GP1 预留给外部扩展 (上位机/传感器),
+# 所以调试输出只走 USB CDC, 保持 GP0/GP1 空闲。
+pico_enable_stdio_uart(hexapod_pico 0)
 pico_enable_stdio_usb(hexapod_pico 1)
 
 # Add the standard library to the build
+# ★ 显式列出所有直接使用的 hardware_* 库 (勿依赖传递依赖, SDK 内部链条易变):
 target_link_libraries(hexapod_pico
         pico_stdlib
-        hardware_i2c
-        hardware_adc
-        hardware_uart
+        hardware_i2c        # I2C1: PCA9685 + BNO055
+        hardware_adc        # GP26 电池电压
+        hardware_uart       # UART1: CRSF/串口
+        hardware_pwm        # 无源蜂鸣器 GP13 + 直流电机 GP2/GP3
+        hardware_gpio       # 足端开关/供电控制/LED/PS2 bit-bang
+        hardware_sync       # save_and_disable_interrupts (I2C 临界区)
+        hardware_watchdog   # 主循环硬件看门狗
+        hardware_irq        # UART1 中断处理 (irq_set_exclusive_handler)
 )
 
 # Add the standard include files to the build

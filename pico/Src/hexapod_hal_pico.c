@@ -27,6 +27,7 @@
 #include "hardware/gpio.h"
 #include "hardware/sync.h"
 #include "hardware/uart.h"
+#include "hardware/pwm.h"
 #include "pico/time.h"
 
 /* ==================== 舵机控制实现 ==================== */
@@ -128,16 +129,19 @@ void hal_servo_flush(void)
     static uint8_t  i2c_fail_consecutive = 0;
     bool all_ok = true;
 
-    /* 处理每块 PCA9685 板：板 0→舵机 ID 0~8, 板 1→舵机 ID 9~17 */
+    /* 处理每块 PCA9685 板 (PCB 定版, 按 I2C 地址区分):
+     *   0x40 = 左侧腿组 (舵机 ID 9~17)
+     *   0x41 = 右侧腿组 (舵机 ID 0~8) */
     for (uint8_t b = 0; b < board_cnt; b++) {
         uint16_t pulses[16] = {0};
         bool has_pending = false;
-        uint8_t id_start = (b == 0) ? 0 : 9;
-        uint8_t id_end   = (b == 0) ? 8 : 17;
+        uint8_t addr = pca9685_get_board_addr(b);
+        uint8_t id_start = (addr == PCA9685_ADDR_LEFT) ? 9 : 0;
+        uint8_t id_end   = id_start + 8;
 
         for (uint8_t id = id_start; id <= id_end; id++) {
             if (g_servo_batch.pending[id]) {
-                uint8_t ch = id - id_start;  /* 映射到 PCA9685 通道 0~8 */
+                uint8_t ch = pca9685_servo_to_channel(id);  /* PCB 定版物理通道 */
                 pulses[ch] = g_servo_batch.pulses[id];
                 has_pending = true;
             }
@@ -219,11 +223,11 @@ void hal_delay_ms(uint32_t ms)
 
 /* ==================== 电源管理实现（本地ADC，不走I2C） ==================== */
 
-#define BATTERY_ADC_PIN        26
-#define BATTERY_ADC_INPUT      0
-#define ADC_REF_VOLTAGE        3300
-#define ADC_RESOLUTION         4095
-#define VOLTAGE_DIVIDER_RATIO  2.0f
+/*
+ * 电池检测 (2S 18650):
+ *   分压: R1=100kΩ (电池+), R2=15kΩ (地), ADC 抽头在 R2
+ *   ADC 电压 = 电池 × 15/115 → 电池 = ADC × 115/15 ≈ 7.67×
+ */
 
 static bool adc_initialized = false;
 
@@ -235,22 +239,118 @@ uint16_t hal_get_battery_voltage(void)
         adc_select_input(BATTERY_ADC_INPUT);
         adc_initialized = true;
     }
-    
+
+    /* 8 次采样平均, 抑制舵机 EMI 尖峰 */
     uint32_t sum = 0;
     for (int i = 0; i < 8; i++) {
         sum += adc_read();
         sleep_us(10);
     }
     uint16_t adc_val = (uint16_t)(sum / 8);
-    
-    uint32_t voltage_mv = (uint32_t)((float)adc_val / ADC_RESOLUTION * ADC_REF_VOLTAGE * VOLTAGE_DIVIDER_RATIO);
+
+    uint32_t voltage_mv = (uint32_t)((float)adc_val / ADC_RESOLUTION
+                                     * ADC_REF_VOLTAGE * BATTERY_DIVIDER_RATIO);
     return (uint16_t)voltage_mv;
 }
 
 bool hal_check_battery(void)
 {
     uint16_t voltage = hal_get_battery_voltage();
-    return (voltage >= MIN_VOLTAGE_MV);
+    /* 电压必须在安全窗口内: 低压截止 ~ 过压保护 */
+    return (voltage >= BATTERY_CUTOFF_MV && voltage <= BATTERY_OVERVOLTAGE_MV);
+}
+
+/* ==================== 舵机供电控制实现 (GP10/GP11) ==================== */
+
+/*
+ * 舵机供电控制:
+ *   GP10 = 左侧舵机供电 (PCA9685 0x40, 左腿组)
+ *   GP11 = 右侧舵机供电 (PCA9685 0x41, 右腿组)
+ *   高电平 = 供电, 低电平 = 断电
+ *
+ * 安全设计:
+ *   - 上电默认断电 (低电平)
+ *   - 电池电压检测通过后才允许供电
+ *   - 电压异常时自动断开, 防止电池过放
+ */
+
+#define SERVO_PWR_LEFT_PIN   10
+#define SERVO_PWR_RIGHT_PIN  11
+#define SERVO_PWR_ACTIVE     1      /* 高电平有效 (N-MOS 高端或继电器) */
+
+static bool servo_pwr_initialized = false;
+
+void hal_servo_power_init(void)
+{
+    gpio_init(SERVO_PWR_LEFT_PIN);
+    gpio_set_dir(SERVO_PWR_LEFT_PIN, GPIO_OUT);
+    gpio_put(SERVO_PWR_LEFT_PIN, !SERVO_PWR_ACTIVE);   /* 默认断电 */
+
+    gpio_init(SERVO_PWR_RIGHT_PIN);
+    gpio_set_dir(SERVO_PWR_RIGHT_PIN, GPIO_OUT);
+    gpio_put(SERVO_PWR_RIGHT_PIN, !SERVO_PWR_ACTIVE);  /* 默认断电 */
+
+    servo_pwr_initialized = true;
+}
+
+void hal_servo_power_set(uint8_t side, bool enable)
+{
+    if (!servo_pwr_initialized) hal_servo_power_init();
+
+    uint8_t pin = (side == 0) ? SERVO_PWR_LEFT_PIN : SERVO_PWR_RIGHT_PIN;
+    gpio_put(pin, enable ? SERVO_PWR_ACTIVE : !SERVO_PWR_ACTIVE);
+}
+
+void hal_servo_power_set_all(bool enable)
+{
+    hal_servo_power_set(0, enable);
+    hal_servo_power_set(1, enable);
+}
+
+/* ==================== 直流电机实现 (GP2/GP3, PWM 调速) ==================== */
+
+/*
+ * 直流电机控制:
+ *   GP2 = 电机 1 (PWM1A)
+ *   GP3 = 电机 2 (PWM1B)
+ *   PWM 频率 10kHz, 占空比 0~100% (0=停转, 100%=全速)
+ *
+ * 说明: 每路仅一个引脚, 单向控制 (无方向引脚)。
+ * 未来如需双向, 可配合外部 H 桥的方向引脚扩展。
+ */
+
+#define DC_MOTOR1_PIN       2
+#define DC_MOTOR2_PIN       3
+#define DC_MOTOR_PWM_FREQ   10000   /* 10kHz, 直流电机理想范围 */
+#define DC_MOTOR_PWM_WRAP   12500   /* 125MHz / 10kHz = 12500 */
+
+static bool dc_motor_initialized = false;
+
+void hal_dc_motor_init(void)
+{
+    /* 电机1: GP2 = PWM1A, 电机2: GP3 = PWM1B — 同属 slice 1 */
+    gpio_set_function(DC_MOTOR1_PIN, GPIO_FUNC_PWM);
+    gpio_set_function(DC_MOTOR2_PIN, GPIO_FUNC_PWM);
+
+    uint slice = pwm_gpio_to_slice_num(DC_MOTOR1_PIN);
+    pwm_set_wrap(slice, DC_MOTOR_PWM_WRAP - 1);
+    pwm_set_chan_level(slice, PWM_CHAN_A, 0);   /* 电机1 停转 */
+    pwm_set_chan_level(slice, PWM_CHAN_B, 0);   /* 电机2 停转 */
+    pwm_set_enabled(slice, true);
+
+    dc_motor_initialized = true;
+}
+
+void hal_dc_motor_set(uint8_t motor, uint16_t duty_percent)
+{
+    if (!dc_motor_initialized) hal_dc_motor_init();
+    if (motor > 1) return;
+    if (duty_percent > 1000) duty_percent = 1000;
+
+    /* 占空比 0~1000 → PWM 电平 0~WRAP-1 */
+    uint32_t level = (uint32_t)duty_percent * (DC_MOTOR_PWM_WRAP - 1) / 1000;
+    uint slice = pwm_gpio_to_slice_num(DC_MOTOR1_PIN);
+    pwm_set_chan_level(slice, (motor == 0) ? PWM_CHAN_A : PWM_CHAN_B, level);
 }
 
 /* ==================== 输入设备实现（UART1串口，不走I2C） ==================== */
@@ -558,6 +658,10 @@ static int16_t parse_int(const uint8_t *buf, uint8_t start, uint8_t len)
 {
     int16_t val = 0;
     bool neg = false;
+
+    /* 跳过前导空格 (容忍 "!M -1" 与 "!M-1" 两种写法) */
+    while (start < len && buf[start] == ' ') start++;
+
     if (start < len && buf[start] == '-') { neg = true; start++; }
     for (uint8_t i = start; i < len && buf[i] >= '0' && buf[i] <= '9'; i++) {
         val = val * 10 + (buf[i] - '0');
@@ -630,9 +734,77 @@ static bool calib_handle_command(uint8_t *buf, uint8_t len)
     }
 }
 
+/* ==================== I2C 总线检测 (!I2C) ==================== */
+
+/**
+ * @brief 检测 I2C 总线上的 PCA9685 和 BNO055
+ * @note 独立于机器人初始化, 启动失败/等待状态也可执行
+ */
+static void i2c_bus_check(void)
+{
+    /* 确保 I2C 硬件已初始化 (机器人初始化失败时也可检测) */
+    i2c_init(PCA9685_I2C_INSTANCE, PCA9685_I2C_BAUD);
+    gpio_set_function(PCA9685_I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(PCA9685_I2C_SDA_PIN);
+    gpio_pull_up(PCA9685_I2C_SCL_PIN);
+
+    hal_debug_printf("=== I2C Bus Check (SDA=GP14, SCL=GP15) ===\r\n");
+
+    /* 舵机供电引脚状态 (诊断 PCA9685 供电极性是否正确) */
+    hal_debug_printf("Servo power: GP10(left)=%d  GP11(right)=%d\r\n",
+                     gpio_get(SERVO_PWR_LEFT_PIN), gpio_get(SERVO_PWR_RIGHT_PIN));
+
+    /* PCA9685 定向检测: 0x40=左腿板, 0x41=右腿板 (读 MODE1 寄存器) */
+    for (uint8_t addr = 0x40; addr <= 0x41; addr++) {
+        uint8_t mode1 = 0;
+        int ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, addr, &mode1, 1, false);
+        if (ret == 1) {
+            hal_debug_printf("PCA9685 0x%02X (%s legs): DETECTED  MODE1=0x%02X\r\n",
+                             addr, (addr == PCA9685_ADDR_LEFT) ? "left " : "right", mode1);
+        } else {
+            hal_debug_printf("PCA9685 0x%02X (%s legs): NOT FOUND (ret=%d)\r\n",
+                             addr, (addr == PCA9685_ADDR_LEFT) ? "left " : "right", ret);
+        }
+    }
+
+    /* BNO055 定向检测: 0x28 默认, 0x29 备用 (读 CHIP_ID 寄存器, 期望 0xA0) */
+    for (uint8_t addr = 0x28; addr <= 0x29; addr++) {
+        uint8_t reg = BNO055_REG_CHIP_ID;
+        uint8_t chip_id = 0;
+        int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, &reg, 1, true);
+        if (ret == 1) {
+            ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, addr, &chip_id, 1, false);
+        }
+        if (ret == 1 && chip_id == BNO055_CHIP_ID_VAL) {
+            hal_debug_printf("BNO055 0x%02X: DETECTED  CHIP_ID=0x%02X\r\n", addr, chip_id);
+        } else if (ret == 1) {
+            hal_debug_printf("BNO055 0x%02X: present but CHIP_ID=0x%02X (expect 0xA0)\r\n",
+                             addr, chip_id);
+        } else {
+            hal_debug_printf("BNO055 0x%02X: NOT FOUND\r\n", addr);
+        }
+    }
+
+    /* 全总线扫描 (列出所有 ACK 的设备) */
+    pca9685_scan_bus();
+}
+
+/* 前置声明: 周期校准命令处理 (定义在本文件后部) */
+static bool period_calib_handle_command(uint8_t *buf, uint8_t len);
+
 static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint8_t len)
 {
     if (len < 2 || buf[0] != '!') return false;
+
+    /* ---- !I2C: I2C 总线设备检测 (无需控制状态, 启动失败时也可用) ---- */
+    if (buf[1] == 'I' && len >= 3 && buf[2] == '2') {
+        i2c_bus_check();
+        return true;
+    }
+
+    /* 其余命令需要控制状态 */
+    if (!ctrl_state) return false;
 
     /* ---- 校准模式命令路由 ---- */
     if (g_calib_active) {
@@ -672,6 +844,37 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
         case 'D': ctrl_state->leg_lift_height -= 5; if (ctrl_state->leg_lift_height < 20)  ctrl_state->leg_lift_height = 20;  break;
         case 'T': ctrl_state->balance_mode = !ctrl_state->balance_mode; hal_debug_printf("Balance: %d\r\n", ctrl_state->balance_mode); break;
         case 'M':
+#if PS2_ENABLED
+            /* ---- !MODE: 输入模式切换 (PS2_ENABLED) ----
+             * !MODE crsf → 强制 CRSF 模式
+             * !MODE ps2  → 强制 PS2 模式
+             * !MODE auto → 自动检测 (CRSF 优先) */
+            if (len >= 3 && buf[2] == 'O') {
+                uint8_t p = 5;
+                while (p < len && buf[p] == ' ') p++;
+                if (p + 3 < len && buf[p] == 'c' && buf[p+1] == 'r'
+                    && buf[p+2] == 's' && buf[p+3] == 'f') {
+                    g_input_mode = INPUT_MODE_CRSF;
+                    g_mode_switch_time_ms = hal_get_tick_ms();
+                    hal_debug_printf("[MODE] Switched to CRSF\r\n");
+                } else if (p + 2 < len && buf[p] == 'p' && buf[p+1] == 's'
+                           && buf[p+2] == '2') {
+                    g_input_mode = INPUT_MODE_PS2;
+                    g_mode_switch_time_ms = hal_get_tick_ms();
+                    hal_debug_printf("[MODE] Switched to PS2\r\n");
+                } else if (p + 3 < len && buf[p] == 'a' && buf[p+1] == 'u'
+                           && buf[p+2] == 't' && buf[p+3] == 'o') {
+                    g_input_mode = INPUT_MODE_AUTO;
+                    g_mode_switch_time_ms = hal_get_tick_ms();
+                    g_crsf_state.link_connected = false;
+                    g_ps2_state.connected = false;
+                    hal_debug_printf("[MODE] Switched to AUTO (CRSF first)\r\n");
+                } else {
+                    hal_debug_printf("Usage: !MODE crsf|ps2|auto\r\n");
+                }
+                break;
+            }
+#endif /* PS2_ENABLED */
             /* !M<n>  站立姿态: -1=窄, 0=正常, 1=宽 */
             if (len >= 3) {
                 int8_t m = (int8_t)parse_int(buf, 2, len);
@@ -683,41 +886,13 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             break;
         case 'V': { uint8_t lvl = hal_debug_get_level(); lvl = (lvl + 1) % 4; hal_debug_set_level(lvl); } break;
 
-        /* ---- 输入模式切换 (PS2_ENABLED) ---- */
-#if PS2_ENABLED
-        case 'M':
-            /* !MODE crsf → 强制 CRSF 模式
-             * !MODE ps2  → 强制 PS2 模式
-             * !MODE auto → 自动检测 (CRSF 优先) */
-            if (len >= 6) {
-                if (buf[2] == 'O' && buf[3] == 'D' && buf[4] == 'E') {
-                    /* buf[5] 可能是空格 */
-                    uint8_t p = 5;
-                    while (p < len && buf[p] == ' ') p++;
-                    if (p + 3 < len && buf[p] == 'c' && buf[p+1] == 'r'
-                        && buf[p+2] == 's' && buf[p+3] == 'f') {
-                        g_input_mode = INPUT_MODE_CRSF;
-                        g_mode_switch_time_ms = hal_get_tick_ms();
-                        hal_debug_printf("[MODE] Switched to CRSF\r\n");
-                    } else if (p + 2 < len && buf[p] == 'p' && buf[p+1] == 's'
-                               && buf[p+2] == '2') {
-                        g_input_mode = INPUT_MODE_PS2;
-                        g_mode_switch_time_ms = hal_get_tick_ms();
-                        hal_debug_printf("[MODE] Switched to PS2\r\n");
-                    } else if (p + 3 < len && buf[p] == 'a' && buf[p+1] == 'u'
-                               && buf[p+2] == 't' && buf[p+3] == 'o') {
-                        g_input_mode = INPUT_MODE_AUTO;
-                        g_mode_switch_time_ms = hal_get_tick_ms();
-                        g_crsf_state.link_connected = false;
-                        g_ps2_state.connected = false;
-                        hal_debug_printf("[MODE] Switched to AUTO (CRSF first)\r\n");
-                    }
-                }
-            }
-            break;
-
         /* ---- 舵机直控 (硬件排查) ---- */
         case 'P': {
+            /* ---- !PER: PCA9685 PWM 周期校准模式 ---- */
+            if (len >= 3 && buf[2] == 'E' && buf[3] == 'R') {
+                period_calib_handle_command(buf, len);
+                break;
+            }
             /* ---- !PS2: PS2 手柄原始状态调试输出 ---- */
 #if PS2_ENABLED
             if (len >= 3 && buf[2] == 'S' && (len == 3 || buf[3] == '2')) {
@@ -766,16 +941,15 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             uint8_t pos = 2; while (pos < len && buf[pos] != ' ') pos++;
             int16_t ang = parse_int(buf, pos + 1, len);
             if (sid < 18 && ang >= -1800 && ang <= 1800) {
-                /* 直接写入舵机，绕过 IK/步态 */
+                /* 直接写入舵机，绕过 IK/步态
+                 * PCB 定版: ID 0~8=右腿→0x41, ID 9~17=左腿→0x40 */
                 uint16_t pulse = pca9685_angle_to_pulse(ang);
-                uint8_t addr;
-                if (sid <= 8) addr = pca9685_get_board_addr(0);
-                else          addr = pca9685_get_board_addr(1);
-                if (addr) {
+                uint8_t addr = (sid <= 8) ? PCA9685_ADDR_RIGHT : PCA9685_ADDR_LEFT;
+                if (pca9685_get_board_idx_by_addr(addr) < pca9685_get_board_count()) {
                     pca9685_set_servo_pulse(sid, pulse);
                     hal_debug_printf("Servo %u → angle %d (pulse %u us, addr 0x%02X)\r\n", sid, ang, pulse, addr);
                 } else {
-                    hal_debug_printf("Servo %u: board not present\r\n", sid);
+                    hal_debug_printf("Servo %u: board 0x%02X not present\r\n", sid, addr);
                 }
             } else {
                 hal_debug_printf("Invalid: id=%u angle=%d\r\n", sid, ang);
@@ -810,16 +984,16 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             break;
         }
         case 'A': {
-            /* 打印所有舵机当前角度（从 servo batch 缓存读取） */
+            /* 打印所有舵机当前角度（从 servo batch 缓存读取）
+             * PCB 定版: 0x40=左腿板(ID 9~17), 0x41=右腿板(ID 0~8) */
             hal_debug_printf("=== Servo Snapshot ===\r\n");
-            hal_debug_printf("Board 0 (0x%02X): ", pca9685_get_board_addr(0));
-            for (uint8_t i = 0; i <= 8; i++) {
-                hal_debug_printf("[%u]:%d ", i, g_servo_batch.angles[i]);
-            }
-            hal_debug_printf("\r\n");
-            if (pca9685_get_board_count() >= 2) {
-                hal_debug_printf("Board 1 (0x%02X): ", pca9685_get_board_addr(1));
-                for (uint8_t i = 9; i < 18; i++) {
+            for (uint8_t b = 0; b < pca9685_get_board_count(); b++) {
+                uint8_t addr = pca9685_get_board_addr(b);
+                uint8_t id_start = (addr == PCA9685_ADDR_LEFT) ? 9 : 0;
+                uint8_t id_end   = id_start + 8;
+                hal_debug_printf("Board 0x%02X (%s): ", addr,
+                                 (addr == PCA9685_ADDR_LEFT) ? "left" : "right");
+                for (uint8_t i = id_start; i <= id_end; i++) {
                     hal_debug_printf("[%u]:%d ", i, g_servo_batch.angles[i]);
                 }
                 hal_debug_printf("\r\n");
@@ -1003,6 +1177,27 @@ bool hal_input_update(control_state_t *ctrl_state)
 #endif
 }
 
+bool hal_poll_usb_commands(control_state_t *ctrl_state)
+{
+    static uint8_t usb_buf[16];
+    static uint8_t usb_len = 0;
+
+    int ch = getchar_timeout_us(0);
+    while (ch != PICO_ERROR_TIMEOUT) {
+        if (ch == '\n' || ch == '\r') {
+            if (usb_len > 0) {
+                parse_serial_command(ctrl_state, usb_buf, usb_len);
+                usb_len = 0;
+                return true;
+            }
+        } else if (usb_len < sizeof(usb_buf)) {
+            usb_buf[usb_len++] = (uint8_t)ch;
+        }
+        ch = getchar_timeout_us(0);
+    }
+    return false;
+}
+
 void hal_input_allow_interrupts(bool allow)
 {
     static uint32_t irq_stack[8];
@@ -1039,9 +1234,24 @@ void hal_debug_printf(const char *format, ...)
     va_end(args);
 }
 
-/* ==================== 蜂鸣器实现（GPIO 高低电平驱动，本地 GPIO，不走 I2C） ==================== */
+/* ==================== 蜂鸣器实现（无源蜂鸣器, PWM 方波驱动, 本地 GPIO, 不走 I2C） ==================== */
 
-#define BUZZER_PIN              13   /* GP13: 原 GP15 已改用于 I2C SCL */
+/*
+ * 无源蜂鸣器 (GP13 = PWM6B):
+ *   无内部振荡器, 需要外部方波信号才能发声。
+ *   通过 PWM 改变频率 → 不同音高; 50% 占空比 → 最大音量。
+ *
+ * 时钟计算:
+ *   PWM 时钟 = 125MHz / 16 (clkdiv) = 7.8125MHz
+ *   wrap = 7.8125MHz / 频率
+ *   最低频率 200Hz → wrap = 39062 (16-bit 上限内)
+ */
+
+#define BUZZER_PIN              13      /* GP13 (PWM6B), 无源蜂鸣器 */
+#define BUZZER_PWM_CLKDIV       16.0f   /* 125MHz / 16 = 7.8125MHz */
+#define BUZZER_MIN_FREQ_HZ      200     /* 最低频率 (16-bit wrap 上限约束) */
+
+static bool buzzer_initialized = false;
 
 void hal_play_sound(uint8_t note_count,
                    const uint16_t *notes,
@@ -1049,19 +1259,41 @@ void hal_play_sound(uint8_t note_count,
 {
     if (!notes || !durations || note_count == 0) return;
 
-    /* 初始化蜂鸣器 GPIO 为推挽输出 */
-    gpio_init(BUZZER_PIN);
-    gpio_set_dir(BUZZER_PIN, GPIO_OUT);
-    gpio_put(BUZZER_PIN, 0);
+    uint slice = pwm_gpio_to_slice_num(BUZZER_PIN);
+    uint chan  = pwm_gpio_to_channel(BUZZER_PIN);
+
+    /* 初始化蜂鸣器 GPIO 为 PWM 功能 */
+    if (!buzzer_initialized) {
+        gpio_set_function(BUZZER_PIN, GPIO_FUNC_PWM);
+        pwm_set_clkdiv(slice, BUZZER_PWM_CLKDIV);
+        pwm_set_enabled(slice, true);   /* ★ 必须使能 slice, 计数器才运行 */
+        buzzer_initialized = true;
+    }
+
+    const uint32_t pwm_clk = 125000000UL / 16;   /* 7.8125 MHz */
 
     for (uint8_t i = 0; i < note_count && i < 10; i++) {
         if (notes[i] > 0) {
-            gpio_put(BUZZER_PIN, 1);
+            uint32_t freq = notes[i];
+            if (freq < BUZZER_MIN_FREQ_HZ) freq = BUZZER_MIN_FREQ_HZ;
+
+            uint32_t wrap = pwm_clk / freq;   /* 200Hz → 39062 */
+            pwm_set_wrap(slice, (uint16_t)(wrap - 1));
+            pwm_set_chan_level(slice, chan, wrap / 2);   /* 50% 占空比 */
+            sleep_ms(durations[i]);
+        } else {
+            /* 音符频率 0 = 休止 */
+            pwm_set_chan_level(slice, chan, 0);
             sleep_ms(durations[i]);
         }
-        gpio_put(BUZZER_PIN, 0);
-        sleep_ms(50);
+
+        /* 音符间短停顿, 避免连音 */
+        pwm_set_chan_level(slice, chan, 0);
+        sleep_ms(30);
     }
+
+    /* 结束后静音 */
+    pwm_set_chan_level(slice, chan, 0);
 }
 
 /* ==================== 足端微动开关实现（6路 GPIO 输入，上拉，落地→GND=低电平） ==================== */
@@ -1136,22 +1368,46 @@ uint8_t hal_foot_switch_read_all(bool contacts[6])
 
 /* ==================== LED实现（本地GPIO，不走I2C） ==================== */
 
-#define LED_BUILTIN             25
+/*
+ * 双 LED 系统:
+ *   0 = 绿色 LED (GP25, Pico 板载) — 状态指示 (心跳/运行状态)
+ *   1 = 红色 LED (GP12, 外部)      — 错误/报警指示 (低电压/I2C故障)
+ * 两者功能分离, 绿色=正常, 红色=异常。
+ */
+
+#define LED_GREEN_PIN           25
+#define LED_RED_PIN             12
 
 static bool led_initialized = false;
 
+static void led_init_once(void)
+{
+    if (led_initialized) return;
+
+    gpio_init(LED_GREEN_PIN);
+    gpio_set_dir(LED_GREEN_PIN, GPIO_OUT);
+    gpio_put(LED_GREEN_PIN, 0);
+
+    gpio_init(LED_RED_PIN);
+    gpio_set_dir(LED_RED_PIN, GPIO_OUT);
+    gpio_put(LED_RED_PIN, 0);
+
+    led_initialized = true;
+}
+
 void hal_led_set(uint8_t led_id, bool state)
 {
-    /* led_id 参数预留用于多 LED 扩展；当前仅支持板载 LED (GPIO 25) */
-    (void)led_id;
+    led_init_once();
 
-    if (!led_initialized) {
-        gpio_init(LED_BUILTIN);
-        gpio_set_dir(LED_BUILTIN, GPIO_OUT);
-        led_initialized = true;
+    switch (led_id) {
+        case 1:
+            gpio_put(LED_RED_PIN, state);
+            break;
+        case 0:
+        default:
+            gpio_put(LED_GREEN_PIN, state);
+            break;
     }
-    
-    gpio_put(LED_BUILTIN, state);
 }
 
 void hal_led_blink(uint8_t led_id, uint8_t times)
@@ -1205,6 +1461,124 @@ uint8_t hal_debug_get_last_servo_count(void)
 bool hal_is_calibration_active(void)
 {
     return g_calib_active;
+}
+
+/* ==================== PCA9685 PWM 周期校准模式 (!PER) ==================== */
+
+/*
+ * 无示波器校准法:
+ *   1. 进入模式后, 所有 6 个 coxa 舵机收到 90° 指令 (脉宽 1500µs),
+ *      其余舵机 (femur/tibia) 不发送任何指令
+ *   2. 用户目测/量角器观察 coxa 摆臂, 输入 !PER0/!PER1 调整周期值
+ *   3. 每次调整立即以新周期重写 coxa 脉冲 → 舵机实时响应
+ *   4. 当 coxa 摆臂到达正确机械位置时, 该周期值即为实测周期
+ *   5. !PERQ 退出并打印最终值, 填入 hexapod_i2c_protocol.h
+ */
+
+static bool g_period_calib_active = false;
+
+/* 6 个 coxa 舵机 ID (每腿第 0 关节) */
+static const uint8_t g_coxa_servo_ids[6] = {
+    SERVO_RR_COXA, SERVO_RM_COXA, SERVO_RF_COXA,
+    SERVO_LR_COXA, SERVO_LM_COXA, SERVO_LF_COXA
+};
+
+/**
+ * @brief 将所有 coxa 舵机置 90° (脉宽 1500µs), 使用当前周期校准值
+ */
+static void period_calib_apply_coxas(void)
+{
+    uint16_t pulse = pca9685_angle_to_pulse(900);  /* 90° → 1500µs */
+
+    for (uint8_t i = 0; i < 6; i++) {
+        pca9685_set_servo_pulse(g_coxa_servo_ids[i], pulse);
+    }
+}
+
+static void period_calib_print_status(void)
+{
+    for (uint8_t b = 0; b < pca9685_get_board_count(); b++) {
+        uint8_t addr = pca9685_get_board_addr(b);
+        hal_debug_printf("[PER] Board %u (0x%02X, %s legs): period=%u us\r\n",
+                         b, addr,
+                         (addr == PCA9685_ADDR_LEFT) ? "left " : "right",
+                         pca9685_get_pwm_period_us(b));
+    }
+    hal_debug_printf("[PER] Coxa servos @90deg (1500us). "
+                     "Cmds: !PER0 <us>  !PER1 <us>  !PERS  !PERQ\r\n");
+}
+
+/**
+ * @brief 处理周期校准模式命令
+ * @return true 表示命令已被消费
+ */
+static bool period_calib_handle_command(uint8_t *buf, uint8_t len)
+{
+    if (len < 4) return false;
+    if (buf[2] != 'E' || buf[3] != 'R') return false;
+
+    if (len == 4) {
+        /* !PER: 进入/刷新校准模式 */
+        if (!g_period_calib_active) {
+            g_period_calib_active = true;
+            hal_debug_printf("[PER] Period calibration mode entered\r\n");
+            period_calib_apply_coxas();
+        }
+        period_calib_print_status();
+        return true;
+    }
+
+    switch (buf[4]) {
+        case 'Q': case 'q':
+            /* !PERQ: 退出并打印最终值 (复制到 hexapod_i2c_protocol.h) */
+            g_period_calib_active = false;
+            hal_debug_printf("[PER] Calibration ended. Final values:\r\n");
+            for (uint8_t b = 0; b < pca9685_get_board_count(); b++) {
+                uint8_t addr = pca9685_get_board_addr(b);
+                hal_debug_printf("  #define PWM_PERIOD_US_BOARD%u    %u   /* 0x%02X (%s) */\r\n",
+                                 b, pca9685_get_pwm_period_us(b), addr,
+                                 (addr == PCA9685_ADDR_LEFT) ? "left" : "right");
+            }
+            return true;
+
+        case 'S': case 's':
+            /* !PERS: 重新置 coxa 90° (用当前周期值) */
+            period_calib_apply_coxas();
+            hal_debug_printf("[PER] Coxa servos re-applied @90deg\r\n");
+            return true;
+
+        case '0': case '1': {
+            /* !PER0 <us> / !PER1 <us>: 设置周期并实时生效 */
+            if (len < 6) {
+                hal_debug_printf("Usage: !PER0 <us>  or  !PER1 <us>\r\n");
+                return true;
+            }
+            /* 板号映射: 0 = 0x40 (左腿板), 1 = 0x41 (右腿板) */
+            uint8_t addr = (buf[4] == '0') ? PCA9685_ADDR_LEFT : PCA9685_ADDR_RIGHT;
+            uint8_t idx  = pca9685_get_board_idx_by_addr(addr);
+            if (idx >= 2) {
+                hal_debug_printf("[PER] Board 0x%02X not present\r\n", addr);
+                return true;
+            }
+
+            uint16_t us = (uint16_t)parse_int(buf, 5, len);
+            pca9685_set_pwm_period_us(idx, us);
+            period_calib_apply_coxas();   /* 立即以新周期重写 coxa → 舵机实时响应 */
+
+            hal_debug_printf("[PER] Board %u (0x%02X) period=%u us, coxa re-applied\r\n",
+                             idx, addr, pca9685_get_pwm_period_us(idx));
+            return true;
+        }
+
+        default:
+            hal_debug_printf("Usage: !PER | !PER0 <us> | !PER1 <us> | !PERS | !PERQ\r\n");
+            return true;
+    }
+}
+
+bool hal_is_period_calib_active(void)
+{
+    return g_period_calib_active;
 }
 
 /* ==================== IMU 姿态传感器接口 ==================== */

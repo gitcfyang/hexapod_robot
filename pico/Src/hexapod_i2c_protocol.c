@@ -8,8 +8,8 @@
  *   Pico GP14(SDA) - PCA9685#1 SDI - PCA9685#2 SDI（共用总线）
  *   Pico GP15(SCL) - PCA9685#1 SCL - PCA9685#2 SCL（共用总线）
  *   ⚠️ PCA9685 须用 3.3V 供电！5V I2C 会烧毁 RP2040 GPIO！
- *   PCA9685#1 ADDR接GND -> 地址0x40
- *   PCA9685#2 ADDR接VCC -> 地址0x41
+ *   PCB 定版: ADDR接GND -> 0x40 = 左侧腿组 (LR/LM/LF)
+ *             ADDR接VCC -> 0x41 = 右侧腿组 (RR/RM/RF)
  */
 
 #include "hexapod_i2c_protocol.h"
@@ -116,7 +116,9 @@ bool pca9685_init(void)
             mode1 |= PCA9685_MODE1_AI;
             if (pca9685_write_reg(addr, PCA9685_MODE1, mode1)) {
                 g_board_addrs[g_board_count++] = addr;
-                printf("  PCA9685 #%u found at 0x%02X\r\n", g_board_count, addr);
+                printf("  PCA9685 #%u found at 0x%02X (%s legs)\r\n",
+                       g_board_count, addr,
+                       (addr == PCA9685_ADDR_LEFT) ? "left" : "right");
             }
         }
     }
@@ -210,6 +212,59 @@ uint16_t pca9685_angle_to_pulse(int16_t angle)
     return (uint16_t)pulse;
 }
 
+/* ==================== 舵机 ID → 物理通道映射 (PCB 定版) ==================== */
+
+/*
+ * PCB 布线决定了舵机插座到 PCA9685 通道的物理顺序。
+ * 逻辑舵机 ID (0-17) 保持不变, 仅在此表映射到物理通道:
+ *
+ *   左侧板 (0x40, ID 9~17 LR/LM/LF): 从前至后 LED7~LED15
+ *     LF (前): coxa=LED7,  femur=LED8,  tibia=LED9
+ *     LM (中): coxa=LED10, femur=LED11, tibia=LED12
+ *     LR (后): coxa=LED13, femur=LED14, tibia=LED15
+ *
+ *   右侧板 (0x41, ID 0~8  RR/RM/RF): 从前至后 LED8~LED0
+ *     RF (前): coxa=LED8, femur=LED7, tibia=LED6
+ *     RM (中): coxa=LED5, femur=LED4, tibia=LED3
+ *     RR (后): coxa=LED2, femur=LED1, tibia=LED0
+ */
+static const uint8_t g_servo_id_to_channel[18] = {
+    /* ID 0~8: 右侧板 (0x41) */
+    2, 1, 0,     /* RR: coxa=LED2, femur=LED1, tibia=LED0 */
+    5, 4, 3,     /* RM: coxa=LED5, femur=LED4, tibia=LED3 */
+    8, 7, 6,     /* RF: coxa=LED8, femur=LED7, tibia=LED6 */
+    /* ID 9~17: 左侧板 (0x40) */
+    13, 14, 15,  /* LR: coxa=LED13, femur=LED14, tibia=LED15 */
+    10, 11, 12,  /* LM: coxa=LED10, femur=LED11, tibia=LED12 */
+    7, 8, 9      /* LF: coxa=LED7, femur=LED8, tibia=LED9 */
+};
+
+uint8_t pca9685_servo_to_channel(uint8_t servo_id)
+{
+    if (servo_id >= SERVO_TOTAL_COUNT) return 0;
+    return g_servo_id_to_channel[servo_id];
+}
+
+uint8_t pca9685_get_board_idx_by_addr(uint8_t addr)
+{
+    for (uint8_t i = 0; i < g_board_count; i++) {
+        if (g_board_addrs[i] == addr) return i;
+    }
+    return 0xFF;  /* 未找到 */
+}
+
+void pca9685_set_pwm_period_us(uint8_t board_idx, uint16_t period_us)
+{
+    if (board_idx >= 2) return;
+
+    /* 限幅: 100Hz 目标周期 10000µs, 振荡器 ±15% → 8500~11500,
+     * 放宽到 5000~15000 以覆盖极端情况 */
+    if (period_us < 5000)  period_us = 5000;
+    if (period_us > 15000) period_us = 15000;
+
+    g_board_pwm_period_us[board_idx] = period_us;
+}
+
 /* ==================== 舵机PWM输出 ==================== */
 
 /**
@@ -265,19 +320,14 @@ bool pca9685_set_servo_pulse(uint8_t servo_id, uint16_t pulse_us)
 {
     if (servo_id >= SERVO_TOTAL_COUNT) return false;
 
-    /* 确定使用的 PCA9685 板索引和内部通道号
-     * 板 0: 舵机 ID 0~8 (右腿组)
-     * 板 1: 舵机 ID 9~17 (左腿组) — 仅当 g_board_count >= 2 时可用 */
-    uint8_t board_idx;
-    uint8_t channel;
-
-    if (servo_id <= PCA9685_1_SERVO_MAX) {
-        board_idx = 0;
-        channel = servo_id;
-    } else {
-        board_idx = 1;
-        channel = servo_id - PCA9685_2_SERVO_MIN;
-    }
+    /* 确定目标板 (PCB 定版, 按 I2C 地址) 和物理通道号:
+     *   ID 0~8   (右腿组 RR/RM/RF) → 0x41 (ADDR=VCC)
+     *   ID 9~17  (左腿组 LR/LM/LF) → 0x40 (ADDR=GND)
+     * 通道号通过 PCB 定版映射表查得 (非顺序) */
+    uint8_t target_addr = (servo_id <= PCA9685_1_SERVO_MAX)
+                          ? PCA9685_ADDR_RIGHT : PCA9685_ADDR_LEFT;
+    uint8_t board_idx = pca9685_get_board_idx_by_addr(target_addr);
+    uint8_t channel   = pca9685_servo_to_channel(servo_id);
 
     /* 目标板不存在则静默跳过 */
     if (board_idx >= g_board_count) return false;

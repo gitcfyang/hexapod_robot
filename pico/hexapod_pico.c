@@ -132,25 +132,111 @@ int main(void)
     hal_debug_printf("Hexapod Robot - Raspberry Pi Pico\r\n");
     hal_debug_printf("=================================\r\n");
 
+    /* ==================== 上电电池检测 (先于舵机供电) ====================
+     *
+     * 安全设计:
+     *   1. 舵机供电引脚 (GP10/GP11) 默认断电
+     *   2. 先读电池电压:
+     *      > 8.8V: 过压, 拒绝启动 (红灯 + 蜂鸣), 每 5s 复查
+     *      < 6.6V: 过放, 拒绝启动 (红灯 + 蜂鸣), 每 5s 复查
+     *   3. 电压在安全窗口 → 开启舵机供电 → 初始化舵机
+     *   4. 防止过压烧舵机 + 过放伤电池 + 低压舵机抖动
+     */
+    hal_servo_power_init();  /* 初始化供电引脚, 保持断电状态 */
+
+#if BATTERY_CHECK_ENABLED
+    uint16_t boot_voltage = hal_get_battery_voltage();
+    hal_debug_printf("Battery: %u mV\r\n", boot_voltage);
+
+    if (boot_voltage > BATTERY_OVERVOLTAGE_MV) {
+        /* 电压过高: 拒绝启动, 红色 LED 常亮 + 蜂鸣报警
+         * 可能原因: 误接 3S 电池 / 电源故障 / 分压电阻焊接错误 */
+        hal_debug_printf("BATTERY OVERVOLTAGE (%u mV > %u mV)! Servo power DISABLED.\r\n",
+                         boot_voltage, BATTERY_OVERVOLTAGE_MV);
+        hal_led_set(1, true);  /* 红色 LED 常亮 */
+        uint16_t ov_alarm_notes[] = {1200, 0, 1200, 0, 1200};
+        uint16_t ov_alarm_dur[]   = {200, 100, 200, 100, 400};
+        hal_play_sound(5, ov_alarm_notes, ov_alarm_dur);
+
+        while (1) {
+            /* 每 5s 复查电压, 降到阈值以下后自动继续启动
+             * 分 50 次轮询, 保持 !I2C 等 USB 诊断命令可用 */
+            for (int i = 0; i < 50; i++) {
+                hal_poll_usb_commands(NULL);
+                sleep_ms(100);
+            }
+            boot_voltage = hal_get_battery_voltage();
+            if (boot_voltage <= BATTERY_OVERVOLTAGE_MV) {
+                hal_led_set(1, false);
+                hal_debug_printf("Battery recovered: %u mV, continuing boot...\r\n",
+                                 boot_voltage);
+                break;
+            }
+            /* 仍在过压: 周期性蜂鸣提醒 */
+            hal_play_sound(5, ov_alarm_notes, ov_alarm_dur);
+        }
+    } else if (boot_voltage < BATTERY_CUTOFF_MV) {
+        /* 电压过低: 拒绝启动, 红色 LED 常亮 + 蜂鸣报警 */
+        hal_debug_printf("BATTERY TOO LOW (%u mV < %u mV)! Servo power DISABLED.\r\n",
+                         boot_voltage, BATTERY_CUTOFF_MV);
+        hal_led_set(1, true);  /* 红色 LED 常亮 */
+        uint16_t alarm_notes[] = {200, 0, 200, 0, 200};
+        uint16_t alarm_dur[]   = {200, 100, 200, 100, 400};
+        hal_play_sound(5, alarm_notes, alarm_dur);
+
+        while (1) {
+            /* 等待换电池/充电, 每 5s 复查一次电压, 恢复后自动继续
+             * 分 50 次轮询, 保持 !I2C 等 USB 诊断命令可用 */
+            for (int i = 0; i < 50; i++) {
+                hal_poll_usb_commands(NULL);
+                sleep_ms(100);
+            }
+            boot_voltage = hal_get_battery_voltage();
+            if (boot_voltage >= BATTERY_RECOVERY_MV) {
+                hal_led_set(1, false);
+                hal_debug_printf("Battery recovered: %u mV, continuing boot...\r\n",
+                                 boot_voltage);
+                break;
+            }
+        }
+    } else if (boot_voltage < BATTERY_WARNING_MV) {
+        /* 低压警告: 允许启动但红灯闪烁提醒 */
+        hal_debug_printf("BATTERY LOW (%u mV)! Charge soon.\r\n", boot_voltage);
+    }
+#else
+    /* 电池检测已禁用 (BATTERY_CHECK_ENABLED=0): 跳过 ADC 读取, 直接上电 */
+    hal_debug_printf("Battery check DISABLED (BATTERY_CHECK_ENABLED=0)\r\n");
+#endif
+
+    /* 开启舵机供电 (检测通过 或 检测已禁用) */
+    hal_servo_power_set_all(true);
+    hal_debug_printf("Servo power ON (GP10=left, GP11=right)\r\n");
+    sleep_ms(100);  /* 等待舵机电源稳定 */
+
     /* 机器人初始化 */
     if (!robot_init()) {
+        /* 初始化失败: 红灯闪烁, 但保持 USB 命令可用 (如 !I2C 诊断) */
+        hal_debug_printf("Robot init failed! Use !I2C to check bus, !P to test servos.\r\n");
         while(1) {
-            hal_led_blink(0, 5);
-            sleep_ms(1000);
+            hal_poll_usb_commands(NULL);
+            hal_led_blink(1, 2);
+            sleep_ms(500);
         }
     }
 
     /* 硬件信息打印 */
     hal_debug_printf("\r\n");
-    hal_debug_printf("Servo: PCA9685 x2 via I2C (GP2/GP3)\r\n");
+    hal_debug_printf("Servo: PCA9685 x2 via I2C (GP14/GP15)\r\n");
 #if INPUT_CONTROL_MODE == 0
     hal_debug_printf("Input: CRSF (ELRS) via UART1 (GP4/GP5) @420000 baud\r\n");
 #else
     hal_debug_printf("Input: USB CDC Serial (no UART1 required)\r\n");
 #endif
-    hal_debug_printf("Battery: ADC0 (GP26)\r\n");
-    hal_debug_printf("Buzzer: GP15\r\n");
-    hal_debug_printf("LED: GP25 (built-in)\r\n");
+    hal_debug_printf("Battery: ADC0 (GP26, divider 15/115)\r\n");
+    hal_debug_printf("Buzzer: GP13 (passive, PWM)\r\n");
+    hal_debug_printf("LED: GP25 green (status), GP12 red (alarm)\r\n");
+    hal_debug_printf("DC Motor: GP2/GP3 (PWM)\r\n");
+    hal_debug_printf("Servo Power: GP10 left, GP11 right\r\n");
     hal_debug_printf("Debug: USB CDC\r\n");
 
 #if INPUT_CONTROL_MODE == 0
@@ -193,6 +279,10 @@ int main(void)
     uint32_t last_debug_time  = 0;
     uint32_t last_update      = 0;
     uint32_t frame_delta_total = 0;
+#if BATTERY_CHECK_ENABLED
+    uint32_t last_battery_check = 0;
+    bool     servo_power_cut    = false;   /* 舵机供电是否已被过放/过压保护切断 */
+#endif
 
     while (1) {
         watchdog_update();
@@ -268,6 +358,69 @@ int main(void)
                 }
             }
         }
+
+#if BATTERY_CHECK_ENABLED
+        /* ---- 运行电压监测 (每 1s) ----
+         * 分级保护:
+         *   > OV (8.8V): 过压保护 (红灯常亮 + 蜂鸣, 断开两路舵机供电)
+         *   ≥ RECOVERY: 正常 (红灯灭, 舵机供电保持)
+         *   WARNING ~ RECOVERY: 低压警告 (红灯闪, 舵机供电保持, 提示尽快回充)
+         *   CUTOFF ~ WARNING: 严重低压 (红灯快闪 + 蜂鸣, 舵机供电保持到最后)
+         *   < CUTOFF: 过放保护 (红灯常亮 + 蜂鸣, 断开两路舵机供电) */
+        if (now - last_battery_check >= BATTERY_CHECK_INTERVAL_MS) {
+            last_battery_check = now;
+            uint16_t voltage = hal_get_battery_voltage();
+
+            if (voltage > BATTERY_OVERVOLTAGE_MV) {
+                /* 过压保护: 断开舵机供电 + 报警 */
+                if (!servo_power_cut) {
+                    servo_power_cut = true;
+                    hal_servo_power_set_all(false);
+                    hal_debug_printf("[BATT] OVERVOLTAGE %u mV! Servo power DISCONNECTED.\r\n",
+                                     voltage);
+                    hal_led_set(1, true);  /* 红灯常亮 */
+                    uint16_t ov_notes[] = {1200, 0, 1200, 0, 1200};
+                    uint16_t ov_dur[]   = {150, 100, 150, 100, 300};
+                    hal_play_sound(5, ov_notes, ov_dur);
+                }
+            } else if (voltage < BATTERY_CUTOFF_MV) {
+                /* 过放保护: 断开舵机供电 */
+                if (!servo_power_cut) {
+                    servo_power_cut = true;
+                    hal_servo_power_set_all(false);
+                    hal_debug_printf("[BATT] CUTOFF %u mV! Servo power DISCONNECTED.\r\n",
+                                     voltage);
+                    hal_led_set(1, true);  /* 红灯常亮 */
+                    uint16_t alarm_notes[] = {200, 0, 200, 0, 200};
+                    uint16_t alarm_dur[]   = {150, 100, 150, 100, 300};
+                    hal_play_sound(5, alarm_notes, alarm_dur);
+                }
+            } else if (voltage < BATTERY_WARNING_MV) {
+                /* 低压警告: 红灯闪烁 (2Hz), 舵机供电保持 */
+                if (servo_power_cut) {
+                    /* 电压回升但未达恢复阈值: 保持断电, 等待进一步回升 */
+                    if (voltage >= BATTERY_RECOVERY_MV) {
+                        servo_power_cut = false;
+                        hal_servo_power_set_all(true);
+                        hal_led_set(1, false);
+                        hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
+                                         voltage);
+                    }
+                } else {
+                    hal_led_set(1, (now % 500) < 250);  /* 2Hz 闪烁 */
+                }
+            } else {
+                /* 正常 */
+                if (servo_power_cut) {
+                    servo_power_cut = false;
+                    hal_servo_power_set_all(true);
+                    hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
+                                     voltage);
+                }
+                hal_led_set(1, false);
+            }
+        }
+#endif /* BATTERY_CHECK_ENABLED */
 
         tight_loop_contents();
     }

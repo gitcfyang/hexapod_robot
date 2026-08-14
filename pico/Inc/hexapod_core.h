@@ -17,7 +17,9 @@
 #define DEFAULT_GAIT_SPEED      100     // 默认步态速度
 #define DEFAULT_LEG_LIFT_HEIGHT 40      // 默认抬腿高度（mm）(完整站立高度80mm，抬一半即40mm)
 #define DEFAULT_INIT_Y          80      // 默认初始足端Y高度（mm） (站立时机身离地高)
-#define MIN_VOLTAGE_MV          10000   // 最低电压（10V）
+/* 最低电池电压 (mV) — 已由 hexapod_config.h 的 BATTERY_CUTOFF_MV 取代
+ * 保留此宏仅为兼容旧代码, 新代码请使用 BATTERY_CUTOFF_MV (2S 18650) */
+#define MIN_VOLTAGE_MV          6600
 #define CONTROL_LOOP_PERIOD_MS  10        // 舵机刷新周期（5ms = 200Hz，匹配 PCA9685 200Hz PWM）
 #define GAIT_STEP_PERIOD_MS     60       // 步态推进周期（ms）。越大=越慢。RIPPLE_12有12步，
                                          // 60ms×12=720ms/周期。步长80mm时速度=80/0.72≈111mm/s。
