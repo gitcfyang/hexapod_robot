@@ -1477,22 +1477,44 @@ bool hal_is_calibration_active(void)
 
 static bool g_period_calib_active = false;
 
-/* 6 个 coxa 舵机 ID (每腿第 0 关节) */
+/* horn_offset 开关: true=叠加各腿 coxa_horn_offset (摆臂到校准后的中位),
+ * false=纯 1500µs 原始中位。默认开启, 与机器人实际运行一致。 */
+static bool g_period_calib_use_offset = true;
+
+/* 6 个 coxa 舵机 ID (每腿第 0 关节) 及其对应腿索引 */
 static const uint8_t g_coxa_servo_ids[6] = {
     SERVO_RR_COXA, SERVO_RM_COXA, SERVO_RF_COXA,
     SERVO_LR_COXA, SERVO_LM_COXA, SERVO_LF_COXA
 };
+static const leg_index_t g_coxa_leg_idx[6] = {
+    LEG_RR, LEG_RM, LEG_RF, LEG_LR, LEG_LM, LEG_LF
+};
 
 /**
- * @brief 将所有 coxa 舵机置 90° (脉宽 1500µs), 使用当前周期校准值
+ * @brief 将所有 coxa 舵机置中位, 使用当前周期校准值
+ * @note 固件角度约定: 0 = 舵机中位 (1500µs), ±900 = ±90° 极限
+ *       目标位置 = 0 + horn_offset (开关控制), 与机器人运行公式一致:
+ *       最终舵机角度 = IK 计算角度 + horn_offset
+ *       注意 900 会被 pca9685_angle_to_pulse 钳位到 2500µs 极限, 勿用
  */
 static void period_calib_apply_coxas(void)
 {
-    uint16_t pulse = pca9685_angle_to_pulse(900);  /* 90° → 1500µs */
+    leg_config_t configs[CNT_LEGS];
+    hexapod_get_default_config(configs);
 
+    uint8_t ok = 0;
     for (uint8_t i = 0; i < 6; i++) {
-        pca9685_set_servo_pulse(g_coxa_servo_ids[i], pulse);
+        int16_t target = 0;   /* 中位基准 */
+        if (g_period_calib_use_offset) {
+            target = configs[g_coxa_leg_idx[i]].coxa_horn_offset;
+        }
+        uint16_t pulse = pca9685_angle_to_pulse(target);
+        if (pca9685_set_servo_pulse(g_coxa_servo_ids[i], pulse)) {
+            ok++;
+        }
     }
+    hal_debug_printf("[PER] Coxa write: %u/6 OK (horn_offset: %s)\r\n",
+                     ok, g_period_calib_use_offset ? "ON" : "OFF");
 }
 
 static void period_calib_print_status(void)
@@ -1504,8 +1526,9 @@ static void period_calib_print_status(void)
                          (addr == PCA9685_ADDR_LEFT) ? "left " : "right",
                          pca9685_get_pwm_period_us(b));
     }
-    hal_debug_printf("[PER] Coxa servos @90deg (1500us). "
-                     "Cmds: !PER0 <us>  !PER1 <us>  !PERS  !PERQ\r\n");
+    hal_debug_printf("[PER] Coxa @center, horn_offset=%s. "
+                     "Cmds: !PER0 <us>  !PER1 <us>  !PERO 0/1  !PERS  !PERQ\r\n",
+                     g_period_calib_use_offset ? "ON" : "OFF");
 }
 
 /**
@@ -1542,9 +1565,22 @@ static bool period_calib_handle_command(uint8_t *buf, uint8_t len)
             return true;
 
         case 'S': case 's':
-            /* !PERS: 重新置 coxa 90° (用当前周期值) */
+            /* !PERS: 重新置 coxa 中位 (用当前周期值和偏移开关) */
             period_calib_apply_coxas();
-            hal_debug_printf("[PER] Coxa servos re-applied @90deg\r\n");
+            return true;
+
+        case 'O': case 'o':
+            /* !PERO 0/1: horn_offset 开关
+             *   1 = 叠加各腿 coxa_horn_offset (与机器人运行公式一致, 默认)
+             *   0 = 纯 1500µs 原始中位
+             * 切换后立即重新写 coxa */
+            if (len >= 6) {
+                int16_t v = parse_int(buf, 5, len);
+                g_period_calib_use_offset = (v != 0);
+            }
+            period_calib_apply_coxas();
+            hal_debug_printf("[PER] horn_offset mode: %s\r\n",
+                             g_period_calib_use_offset ? "ON" : "OFF");
             return true;
 
         case '0': case '1': {
@@ -1571,7 +1607,7 @@ static bool period_calib_handle_command(uint8_t *buf, uint8_t len)
         }
 
         default:
-            hal_debug_printf("Usage: !PER | !PER0 <us> | !PER1 <us> | !PERS | !PERQ\r\n");
+            hal_debug_printf("Usage: !PER | !PER0 <us> | !PER1 <us> | !PERO 0/1 | !PERS | !PERQ\r\n");
             return true;
     }
 }

@@ -97,10 +97,14 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - I²C 写入失败检测 + 自动重试 + 连续 3 次失败自动总线恢复 (I2C spec 3.1.16)
 
 ### !PER 无示波器周期校准 ★新增
-- `!PER` 进入: 6 个 coxa 舵机置 90° (1500µs), femur/tibia 不发送指令, 主循环 IK 暂停
+- `!PER` 进入: 6 个 coxa 舵机置中位 (1500µs), femur/tibia 不发送指令, 主循环 IK 暂停
 - `!PER0 <us>` / `!PER1 <us>`: 设置左板 0x40 / 右板 0x41 周期, **实时生效** (立即重写 coxa)
-- 校准原理: 配置周期 ≠ 实际周期 → 摆臂偏离正确 90°; 调整至摆臂到位即得实测周期
-- `!PERS` 重新置 90°, `!PERQ` 退出并打印最终值 (填入 hexapod_i2c_protocol.h)
+- `!PERO 1` / `!PERO 0`: horn_offset 偏移量开关 (默认 ON)
+  - ON: 目标位置 = 0 + 各腿 coxa_horn_offset (与机器人运行公式一致, 摆臂到校准后中位)
+  - OFF: 纯 1500µs 原始中位
+- 校准原理: 配置周期 ≠ 实际周期 → 摆臂偏离正确位置; 调整至摆臂到位即得实测周期
+- `!PERS` 重新置位, `!PERQ` 退出并打印最终值 (填入 hexapod_i2c_protocol.h)
+- 注意: 固件角度约定 0=中位 1500µs, ±900=极限; angle=900 会被钳位到 2500µs
 - 运行时设置函数: `pca9685_set_pwm_period_us()` (限幅 5000~15000µs)
 
 ## 控制频率
