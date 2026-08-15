@@ -792,6 +792,8 @@ static void i2c_bus_check(void)
 
 /* 前置声明: 周期校准命令处理 (定义在本文件后部) */
 static bool period_calib_handle_command(uint8_t *buf, uint8_t len);
+/* 前置声明: IMU 状态打印 (定义在本文件后部) */
+static void imu_status_print(void);
 
 static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint8_t len)
 {
@@ -800,6 +802,12 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
     /* ---- !I2C: I2C 总线设备检测 (无需控制状态, 启动失败时也可用) ---- */
     if (buf[1] == 'I' && len >= 3 && buf[2] == '2') {
         i2c_bus_check();
+        return true;
+    }
+
+    /* ---- !IMU: IMU 状态 (欧拉角/中断/校准) ---- */
+    if (buf[1] == 'I' && len >= 3 && buf[2] == 'M') {
+        imu_status_print();
         return true;
     }
 
@@ -1621,15 +1629,72 @@ bool hal_is_period_calib_active(void)
 
 static bool g_imu_available = false;
 
+#if IMU_ENABLED
+/* INT 中断 (GP28): BNO055 融合数据就绪, NDOF ~100Hz
+ * 双沿触发对极性不敏感 (INT_CNTL 空闲高/下降沿, 兼容相反配置) */
+static volatile bool g_imu_data_ready = false;
+static volatile uint32_t g_imu_int_count = 0;
+static imu_data_t g_imu_last;           /* 最近一次有效读数 (调试用) */
+
+static void imu_int_callback(uint gpio, uint32_t events)
+{
+    (void)events;
+    if (gpio == IMU_INT_PIN) {
+        g_imu_data_ready = true;
+        g_imu_int_count++;
+    }
+}
+#endif
+
 bool hal_imu_init(void)
 {
 #if IMU_ENABLED
-    g_imu_available = bno055_init(BNO055_I2C_ADDR);
+    g_imu_available = false;
+    memset(&g_imu_last, 0, sizeof(g_imu_last));
+
+#if IMU_BOOT_GPIO_ENABLED
+    /* BOOT 引脚: 上电保持高 → BNO055 正常应用模式启动
+     * (拉低则进入 bootloader) */
+    gpio_init(IMU_BOOT_PIN);
+    gpio_set_dir(IMU_BOOT_PIN, GPIO_OUT);
+    gpio_put(IMU_BOOT_PIN, 1);
+    sleep_ms(10);   /* 稳定 BOOT 电平后再访问 I2C */
+#endif
+
+    /* 初始化 + 自动恢复: 失败时循环 BOOT 引脚强制重启 BNO055 */
+    for (uint8_t attempt = 0; attempt < IMU_INIT_RETRY_MAX; attempt++) {
+        if (bno055_init(BNO055_I2C_ADDR)) {
+            g_imu_available = true;
+            break;
+        }
+#if IMU_BOOT_GPIO_ENABLED
+        hal_debug_printf("[IMU] init failed (attempt %u/%u), cycling BOOT pin...\r\n",
+                         attempt + 1, IMU_INIT_RETRY_MAX);
+        gpio_put(IMU_BOOT_PIN, 0);    /* 进入 boot 模式 */
+        sleep_ms(50);
+        gpio_put(IMU_BOOT_PIN, 1);    /* 释放 → 重新上电启动序列 */
+        sleep_ms(BNO055_POR_WAIT_MS);
+#endif
+    }
+
     if (g_imu_available) {
         hal_debug_printf("IMU: BNO055 detected at 0x%02X\r\n", BNO055_I2C_ADDR);
+#if IMU_INT_GPIO_ENABLED
+        /* INT 引脚: 输入 + 上拉, 双沿中断 → 数据就绪标志 */
+        g_imu_data_ready = false;
+        g_imu_int_count = 0;
+        gpio_init(IMU_INT_PIN);
+        gpio_set_dir(IMU_INT_PIN, GPIO_IN);
+        gpio_pull_up(IMU_INT_PIN);
+        gpio_set_irq_enabled_with_callback(IMU_INT_PIN,
+                                           GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL,
+                                           true, &imu_int_callback);
+        hal_debug_printf("IMU: INT interrupt enabled on GP%u (BSX DRDY)\r\n",
+                         IMU_INT_PIN);
+#endif
     } else {
-        hal_debug_printf("WARNING: BNO055 not found at 0x%02X, IMU disabled\r\n",
-                         BNO055_I2C_ADDR);
+        hal_debug_printf("WARNING: BNO055 not found at 0x%02X after %u retries, IMU disabled\r\n",
+                         BNO055_I2C_ADDR, IMU_INIT_RETRY_MAX);
     }
     return g_imu_available;
 #else
@@ -1648,6 +1713,28 @@ bool hal_imu_read(imu_data_t *data)
         return false;
     }
 
+#if IMU_INT_GPIO_ENABLED
+    /* INT 模式: 优先在数据就绪中断后读取, 避免重复读取同一帧。
+     * 兜底: 若 INT 长时间未触发 (引脚未接线/克隆芯片不支持),
+     * 超时后直接轮询读取, 保证姿态补偿始终工作。 */
+    static uint32_t last_read_ms = 0;
+    uint32_t now = hal_get_tick_ms();
+    if (!g_imu_data_ready) {
+        if ((now - last_read_ms) < IMU_INT_FALLBACK_TIMEOUT_MS) {
+            data->valid = false;
+            return false;
+        }
+        /* 超时未收到 INT → 轮询兜底 (每 20ms 一次) */
+        static uint32_t last_fallback_warn_ms = 0;
+        if ((now - last_fallback_warn_ms) > 5000) {
+            last_fallback_warn_ms = now;
+            hal_debug_printf("[IMU] WARN: INT inactive, poll fallback active\r\n");
+        }
+    }
+    g_imu_data_ready = false;
+    last_read_ms = now;
+#endif
+
     bno055_euler_t raw;
     if (!bno055_read_euler(&raw)) {
         data->valid = false;
@@ -1661,24 +1748,86 @@ bool hal_imu_read(imu_data_t *data)
      *   Pitch → 绕 X 轴 (前后倾斜)
      *   Heading → 绕 Z 轴
      *
-     * 机器人坐标映射:
-     *   body_rot.x = Roll  (绕 X 前进轴) ← BNO055 Roll  (Y 轴)
-     *   body_rot.z = Pitch (绕 Z 左右轴) ← BNO055 Pitch (X 轴)
-     *   body_rot.y = Yaw   (绕 Y 垂直轴) ← BNO055 Heading
+     * 机器人坐标映射 (芯片倒扣安装, 绕 rX 翻转 180°):
      *
-     * 注意: BNO055 Roll/Pitch 轴与机器人 Roll/Pitch 轴是交叉映射的。
-     * BNO055 的 Roll 是绕自身 Y 轴 → 机器人绕 X 轴 (Roll)
-     * BNO055 的 Pitch 是绕自身 X 轴 → 机器人绕 Z 轴 (Pitch)
-     * 这是因为 BNO055 芯片方向和机器人安装方向可能存在旋转。 */
+     *   安装几何 (右手定则推导 + 实测验证):
+     *     Xc = rX   芯片 X 轴 → 机器人正前方 (用户确认)
+     *     Zc = -rY  倒扣 → 芯片 Z 轴朝下
+     *     Yc = rZ   由 Xc×Yc=Zc 推得 (rX×rZ=-rY ✓)
+     *
+     *   平放读数: chip pitch≈180° (绕 Xc 翻转), chip roll≈0
+     *
+     *   倾角映射 (同轴同向, 符号均 +1):
+     *     robot_roll  (绕 rX=Xc) ← chip pitch - 180°  [chip pitch 绕 Xc]
+     *     robot_pitch (绕 rZ=Yc) ← chip roll          [chip roll 绕 Yc]
+     *     robot_yaw   (绕 rY)     ← chip heading      (暂不使用)
+     *
+     * 符号由 IMU_ROLL_SIGN / IMU_PITCH_SIGN 配置,
+     * 若补偿加剧倾斜 (正反馈) → 取反对应符号。 */
 
-    data->roll  = (raw.roll  * 10) / 16;   /* BNO055 Y → Robot X (Roll) */
-    data->pitch = (raw.pitch * 10) / 16;   /* BNO055 X → Robot Z (Pitch) */
+    data->roll  = IMU_ROLL_SIGN  * (((raw.pitch * 10) / 16) - 1800);
+    data->pitch = IMU_PITCH_SIGN * ((raw.roll  * 10) / 16);
     data->yaw   = (raw.heading * 10) / 16; /* 暂不使用，保留 */
     data->valid = true;
 
+    g_imu_last = *data;   /* 缓存最近读数, 供 !IMU 调试 */
     return true;
 #else
     data->valid = false;
     return false;
+#endif
+}
+
+/* ==================== IMU 调试状态 (!IMU) ==================== */
+
+/**
+ * @brief 打印 IMU 当前状态: 可用性/中断计数/校准/欧拉角
+ */
+static void imu_status_print(void)
+{
+#if IMU_ENABLED
+    hal_debug_printf("=== IMU Status ===\r\n");
+    hal_debug_printf("available: %s  addr: 0x%02X\r\n",
+                     g_imu_available ? "YES" : "NO", BNO055_I2C_ADDR);
+
+#if IMU_INT_GPIO_ENABLED
+    hal_debug_printf("INT (GP%u): count=%lu rate≈%lu Hz  pin_now=%d\r\n",
+                     IMU_INT_PIN, g_imu_int_count,
+                     g_imu_int_count / (hal_get_tick_ms() / 1000 + 1),
+                     gpio_get(IMU_INT_PIN));
+#endif
+
+    if (g_imu_available) {
+        bno055_calib_t calib;
+        if (bno055_get_calib(&calib)) {
+            hal_debug_printf("calib: sys=%u gyr=%u acc=%u mag=%u %s\r\n",
+                             calib.sys, calib.gyro, calib.accel, calib.mag,
+                             bno055_is_calibrated() ? "(fully)" : "");
+        }
+
+        /* INT 诊断: 状态/配置读回 + 软件版本 */
+        uint8_t sta = 0;
+        if (bno055_get_int_status(&sta)) {
+            hal_debug_printf("INT_STA=0x%02X (bit7=BSX_DRDY)\r\n", sta);
+        }
+        uint8_t en = 0, msk = 0, cntl = 0;
+        if (bno055_get_int_config(&en, &msk, &cntl)) {
+            hal_debug_printf("INT cfg readback: EN=0x%02X MSK=0x%02X CNTL=0x%02X\r\n",
+                             en, msk, cntl);
+        }
+        uint16_t sw_rev = 0;
+        if (bno055_get_sw_rev(&sw_rev)) {
+            hal_debug_printf("SW rev: 0x%04X (BSX DRDY 需 ≥0x0314)\r\n", sw_rev);
+        }
+
+        hal_debug_printf("last: roll=%d pitch=%d yaw=%d (0.1deg) valid=%d\r\n",
+                         g_imu_last.roll, g_imu_last.pitch, g_imu_last.yaw,
+                         g_imu_last.valid);
+    } else {
+        hal_debug_printf("IMU not available (check !I2C and BOOT wiring)\r\n");
+    }
+    hal_debug_printf("===================\r\n");
+#else
+    hal_debug_printf("[IMU] IMU disabled (IMU_ENABLED=0)\r\n");
 #endif
 }

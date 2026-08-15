@@ -59,6 +59,20 @@ extern "C" {
 #define BNO055_REG_PWR_MODE         0x3E    /* 电源模式 */
 #define BNO055_REG_SYS_TRIGGER      0x3F    /* 系统触发 */
 
+/* ---- 中断寄存器 ---- */
+#define BNO055_REG_INT_STA          0x4E    /* 中断状态 (读清零) */
+#define BNO055_REG_INT_MSK          0x4F    /* 中断屏蔽: 路由到 INT 引脚 */
+#define BNO055_REG_INT_EN           0x50    /* 中断使能 */
+#define BNO055_REG_INT_CNTL         0x07    /* 中断引脚控制 (Page 1!) */
+
+/* INT_EN/INT_MSK bit7 = ACC_BSX_DRDY: 加速度计/融合数据就绪
+ * NDOF 模式下按融合输出速率触发 (~100Hz) */
+#define BNO055_INT_BSX_DRDY         (1 << 7)
+
+/* INT_CNTL 值: [7:4]=INT_RDYL 空闲电平, [3:0]=INT_TYPE 触发类型
+ * 0x13 = 空闲高 + 下降沿触发 (数据就绪时引脚短拉低) */
+#define BNO055_INT_CNTL_IDLE_H_FALL 0x13
+
 /* ---- 温度 ---- */
 #define BNO055_REG_TEMP             0x34    /* 温度 (1°C/LSB) */
 
@@ -162,6 +176,29 @@ bool bno055_get_calib(bno055_calib_t *calib);
  * @return true 系统、陀螺仪、加速度计、磁力计全部校准 (CALIB_STAT = 0xFF)
  */
 bool bno055_is_calibrated(void);
+
+/**
+ * @brief 读取中断状态寄存器 (读后自动清零)
+ * @param sta 输出: INT_STA 原始值 (bit7=ACC_BSX_DRDY)
+ * @return true 读取成功
+ */
+bool bno055_get_int_status(uint8_t *sta);
+
+/**
+ * @brief 读回中断配置 (诊断用: 验证 INT 配置是否写入成功)
+ * @param en   输出: INT_EN 读回值
+ * @param msk  输出: INT_MSK 读回值
+ * @param cntl 输出: INT_CNTL 读回值 (自动切 Page 1 读回)
+ * @return true 读取成功
+ */
+bool bno055_get_int_config(uint8_t *en, uint8_t *msk, uint8_t *cntl);
+
+/**
+ * @brief 读取软件版本 (诊断用: BSX DRDY 中断需 SW rev ≥ 03.14)
+ * @param rev 输出: 版本值 (MSB<<8|LSB, 如 0x0314)
+ * @return true 读取成功
+ */
+bool bno055_get_sw_rev(uint16_t *rev);
 
 #ifdef __cplusplus
 }

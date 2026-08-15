@@ -93,6 +93,17 @@ bool bno055_init(uint8_t i2c_addr)
     /* 使用默认单位: 欧拉角=度, 加速度=m/s², 角速度=dps, 温度=°C
      * UNIT_SEL 默认为 0x00 (Windows 方向约定), 不需要修改。 */
 
+    /* 配置 INT 引脚: 融合数据就绪中断 (ACC_BSX_DRDY)
+     * - INT_MSK/INT_EN bit7 使能并路由到 INT 引脚
+     * - NDOF 模式下按融合输出速率触发 (~100Hz)
+     * - INT_CNTL 在 Page 1 (0x07): 空闲高 + 下降沿触发
+     * 主机侧 (GP28) 用双沿中断接收, 对极性不敏感 */
+    if (!bno055_write_reg(BNO055_REG_INT_MSK, BNO055_INT_BSX_DRDY)) return false;
+    if (!bno055_write_reg(BNO055_REG_INT_EN,  BNO055_INT_BSX_DRDY)) return false;
+    if (!bno055_write_reg(BNO055_REG_PAGE_ID, 0x01)) return false;      /* 切 Page 1 */
+    if (!bno055_write_reg(BNO055_REG_INT_CNTL, BNO055_INT_CNTL_IDLE_H_FALL)) return false;
+    if (!bno055_write_reg(BNO055_REG_PAGE_ID, 0x00)) return false;      /* 回 Page 0 */
+
     /* 切换到 NDOF 融合模式 (9-DOF 绝对姿态) */
     if (!bno055_write_reg(BNO055_REG_OPR_MODE, BNO055_MODE_NDOF)) {
         return false;
@@ -152,4 +163,36 @@ bool bno055_is_calibrated(void)
     }
     g_calib_stat = stat;
     return (stat == BNO055_CALIB_FULLY);
+}
+
+bool bno055_get_int_status(uint8_t *sta)
+{
+    if (!g_initialized || !sta) return false;
+    return bno055_read_reg(BNO055_REG_INT_STA, sta);
+}
+
+bool bno055_get_int_config(uint8_t *en, uint8_t *msk, uint8_t *cntl)
+{
+    if (!g_initialized || !en || !msk || !cntl) return false;
+
+    if (!bno055_read_reg(BNO055_REG_INT_EN,  en))  return false;
+    if (!bno055_read_reg(BNO055_REG_INT_MSK, msk)) return false;
+
+    /* INT_CNTL 在 Page 1: 切页读回再切回 */
+    if (!bno055_write_reg(BNO055_REG_PAGE_ID, 0x01)) return false;
+    bool ok = bno055_read_reg(BNO055_REG_INT_CNTL, cntl);
+    bno055_write_reg(BNO055_REG_PAGE_ID, 0x00);
+    return ok;
+}
+
+bool bno055_get_sw_rev(uint16_t *rev)
+{
+    if (!g_initialized || !rev) return false;
+
+    uint8_t lsb, msb;
+    if (!bno055_read_reg(BNO055_REG_SW_REV_ID_LSB, &lsb)) return false;
+    if (!bno055_read_reg(BNO055_REG_SW_REV_ID_MSB, &msb)) return false;
+
+    *rev = ((uint16_t)msb << 8) | lsb;
+    return true;
 }

@@ -103,15 +103,49 @@
 /* ==================== IMU 姿态传感器配置 ==================== */
 
 /* IMU 启用：设为 1 启用 BNO055 姿态补偿，设为 0 禁用 (零开销)
- * 启用后 I2C 总线上必须有 BNO055 (地址 0x28)。
+ * 启用后 I2C 总线上必须有 BNO055。
  * 若传感器未检测到，固件会打印警告并继续运行 (无补偿)。 */
-#define IMU_ENABLED             0   /* ★ 接好 BNO055 后改为 1 */
+#define IMU_ENABLED             1   /* ★ 已接线启用, 待验证轴映射正负号 */
 
 /* BNO055 I2C 地址 (7-bit)
  *   COM3 接 GND → 0x28 (默认)
  *   COM3 接 VCC → 0x29
  *   PCB 实测: 本板 BNO055 应答在 0x29 (!I2C 检测确认) */
 #define BNO055_I2C_ADDR         0x29
+
+/* ⚠️ 安装方向: 芯片倒扣 (绕 rX 翻转 180°, PCB 设计失误)
+ *   安装几何: Xc=rX(前), Yc=rZ(右), Zc=-rY(下)
+ *   平放时 chip pitch≈180°, chip roll≈0
+ *   轴映射 (hal_imu_read):
+ *     robot_roll  = IMU_ROLL_SIGN  × (chip_pitch - 180°)
+ *     robot_pitch = IMU_PITCH_SIGN × chip_roll
+ *   符号推导: Xc与rX同向, Yc与rZ同向 → 均 +1
+ *   实测验证: 机器人平放 → !IMU 的 roll/pitch 应 ≈0;
+ *   若补偿加剧倾斜 (正反馈) → 取反对应符号 */
+#define IMU_ROLL_SIGN           +1
+#define IMU_PITCH_SIGN          +1
+
+/* ==================== IMU BOOT/INT 引脚 ==================== */
+
+/* BOOT 引脚 (GP27): 上电保持高电平 → BNO055 进入正常应用模式
+ * (拉低则进入 bootloader 模式)。
+ * 启用后: 固件启动时驱动 BOOT=高; I2C 初始化失败时自动循环
+ * BOOT 引脚 (拉低 50ms → 释放 → 等待 POR) 并重试, 实现自动恢复 */
+#define IMU_BOOT_GPIO_ENABLED   1
+#define IMU_BOOT_PIN            27
+#define IMU_INIT_RETRY_MAX      3    /* 初始化失败自动恢复重试次数 */
+
+/* INT 引脚 (GP28): BNO055 融合数据就绪中断 (BSX DRDY, NDOF ~100Hz)
+ * 启用后: hal_imu_read 仅在中断到来后读取新数据, 避免重复读取
+ * 兜底: INT 超过此时长未触发则退回轮询读取 (克隆芯片/接线问题不阻塞补偿)
+ *
+ * ⚠️ 本板 BNO055 SW rev = 0x0308, 早于 BSX DRDY 中断支持的 0x0314,
+ *   芯片内部不产生数据就绪中断 (INT_STA 实测恒为 0)。
+ *   因此关闭 INT, 使用纯轮询读取 (100Hz 控制循环同步读取)。
+ *   将来更换 SW rev ≥ 0x0314 的芯片后改回 1 即可。 */
+#define IMU_INT_GPIO_ENABLED    0
+#define IMU_INT_PIN             28
+#define IMU_INT_FALLBACK_TIMEOUT_MS  50
 
 /* IMU 补偿增益 (×10, 10 = 1:1 直接补偿)
  * 增益 < 10 → 欠补偿 (响应平缓, 适合高速运动)
