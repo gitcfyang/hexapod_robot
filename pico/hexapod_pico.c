@@ -204,16 +204,16 @@ int main(void)
         hal_debug_printf("BATTERY LOW (%u mV)! Charge soon.\r\n", boot_voltage);
     }
 #else
-    /* 电池检测已禁用 (BATTERY_CHECK_ENABLED=0): 跳过 ADC 读取, 直接上电 */
+    /* 电池检测已禁用 (BATTERY_CHECK_ENABLED=0): 跳过 ADC 读取 */
     hal_debug_printf("Battery check DISABLED (BATTERY_CHECK_ENABLED=0)\r\n");
 #endif
 
-    /* 开启舵机供电 (检测通过 或 检测已禁用) */
-    hal_servo_power_set_all(true);
-    hal_debug_printf("Servo power ON (GP10=left, GP11=right)\r\n");
-    sleep_ms(100);  /* 等待舵机电源稳定 */
+    /* 电池检测通过 → 正式开机。
+     * 注意: 舵机供电 (GP10/GP11) 保持断电, 由 ARM 解锁开关控制 —
+     * 解锁时 hexapod_update 才开启供电并输出 PWM。 */
+    hal_debug_printf("Boot OK. Servo power OFF — waiting for ARM switch.\r\n");
 
-    /* 机器人初始化 */
+    /* 机器人初始化 (PCA9685 I2C 检测不受舵机供电影响, 逻辑侧 3.3V) */
     if (!robot_init()) {
         /* 初始化失败: 红灯闪烁, 但保持 USB 命令可用 (如 !I2C 诊断) */
         hal_debug_printf("Robot init failed! Use !I2C to check bus, !P to test servos.\r\n");
@@ -401,10 +401,17 @@ int main(void)
                     /* 电压回升但未达恢复阈值: 保持断电, 等待进一步回升 */
                     if (voltage >= BATTERY_RECOVERY_MV) {
                         servo_power_cut = false;
-                        hal_servo_power_set_all(true);
                         hal_led_set(1, false);
-                        hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
-                                         voltage);
+                        /* 仅在机器人解锁状态下恢复供电 (锁定 = 断电由 ARM 控制) */
+                        const control_state_t *bstate = hexapod_get_state(&g_robot);
+                        if (bstate && bstate->robot_on) {
+                            hal_servo_power_set_all(true);
+                            hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
+                                             voltage);
+                        } else {
+                            hal_debug_printf("[BATT] Recovered %u mV. Power stays OFF (locked).\r\n",
+                                             voltage);
+                        }
                     }
                 } else {
                     hal_led_set(1, (now % 500) < 250);  /* 2Hz 闪烁 */
@@ -413,9 +420,16 @@ int main(void)
                 /* 正常 */
                 if (servo_power_cut) {
                     servo_power_cut = false;
-                    hal_servo_power_set_all(true);
-                    hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
-                                     voltage);
+                    /* 仅在机器人解锁状态下恢复供电 */
+                    const control_state_t *bstate = hexapod_get_state(&g_robot);
+                    if (bstate && bstate->robot_on) {
+                        hal_servo_power_set_all(true);
+                        hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
+                                         voltage);
+                    } else {
+                        hal_debug_printf("[BATT] Recovered %u mV. Power stays OFF (locked).\r\n",
+                                         voltage);
+                    }
                 }
                 hal_led_set(1, false);
             }

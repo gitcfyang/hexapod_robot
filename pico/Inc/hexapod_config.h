@@ -122,7 +122,7 @@
  *   符号推导: Xc与rX同向, Yc与rZ同向 → 均 +1
  *   实测验证: 机器人平放 → !IMU 的 roll/pitch 应 ≈0;
  *   若补偿加剧倾斜 (正反馈) → 取反对应符号 */
-#define IMU_ROLL_SIGN           +1
+#define IMU_ROLL_SIGN           -1
 #define IMU_PITCH_SIGN          +1
 
 /* ==================== IMU BOOT/INT 引脚 ==================== */

@@ -374,16 +374,22 @@ void hexapod_update(hexapod_t *robot)
     }
 #endif
 
-    /* 机器人开关状态变化处理 */
+    /* 机器人开关状态变化处理 (ARM 解锁/锁定):
+     *   解锁: 开启两路舵机供电 → 等待电源轨稳定 → 使能舵机输出
+     *   锁定: 停止 PWM 输出 + 关闭两路舵机供电 (安全/省电)
+     * 上电后默认锁定, 舵机供电由本状态机控制, 不随启动流程开启。 */
     if (robot->state.robot_on != robot->state.prev_robot_on) {
         if (robot->state.robot_on) {
+            hal_servo_power_set_all(true);
+            hal_delay_ms(100);            /* 舵机电源轨稳定后再发 PWM */
             robot->servos_enabled = true;
             robot->last_gait_time = current_time;  /* 初始化步态时钟 */
-            hal_debug_printf("Robot ON\r\n");
+            hal_debug_printf("Robot ON (servo power enabled)\r\n");
         } else {
             robot->servos_enabled = false;
-            hal_servo_free_all();
-            hal_debug_printf("Robot OFF\r\n");
+            hal_servo_free_all();            /* 停止发送 PWM 信号 */
+            hal_servo_power_set_all(false);  /* 关闭两路舵机供电 */
+            hal_debug_printf("Robot OFF (servo power cut)\r\n");
         }
     }
     robot->state.prev_robot_on = robot->state.robot_on;

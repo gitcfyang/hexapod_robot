@@ -429,6 +429,10 @@ static void calib_enter(uint8_t start_servo, control_state_t *ctrl_state)
 {
     if (ctrl_state) ctrl_state->robot_on = false;
 
+    /* 校准直接驱动舵机, 必须先开启舵机供电 */
+    hal_servo_power_set_all(true);
+    hal_delay_ms(100);
+
     memset(g_calib_best, 0, sizeof(g_calib_best));
     memset(g_calib_done, 0, sizeof(g_calib_done));
 
@@ -1552,6 +1556,9 @@ static bool period_calib_handle_command(uint8_t *buf, uint8_t len)
         /* !PER: 进入/刷新校准模式 */
         if (!g_period_calib_active) {
             g_period_calib_active = true;
+            /* 校准直接驱动舵机, 必须先开启舵机供电 */
+            hal_servo_power_set_all(true);
+            hal_delay_ms(100);
             hal_debug_printf("[PER] Period calibration mode entered\r\n");
             period_calib_apply_coxas();
         }
