@@ -12,26 +12,26 @@
  *   - DAT 线开漏, 需外部或内部上拉
  *   - 标准时钟频率 250kHz, 本实现使用 ~62.5kHz (可靠, 裕量大)
  *
- * 控制映射:
+ * 控制映射 (2026-08 定版):
  *   正常模式 (SELECT=off):
- *     左摇杆 Y  → 前进/后退
- *     左摇杆 X  → 左右平移
- *     右摇杆 X  → 原地旋转
- *     R2 (模拟) → 机身高度
+ *     LX (左摇杆 X) → 原地旋转 (Yaw)
+ *     LY (左摇杆 Y) → 机身高度 (积分控制: 回中=保持, 推上/下=渐升/渐降)
+ *     RX (右摇杆 X) → 左右平移
+ *     RY (右摇杆 Y) → 前进/后退
  *
- *   平衡模式 (SELECT=on):
- *     左摇杆   → 机身横滚/俯仰
- *     右摇杆 X → 机身偏航
- *     R2       → 机身高度
+ *   姿态模式 (SELECT=on, 进入时蜂鸣一声):
+ *     LX → 机身偏航    RX → 机身横滚
+ *     LY → 机身高度 (同上积分)   RY → 机身俯仰
  *
  *   按键:
  *     START      → 解锁/锁定 (边沿触发)
- *     SELECT     → 平衡模式开关
- *     L1 / R1    → 步态切换 (上一个/下一个)
- *     D-Pad 方向 → 站立姿态 (←窄, ↓正常, →宽)
- *     × (Cross)  → 抬起/降低抬腿高度 (配合 D-Pad UP/DOWN)
- *     △ (Triangle) → 调试等级循环
+ *     SELECT     → 姿态模式开关 (进入时蜂鸣一声)
+ *     D-Pad ↑/↓  → 步态切换 (三角6/三角8/波浪24 循环)
+ *     D-Pad ←/→  → 站立姿态 (窄/正常/宽 循环)
+ *     × (Cross) + D-Pad ↑/↓ → 抬腿高度微调 (× 按住时 D-Pad 归抬腿功能)
+ *     △ (Triangle) → 已禁用 (曾: 调试等级循环)
  *     ○ (Circle) → 紧急停止 (去扭矩)
+ *     L1/R1/L2/R2 → 保留 (原 L1/R1 步态切换已移交 D-Pad ↑/↓)
  */
 
 #include "hexapod_ps2.h"
@@ -132,9 +132,17 @@ bool ps2_read_gamepad(ps2_state_t *state)
     uint8_t buf[9] = {0};
     ps2_send_frame(poll_cmd, buf);
 
+    /* 帧头校验: PS2 帧首字节恒为 0xFF, 丢弃噪声/时序错误产生的垃圾帧
+     * (垃圾帧会造成幽灵按键: 如 △ 误触发调试等级循环、START 误解锁) */
+    if (buf[0] != 0xFF) {
+        state->connected = false;
+        return false;
+    }
+
     /* 验证手柄 ID */
     uint8_t id = buf[1];
-    if (id != PS2_ID_DIGITAL && id != PS2_ID_ANALOG_RED && id != PS2_ID_ANALOG_GREEN) {
+    if (id != PS2_ID_DIGITAL && id != PS2_ID_ANALOG_RED
+        && id != PS2_ID_ANALOG_GREEN && id != PS2_ID_WIRELESS) {
         state->connected = false;
         return false;
     }
@@ -153,10 +161,22 @@ bool ps2_read_gamepad(ps2_state_t *state)
     state->joy_ry = buf[6];
     state->joy_lx = buf[7];
     state->joy_ly = buf[8];
-    state->analog_mode = (id == PS2_ID_ANALOG_RED || id == PS2_ID_ANALOG_GREEN);
+    state->analog_mode = (id == PS2_ID_ANALOG_RED || id == PS2_ID_ANALOG_GREEN
+                          || id == PS2_ID_WIRELESS);   /* 无线接收器 0x79 = 模拟模式 */
     state->last_read_ms = to_ms_since_boot(get_absolute_time());
     state->frame_count++;
     state->connected = true;
+
+    /* 摇杆中位校准: 进入模拟模式后采样前 N 帧的滚动平均值
+     * ⚠️ 采样期间摇杆需保持居中, 否则中位会偏移 */
+    if (state->analog_mode && state->center_samples < PS2_CENTER_CALIB_SAMPLES) {
+        uint16_t n = state->center_samples;
+        state->center_lx = (uint8_t)(((uint16_t)state->center_lx * n + buf[7]) / (n + 1));
+        state->center_ly = (uint8_t)(((uint16_t)state->center_ly * n + buf[8]) / (n + 1));
+        state->center_rx = (uint8_t)(((uint16_t)state->center_rx * n + buf[5]) / (n + 1));
+        state->center_ry = (uint8_t)(((uint16_t)state->center_ry * n + buf[6]) / (n + 1));
+        state->center_samples = (uint8_t)(n + 1);
+    }
 
     return true;
 }
@@ -166,6 +186,12 @@ bool ps2_enter_analog_mode(ps2_state_t *state)
     if (!state) return false;
 
     uint8_t buf[9];
+
+    /* 重置摇杆中位校准: 进入模拟模式的瞬间要求摇杆居中,
+     * 之后的 10 帧采样平均值作为各轴中位 */
+    state->center_lx = 128; state->center_ly = 128;
+    state->center_rx = 128; state->center_ry = 128;
+    state->center_samples = 0;
 
     /* 步骤 1: 3 次短轮询建立连接 */
     for (int i = 0; i < 3; i++) {
@@ -214,12 +240,13 @@ bool ps2_enter_analog_mode(ps2_state_t *state)
 
 /**
  * @brief 将 PS2 摇杆值 (0~255) 映射到控制量 (-500~+500)
- * @param val 摇杆值 (中位=128)
+ * @param val 摇杆值
+ * @param center 摇杆中位校准值 (连接后自动采样)
  * @return 控制量 (-500 ~ +500)
  */
-static int16_t ps2_stick_to_control(uint8_t val)
+static int16_t ps2_stick_to_control(uint8_t val, uint8_t center)
 {
-    int16_t centered = (int16_t)val - 128;
+    int16_t centered = (int16_t)val - (int16_t)center;
 
     /* 死区 */
     if (centered > -PS2_STICK_DEADZONE && centered < PS2_STICK_DEADZONE) {
@@ -242,6 +269,23 @@ static int16_t ps2_stick_to_control(uint8_t val)
     return (int16_t)result;
 }
 
+/**
+ * @brief 指数曲线 (expo): 压缩中位附近斜率, 满杆仍为满量程
+ * @param x   输入控制量 (-500 ~ +500)
+ * @param mix 混合比例 0~100: 0=纯线性 (禁用), 100=纯三次方
+ * @return 曲线化控制量 (-500 ~ +500)
+ *
+ * out = (linear*(100-mix) + cubic*mix) / 100, cubic = x³/500²
+ * 纯三次方参考: 25% 杆量→1.56% 输出, 50%→12.5%, 100%→100%
+ * 用途: PS2 电位器摇杆仅 8 位分辨率且带机械旷量, 中位附近一格
+ * ≈0.79% 指令 — 曲线钝化初段, 精细控制集中在中心区 */
+static int16_t ps2_expo(int16_t x, uint8_t mix)
+{
+    if (mix == 0 || x == 0) return x;
+    int32_t cubic = (int32_t)x * x * x / (500 * 500);
+    return (int16_t)(((int32_t)x * (100 - mix) + cubic * mix) / 100);
+}
+
 /* ==================== PS2 → 机器人控制 ==================== */
 
 void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state)
@@ -261,52 +305,75 @@ void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state)
         prev_start = start;
     }
 
-    /* ---- 平衡模式: SELECT 边沿触发 ---- */
+    /* ---- 姿态模式: SELECT 边沿触发, 进入时蜂鸣一声 ---- */
     {
         static bool prev_select = false;
         bool sel = BTN_PRESSED(PSB_SELECT);
         if (sel && !prev_select) {
             ctrl_state->balance_mode = !ctrl_state->balance_mode;
+            if (ctrl_state->balance_mode) {
+                static const uint16_t tone[] = {1500};
+                static const uint16_t tdur[] = {80};
+                hal_play_sound(1, tone, tdur);
+            }
         }
         prev_select = sel;
     }
 
-    /* ---- 步态切换: L1=上一个, R1=下一个 ---- */
+    /* ---- 步态切换: D-Pad ↑=下一个, ↓=上一个 (三角6/三角8/波浪24 循环)
+     * ---- 与 ×+D-Pad 抬腿微调互斥: × 按住时 D-Pad 归抬腿功能 ---- */
     {
-        static bool prev_l1 = false, prev_r1 = false;
-        bool l1 = BTN_PRESSED(PSB_L1);
-        bool r1 = BTN_PRESSED(PSB_R1);
+        static bool prev_pad_up = false, prev_pad_down = false;
+        bool pad_up = BTN_PRESSED(PSB_PAD_UP);
+        bool pad_down = BTN_PRESSED(PSB_PAD_DOWN);
+        bool cross = BTN_PRESSED(PSB_CROSS);
 
-        if (l1 && !prev_l1) {
-            if (ctrl_state->gait_type > 0) {
-                ctrl_state->gait_type--;
-                /* gait_type enum: RIPPLE_12=0, TRIPOD_6=1, TRIPOD_8=2, WAVE_24=3, TRIPOD_4=4 */
-                hexapod_gait_select((gait_type_t)ctrl_state->gait_type, ctrl_state);
+        if (!cross) {
+            /* 三种步态 (CH6 语义): 三角6/三角8/波浪24 */
+            static const gait_type_t ps2_gait_cycle[] = {
+                GAIT_TRIPOD_6, GAIT_TRIPOD_8, GAIT_WAVE_24
+            };
+            /* 当前步态在循环中的位置 (与 !G 串口命令保持同步) */
+            int8_t idx = -1;
+            for (uint8_t i = 0; i < 3; i++) {
+                if (ctrl_state->gait_type == ps2_gait_cycle[i]) { idx = (int8_t)i; break; }
+            }
+            if (idx < 0) idx = 0;   /* 当前步态不在循环内 → 从三角6 起步 */
+
+            if ((pad_up && !prev_pad_up) || (pad_down && !prev_pad_down)) {
+                if (pad_up && !prev_pad_up) idx = (idx + 1) % 3;
+                if (pad_down && !prev_pad_down) idx = (idx + 2) % 3;
+                ctrl_state->gait_type = ps2_gait_cycle[idx];
+                hexapod_gait_select(ps2_gait_cycle[idx], ctrl_state);
             }
         }
-        if (r1 && !prev_r1) {
-            if (ctrl_state->gait_type < GAIT_TRIPOD_4) {
-                ctrl_state->gait_type++;
-                hexapod_gait_select((gait_type_t)ctrl_state->gait_type, ctrl_state);
+        prev_pad_up = pad_up;
+        prev_pad_down = pad_down;
+    }
+
+    /* ---- 站立姿态: D-Pad ←=上一档, →=下一档 (窄-80%/正常/宽-120% 循环)
+     * ---- × 按住时同样让位给抬腿微调 ---- */
+    {
+        static bool prev_pad_left = false, prev_pad_right = false;
+        bool pad_left = BTN_PRESSED(PSB_PAD_LEFT);
+        bool pad_right = BTN_PRESSED(PSB_PAD_RIGHT);
+        bool cross = BTN_PRESSED(PSB_CROSS);
+
+        if (!cross) {
+            if (pad_left && !prev_pad_left) {
+                ctrl_state->stance_mode = (ctrl_state->stance_mode <= -1)
+                    ? 1 : (int8_t)(ctrl_state->stance_mode - 1);
+            }
+            if (pad_right && !prev_pad_right) {
+                ctrl_state->stance_mode = (ctrl_state->stance_mode >= 1)
+                    ? -1 : (int8_t)(ctrl_state->stance_mode + 1);
             }
         }
-        prev_l1 = l1;
-        prev_r1 = r1;
+        prev_pad_left = pad_left;
+        prev_pad_right = pad_right;
     }
 
-    /* ---- 站立姿态: D-Pad ←窄 ↓正常 →宽 ---- */
-    {
-        if (BTN_PRESSED(PSB_PAD_LEFT)) {
-            ctrl_state->stance_mode = -1;   /* 窄 */
-        } else if (BTN_PRESSED(PSB_PAD_RIGHT)) {
-            ctrl_state->stance_mode = 1;    /* 宽 */
-        } else if (BTN_PRESSED(PSB_PAD_DOWN)) {
-            ctrl_state->stance_mode = 0;    /* 正常 */
-        }
-    }
-
-    /* ---- 抬腿高度微调: D-Pad UP + × = 增加, D-Pad UP = decrease ---- */
-    /* ---- 注: D-Pad UP 单独已用于 stance，此处仅用于立即操作的文档 ---- */
+    /* ---- 抬腿高度微调: × + D-Pad ↑ = 增加, × + D-Pad ↓ = 降低 ---- */
 
     /* ---- 紧急停止: ○ (Circle) ---- */
     {
@@ -350,17 +417,8 @@ void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state)
      * 新增扩展功能时在此区域添加，CRSF 路径不受影响
      * ================================================================ */
 
-    /* ---- △ (Triangle): 调试等级循环 ---- */
-    {
-        static bool prev_tri = false;
-        bool tri = BTN_PRESSED(PSB_TRIANGLE);
-        if (tri && !prev_tri) {
-            uint8_t lvl = hal_debug_get_level();
-            lvl = (lvl + 1) % 4;
-            hal_debug_set_level(lvl);
-        }
-        prev_tri = tri;
-    }
+    /* ---- △ (Triangle): 已禁用 (2026-08 按用户要求删除调试等级循环功能,
+     *      防止误触改变调试输出)。串口 !V 仍是调试等级的唯一入口。 ---- */
 
     /* ---- □ (Square): [保留] 自动归位/站立 (future)
      * 用途: 一键回到标准站立姿态, 所有腿收回初始位置
@@ -389,41 +447,60 @@ void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state)
      *       (特殊步态: 只用 4 条腿行走, 闲置的腿可做操作臂)
      * ---- */
 
-    /* ---- 摇杆映射 ----
+    /* ---- 摇杆映射 (2026-08 定版) ----
      *
-     *  左摇杆 Y (↑/↓):  前进/后退 (前后轴)
-     *  左摇杆 X (←/→):  左右平移
-     *  右摇杆 X (←/→):  原地旋转
-     *  R2 (压力模拟):    机身高度
+     *  LX (左摇杆 X): 原地旋转 (Yaw)
+     *  LY (左摇杆 Y): 机身高度 (积分控制, 见下)
+     *  RX (右摇杆 X): 左右平移
+     *  RY (右摇杆 Y): 前进/后退
      *
      *  PS2 摇杆约定: 0=左(上), 255=右(下), 128=中位 */
 
-    int16_t forward =  ps2_stick_to_control(state->joy_ly);
-    int16_t strafe  =  ps2_stick_to_control(state->joy_lx);
-    int16_t turn    =  ps2_stick_to_control(state->joy_rx);
+    /* 数字模式 (未进入模拟红灯模式) 无摇杆比例输出, 指令置零防乱动;
+     * 模拟模式下以校准后的中位为基准 */
+    int16_t forward = state->analog_mode ? ps2_stick_to_control(state->joy_ry, state->center_ry) : 0;
+    int16_t strafe  = state->analog_mode ? ps2_stick_to_control(state->joy_rx, state->center_rx) : 0;
+    int16_t turn    = state->analog_mode ? ps2_stick_to_control(state->joy_lx, state->center_lx) : 0;
 
-    /* 方向取反 (与 CRSF 配置共用宏) */
-#if STRAFE_DIRECTION_INVERT
+    /* 方向取反 (PS2 独立宏, 与 CRSF 配置互不影响) */
+#if PS2_STRAFE_DIRECTION_INVERT
     strafe = -strafe;
 #endif
-#if FORWARD_DIRECTION_INVERT
+#if PS2_FORWARD_DIRECTION_INVERT
     forward = -forward;
 #endif
-#if TURN_DIRECTION_INVERT
+#if PS2_TURN_DIRECTION_INVERT
     turn = -turn;
 #endif
 
-    /* 高度控制: 右摇杆 Y (PS2 标准帧无独立压力通道, 用摇杆代替) */
-    int16_t height_ctrl = ps2_stick_to_control(state->joy_ry);
-#if HEIGHT_DIRECTION_INVERT
-    height_ctrl = -height_ctrl;
+    /* 指数曲线: 初段钝化/末段锐化 — 精细控制集中在摇杆中心区 */
+    forward = ps2_expo(forward, PS2_STICK_EXPO);
+    strafe  = ps2_expo(strafe,  PS2_STICK_EXPO);
+    turn    = ps2_expo(turn,    PS2_STICK_EXPO);
+
+    /* 高度控制: LY (左摇杆 Y) — ★ 积分控制 (速率输入)
+     * LY 是弹簧摇杆 (自动回中), 无法像 CRSF CH3 旋钮那样物理固定:
+     *   回中 = 高度保持不变;  上推 = 高度逐渐增大;  下推 = 逐渐降低。
+     * 积分器定点 1/64: 满行程 500 每帧累积 → 满量程约 2 秒 (16ms 帧),
+     * 小幅度 = 缓慢变化, 天然滤除手持微抖 (颠簸根因, 见 STATUS.md) */
+    int16_t height_rate = state->analog_mode ? ps2_stick_to_control(state->joy_ly, state->center_ly) : 0;
+    if (height_rate > -PS2_HEIGHT_DEADZONE && height_rate < PS2_HEIGHT_DEADZONE) {
+        height_rate = 0;   /* 中心死区: 防止微抖造成积分漂移 */
+    }
+#if PS2_HEIGHT_DIRECTION_INVERT
+    height_rate = -height_rate;
 #endif
+    height_rate = ps2_expo(height_rate, PS2_STICK_EXPO);
+    static int32_t height_integral = 0;   /* 定点: 实际控制量 = /64 */
+    height_integral += height_rate;
+    if (height_integral >  (500 * 64)) height_integral =  (500 * 64);
+    if (height_integral < -(500 * 64)) height_integral = -(500 * 64);
+    int16_t height_ctrl = (int16_t)(height_integral / 64);
 
     if (ctrl_state->balance_mode) {
-        /* ====== 平衡模式 ======
-         * 左摇杆 → body_rot.x (Roll) / body_rot.z (Pitch)
-         * 右摇杆 X → body_rot.y (Yaw)
-         * 右摇杆 Y → body_pos.y (高度) */
+        /* ====== 姿态模式 (SELECT) ======
+         * RX → body_rot.x (Roll)    RY → body_rot.z (Pitch)
+         * LX → body_rot.y (Yaw)     LY → body_pos.y (高度, 积分) */
 
         /* 摇杆方向取反，使摇杆推的方向 = 机身倾斜方向 */
         ctrl_state->body_rot.x = -(strafe  * BODY_ROTATION_MAX) / 500;  /* Roll */

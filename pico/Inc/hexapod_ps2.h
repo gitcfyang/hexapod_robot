@@ -36,6 +36,7 @@
 /* ==================== 协议时序 ==================== */
 
 #define PS2_CLK_DELAY_US    8   /* 半周期延时, ~62.5kHz 时钟 */
+#define PS2_POLL_INTERVAL_MS 16  /* 最小轮询间隔: 无线接收器对过快轮询敏感 (标准 ~20ms) */
                                 /* 9字节×8bit×16µs ≈ 1.15ms/帧 */
 
 /* ==================== 手柄 ID ==================== */
@@ -43,6 +44,7 @@
 #define PS2_ID_DIGITAL      0x41  /* 数字模式 (绿灯) */
 #define PS2_ID_ANALOG_RED   0x73  /* 模拟模式 (红灯) */
 #define PS2_ID_ANALOG_GREEN 0x53  /* 模拟模式 (绿灯) */
+#define PS2_ID_WIRELESS     0x79  /* 2.4G 无线接收器 (模拟模式) */
 #define PS2_DATA_READY      0x5A  /* 数据就绪标志 */
 
 /* ==================== 按键位掩码与功能分层 ====================
@@ -109,6 +111,7 @@
 /* ==================== 摇杆死区 (读数偏离中位小于此值视为 0) ==================== */
 
 #define PS2_STICK_DEADZONE  8   /* ±8/127 ≈ ±6.3% */
+#define PS2_CENTER_CALIB_SAMPLES  10   /* 连接后摇杆中位采样帧数 (采样期间摇杆需居中) */
 
 /* ==================== 配置模式命令序列 ==================== */
 
@@ -127,6 +130,11 @@ typedef struct {
     uint8_t  joy_ly;            /* 左摇杆 Y (0~255) */
     uint8_t  joy_rx;            /* 右摇杆 X (0~255) */
     uint8_t  joy_ry;            /* 右摇杆 Y (0~255) */
+    uint8_t  center_lx;         /* 左摇杆 X 中位校准值 */
+    uint8_t  center_ly;         /* 左摇杆 Y 中位校准值 */
+    uint8_t  center_rx;         /* 右摇杆 X 中位校准值 */
+    uint8_t  center_ry;         /* 右摇杆 Y 中位校准值 */
+    uint8_t  center_samples;    /* 中位采样计数 (0=未校准) */
     uint32_t last_read_ms;      /* 上次成功读取时间 */
     uint32_t frame_count;       /* 有效帧计数 */
     bool     connected;         /* 手柄已连接 */
