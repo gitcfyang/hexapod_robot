@@ -105,7 +105,7 @@
 /* IMU 启用：设为 1 启用 BNO055 姿态补偿，设为 0 禁用 (零开销)
  * 启用后 I2C 总线上必须有 BNO055。
  * 若传感器未检测到，固件会打印警告并继续运行 (无补偿)。 */
-#define IMU_ENABLED             1   /* ★ 已接线启用, 待验证轴映射正负号 */
+#define IMU_ENABLED             0   
 
 /* BNO055 I2C 地址 (7-bit)
  *   COM3 接 GND → 0x28 (默认)
@@ -135,18 +135,6 @@
 #define IMU_BOOT_PIN            27
 #define IMU_INIT_RETRY_MAX      3    /* 初始化失败自动恢复重试次数 */
 
-/* INT 引脚 (GP28): BNO055 融合数据就绪中断 (BSX DRDY, NDOF ~100Hz)
- * 启用后: hal_imu_read 仅在中断到来后读取新数据, 避免重复读取
- * 兜底: INT 超过此时长未触发则退回轮询读取 (克隆芯片/接线问题不阻塞补偿)
- *
- * ⚠️ 本板 BNO055 SW rev = 0x0308, 早于 BSX DRDY 中断支持的 0x0314,
- *   芯片内部不产生数据就绪中断 (INT_STA 实测恒为 0)。
- *   因此关闭 INT, 使用纯轮询读取 (100Hz 控制循环同步读取)。
- *   将来更换 SW rev ≥ 0x0314 的芯片后改回 1 即可。 */
-#define IMU_INT_GPIO_ENABLED    0
-#define IMU_INT_PIN             28
-#define IMU_INT_FALLBACK_TIMEOUT_MS  50
-
 /* IMU 补偿增益 (×10, 10 = 1:1 直接补偿)
  * 增益 < 10 → 欠补偿 (响应平缓, 适合高速运动)
  * 增益 > 10 → 过补偿 (可能振荡, 需要调参) */
@@ -164,23 +152,40 @@
 /* 调试输出间隔（毫秒），避免 USB 输出阻塞控制循环 */
 #define DEBUG_PRINT_INTERVAL_MS 1000
 
-/* 输入控制模式:
- *   0 = CRSF 接收器 (ELRS, UART1 @420000 baud)
- *   1 = USB CDC 串口命令 (USB 虚拟串口, 无需额外硬件) */
-#define INPUT_CONTROL_MODE      0   /* ★ 0=CRSF, 1=USB Serial */
+/* 输入控制模式 (编译期默认输入源, 运行时可 !MODE 切换):
+ *   0 = CRSF 接收器 (ELRS, UART1 @420000 baud) — PS2 驱动同步编译, 可 !MODE ps2 切换
+ *   1 = PS2 手柄 (bit-bang SPI GP6~GP9)        — CRSF 同步编译, 可 !MODE crsf 切换
+ *   2 = USB CDC 串口命令 (无遥控器, 无需额外硬件)
+ * 一块板子同时接上 ELRS 和 PS2 接收器后, 无需焊接/插拔即可用 !MODE 切换输入源 */
+#define INPUT_CONTROL_MODE      1   /* ★ 0=CRSF, 1=PS2, 2=USB */
 
 /* 无舵机调试模式：PRODUCTION=0 要求舵机硬件就绪才启动 */
-#define HEADLESS_MODE           0   /* ★ 生产模式：舵机必须正常 */
+#define HEADLESS_MODE           0   /* ★ PS2 测试: 舵机/I2C 已死仍进入主循环 (测完改回 0) */
 
 /* PCA9685 舵机板数量 (1 或 2)
  *   1 = 仅一块板 (地址 0x40)，控制左半身 9 路舵机 (ID 9-17)
  *   2 = 两块板 (地址 0x40 + 0x41)，控制全部 18 路舵机 (ID 0-17) */
 #define PCA9685_BOARD_COUNT     2   /* 接好第二块板后改为 2 */
 
-/* PS2 无线手柄支持: 设为 1 启用，设为 0 禁用 (零开销)
- * 启用后可通过 bit-bang SPI (GP6~GP9) 连接 PS2 接收器。
- * 支持 CRSF/PS2 自动检测和 !MODE 命令切换。 */
-#define PS2_ENABLED             0   /* ★ 接好 PS2 接收器后保持 1，否则改 0 */
+/* PS2 无线手柄支持 (自动派生, 通常无需手改):
+ *   无线电模式 (INPUT_CONTROL_MODE 0/1) 恒为 1 — 双驱动常编译, 支持 !MODE 运行时切换;
+ *   仅 USB 模式 (2) 为 0 (不编译 PS2 驱动, 零开销) */
+#if INPUT_CONTROL_MODE == 2
+#define PS2_ENABLED             0
+#else
+#define PS2_ENABLED             1
+#endif
+
+/* USB CDC 调试控制台开关 (与 USB 数据传输模式二选一):
+ *   1 = USB CDC 作为调试控制台 (printf 输出 + !I2C/!P 等调试命令) — 无线电模式默认
+ *   0 = USB CDC 专用于上位机数据传输 (INPUT_CONTROL_MODE==2): 调试输出全部静默,
+ *       通道保持干净, 仅承载上位机协议数据 (输入命令解析不受影响)
+ * 自动派生: 仅 USB 数据模式 (2) 下为 0, 其余模式恒为 1 */
+#if INPUT_CONTROL_MODE == 2
+#define USB_DEBUG_ENABLED       0
+#else
+#define USB_DEBUG_ENABLED       1
+#endif
 
 /* ==================== CRSF 通道映射 ====================
  *
@@ -379,6 +384,28 @@
 /* 旋转方向取反开关 (CH4)
  * 摇杆左推→顺时针转 / 右推→逆时针转 时，设为 1 翻转。 */
 #define TURN_DIRECTION_INVERT      0
+
+/* ==================== PS2 手柄方向取反开关 ====================
+ * 独立于 CRSF (两者摇杆极性约定不同, 校准互不影响)。
+ * 默认值按 PS2 标准直觉: 推上=前进, 推左=左移, 推右=右转, 推上=机身升高。
+ * 实测哪个轴方向反了就翻转对应宏 (0↔1)。 */
+#define PS2_FORWARD_DIRECTION_INVERT   1
+#define PS2_STRAFE_DIRECTION_INVERT    1
+#define PS2_HEIGHT_DIRECTION_INVERT    1
+#define PS2_TURN_DIRECTION_INVERT      0
+
+/* PS2 高度轴 (LY) 专用死区 (±25/500 = ±5%):
+ * 高度为积分控制 (LY 弹簧摇杆 = 速率输入, 回中=高度保持),
+ * 死区用于抑制中心抖动造成的积分漂移, 无需太大 */
+#define PS2_HEIGHT_DEADZONE            25
+
+/* PS2 摇杆指数曲线 (expo) 混合比例 0~100:
+ * 0 = 纯线性 (禁用); 100 = 纯三次方曲线 (初段最钝)
+ * PS2 电位器摇杆仅 8 位分辨率 (一格≈0.79% 指令) 且带机械旷量与噪声,
+ * 中位附近难以精细控制 — expo 压缩初段灵敏度、放大末段,
+ * 满杆输出恒为 ±500, 最大行程不受影响。
+ * 仅作用于 PS2 路径 (ps2_expo), 与 CRSF/USB 控制解耦 */
+#define PS2_STICK_EXPO                50
 
 /* ---- 初始足端位置 (站立时足端在腿基座坐标系中的坐标) ----
  *

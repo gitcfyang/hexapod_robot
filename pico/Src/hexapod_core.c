@@ -34,14 +34,14 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
     robot->state.robot_on = false;
     robot->state.prev_robot_on = false;
     robot->state.balance_mode = false;
-    robot->state.gait_type = GAIT_RIPPLE_12;
+    robot->state.gait_type = GAIT_TRIPOD_6;   /* 默认三角步态 (六足标准行走) */
     robot->state.gait_step = 0;
     robot->state.leg_lift_height = DEFAULT_LEG_LIFT_HEIGHT;
     robot->state.speed_control = DEFAULT_GAIT_SPEED;
     
     /* 初始化步态 */
     hexapod_gait_init();
-    hexapod_gait_select(GAIT_RIPPLE_12, &robot->state);
+    hexapod_gait_select(GAIT_TRIPOD_6, &robot->state);
     
     /* 初始化腿部角度 */
     for (int i = 0; i < CNT_LEGS; i++) {
@@ -83,13 +83,11 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
 
     hal_debug_init();
 #if INPUT_CONTROL_MODE == 0
-#if PS2_ENABLED
-    hal_input_init(INPUT_TYPE_AUTO);  /* 自动检测: CRSF 优先, PS2 降级 */
+    hal_input_init(INPUT_TYPE_CRSF);   /* CRSF 接收器 (ELRS) — 默认输入 */
+#elif INPUT_CONTROL_MODE == 1
+    hal_input_init(INPUT_TYPE_PS2);    /* PS2 手柄 — 默认输入 */
 #else
-    hal_input_init(INPUT_TYPE_CRSF);  /* CRSF 接收器 (ELRS) */
-#endif
-#else
-    hal_input_init(INPUT_TYPE_SERIAL);  /* USB CDC 串口命令 */
+    hal_input_init(INPUT_TYPE_SERIAL); /* USB CDC 串口命令 */
 #endif
 
     /* IMU 姿态传感器 — 失败不阻塞启动，仅禁用姿态补偿 */
