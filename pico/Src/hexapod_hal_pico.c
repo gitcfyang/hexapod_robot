@@ -377,23 +377,15 @@ static uint32_t g_last_crsf_frame_count = 0; // 上次查询时的帧计数（�
 #if PS2_ENABLED
 ps2_state_t g_ps2_state;          /* 非 static: 供 hexapod_ps2.c extern 引用 */
 static bool g_ps2_initialized = false;
+static bool g_ps2_debug_active = false;   /* !PS2DBG 调试观察模式: 只打印通道值, 机器人不响应 */
 
-/* 运行时输入模式
- *  0 = INPUT_MODE_CRSF — 强制 CRSF
- *  1 = INPUT_MODE_PS2  — 强制 PS2
- *  2 = INPUT_MODE_AUTO — 自动检测 (CRSF 优先, 无信号退至 PS2) */
+/* 运行时输入模式 (编译期默认由 INPUT_CONTROL_MODE 决定, !MODE 可运行时切换)
+ *  0 = INPUT_MODE_CRSF — CRSF
+ *  1 = INPUT_MODE_PS2  — PS2 */
 #define INPUT_MODE_CRSF    0
 #define INPUT_MODE_PS2     1
-#define INPUT_MODE_AUTO    2
-static uint8_t  g_input_mode = INPUT_MODE_AUTO;
+static uint8_t  g_input_mode = INPUT_MODE_CRSF;
 static uint32_t g_mode_switch_time_ms = 0;   /* 进入当前模式的时间 */
-
-/* 自动检测超时 (ms): 进入 CRSF 模式后此时间内无有效帧 → 尝试 PS2 */
-#define AUTO_DETECT_CRSF_TIMEOUT_MS   500
-/* PS2 模式下此时间内无数据 → 回到 CRSF 重试 */
-#define AUTO_DETECT_PS2_TIMEOUT_MS   2000
-/* 模式切换冷却: 两次切换的最小间隔 */
-#define MODE_SWITCH_COOLDOWN_MS      1000
 #endif
 
 /* ==================== 舵机校准模式 ==================== */
@@ -558,15 +550,17 @@ bool hal_input_init(input_type_t type)
 
     /* 如果之前已初始化且模式不同，先停用UART中断 */
     if (init_done) {
-#if INPUT_CONTROL_MODE == 0
+#if INPUT_CONTROL_MODE != 2
         uart_set_irq_enables(INPUT_UART_ID, false, false);
         irq_set_enabled(UART1_IRQ, false);
         uart_deinit(INPUT_UART_ID);
 #endif
     }
 
-#if INPUT_CONTROL_MODE == 0
-    g_crsf_mode = (type == INPUT_TYPE_CRSF);
+#if INPUT_CONTROL_MODE != 2
+    /* 无线电模式 (CRSF/PS2): UART1 恒以 CRSF 运行 —
+     * 即使默认输入是 PS2 也保持接收, 保证 !MODE crsf 随时可切换 */
+    g_crsf_mode = true;
 #else
     g_crsf_mode = false;  /* USB 串口模式：不启用 UART1 */
 #endif
@@ -576,7 +570,7 @@ bool hal_input_init(input_type_t type)
     crsf_parser_init(&g_crsf_parser);
     crsf_state_init(&g_crsf_state);
 
-#if INPUT_CONTROL_MODE == 0
+#if INPUT_CONTROL_MODE != 2
     if (g_crsf_mode) {
         /* CRSF 模式：420000 baud */
         uart_init(INPUT_UART_ID, INPUT_UART_BAUD_CRSF);
@@ -618,6 +612,9 @@ bool hal_input_init(input_type_t type)
     if (!g_ps2_initialized) {
         ps2_init();
         memset(&g_ps2_state, 0, sizeof(g_ps2_state));
+        /* 中位校准初始值 128 (进入模拟模式后自动重新采样) */
+        g_ps2_state.center_lx = 128; g_ps2_state.center_ly = 128;
+        g_ps2_state.center_rx = 128; g_ps2_state.center_ry = 128;
         g_ps2_initialized = true;
     }
 
@@ -625,11 +622,7 @@ bool hal_input_init(input_type_t type)
     if (type == INPUT_TYPE_PS2) {
         g_input_mode = INPUT_MODE_PS2;
         g_mode_switch_time_ms = hal_get_tick_ms();
-        hal_debug_printf("PS2 input mode (forced)\r\n");
-    } else if (type == INPUT_TYPE_AUTO) {
-        g_input_mode = INPUT_MODE_AUTO;
-        g_mode_switch_time_ms = hal_get_tick_ms();
-        hal_debug_printf("Input auto-detect mode (CRSF first, PS2 fallback)\r\n");
+        hal_debug_printf("PS2 input mode (default)\r\n");
     } else {
         g_input_mode = INPUT_MODE_CRSF;
     }
@@ -762,7 +755,8 @@ static void i2c_bus_check(void)
     /* PCA9685 定向检测: 0x40=左腿板, 0x41=右腿板 (读 MODE1 寄存器) */
     for (uint8_t addr = 0x40; addr <= 0x41; addr++) {
         uint8_t mode1 = 0;
-        int ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, addr, &mode1, 1, false);
+        int ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, addr, &mode1, 1, false,
+                                          make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
         if (ret == 1) {
             hal_debug_printf("PCA9685 0x%02X (%s legs): DETECTED  MODE1=0x%02X\r\n",
                              addr, (addr == PCA9685_ADDR_LEFT) ? "left " : "right", mode1);
@@ -776,9 +770,11 @@ static void i2c_bus_check(void)
     for (uint8_t addr = 0x28; addr <= 0x29; addr++) {
         uint8_t reg = BNO055_REG_CHIP_ID;
         uint8_t chip_id = 0;
-        int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, &reg, 1, true);
+        int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, addr, &reg, 1, true,
+                                           make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
         if (ret == 1) {
-            ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, addr, &chip_id, 1, false);
+            ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, addr, &chip_id, 1, false,
+                                          make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
         }
         if (ret == 1 && chip_id == BNO055_CHIP_ID_VAL) {
             hal_debug_printf("BNO055 0x%02X: DETECTED  CHIP_ID=0x%02X\r\n", addr, chip_id);
@@ -792,12 +788,77 @@ static void i2c_bus_check(void)
 
     /* 全总线扫描 (列出所有 ACK 的设备) */
     pca9685_scan_bus();
+
+    /* 总线空闲电平诊断: 临时切为 GPIO 输入上拉读取, 再恢复 I2C 功能。
+     * 0 = 被器件拉低 (器件损坏把总线拖死) 或 GPIO 引脚本身损坏;
+     * 1 = 线路空闲正常 → 设备在线但 I2C 模块已死 (需换器件)。 */
+    gpio_set_function(PCA9685_I2C_SDA_PIN, GPIO_FUNC_SIO);
+    gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_SIO);
+    gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_IN);
+    gpio_set_dir(PCA9685_I2C_SCL_PIN, GPIO_IN);
+    gpio_pull_up(PCA9685_I2C_SDA_PIN);
+    gpio_pull_up(PCA9685_I2C_SCL_PIN);
+    sleep_ms(2);   /* 等待上拉稳定 */
+    hal_debug_printf("Bus idle: SDA(GP14)=%d SCL(GP15)=%d (1=空闲正常, 0=被拉低/短路/引脚损坏)\r\n",
+                     gpio_get(PCA9685_I2C_SDA_PIN), gpio_get(PCA9685_I2C_SCL_PIN));
+    /* 恢复 I2C 引脚功能 */
+    gpio_set_function(PCA9685_I2C_SDA_PIN, GPIO_FUNC_I2C);
+    gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_I2C);
+    gpio_pull_up(PCA9685_I2C_SDA_PIN);
+    gpio_pull_up(PCA9685_I2C_SCL_PIN);
 }
 
 /* 前置声明: 周期校准命令处理 (定义在本文件后部) */
 static bool period_calib_handle_command(uint8_t *buf, uint8_t len);
 /* 前置声明: IMU 状态打印 (定义在本文件后部) */
 static void imu_status_print(void);
+
+#if PS2_ENABLED
+/* PS2 状态全通道打印 (!PS2 单次输出 / !PS2DBG 观察模式每秒一次, 共用) */
+static void ps2_state_print(void)
+{
+    if (!g_ps2_initialized) {
+        hal_debug_printf("[PS2] Not initialized\r\n");
+        return;
+    }
+    const ps2_state_t *s = ps2_get_state();
+    if (!s) {
+        hal_debug_printf("[PS2] No controller connected\r\n");
+        return;
+    }
+    hal_debug_printf("=== PS2 Controller State ===\r\n");
+    hal_debug_printf("ID: 0x%02X (%s)  Buttons: 0x%04X\r\n",
+        s->id, s->analog_mode ? "analog" : "digital", s->buttons);
+    hal_debug_printf("Pressed:");
+    bool any_btn = false;
+    if (!(s->buttons & PSB_SELECT))   { hal_debug_printf(" SEL");   any_btn = true; }
+    if (!(s->buttons & PSB_L3))       { hal_debug_printf(" L3");    any_btn = true; }
+    if (!(s->buttons & PSB_R3))       { hal_debug_printf(" R3");    any_btn = true; }
+    if (!(s->buttons & PSB_START))    { hal_debug_printf(" START"); any_btn = true; }
+    if (!(s->buttons & PSB_PAD_UP))   { hal_debug_printf(" UP");    any_btn = true; }
+    if (!(s->buttons & PSB_PAD_RIGHT)) { hal_debug_printf(" RIGHT"); any_btn = true; }
+    if (!(s->buttons & PSB_PAD_DOWN)) { hal_debug_printf(" DOWN");  any_btn = true; }
+    if (!(s->buttons & PSB_PAD_LEFT)) { hal_debug_printf(" LEFT");  any_btn = true; }
+    if (!(s->buttons & PSB_L2))       { hal_debug_printf(" L2");    any_btn = true; }
+    if (!(s->buttons & PSB_R2))       { hal_debug_printf(" R2");    any_btn = true; }
+    if (!(s->buttons & PSB_L1))       { hal_debug_printf(" L1");    any_btn = true; }
+    if (!(s->buttons & PSB_R1))       { hal_debug_printf(" R1");    any_btn = true; }
+    if (!(s->buttons & PSB_TRIANGLE)) { hal_debug_printf(" TRI");   any_btn = true; }
+    if (!(s->buttons & PSB_CIRCLE))   { hal_debug_printf(" CIR");   any_btn = true; }
+    if (!(s->buttons & PSB_CROSS))    { hal_debug_printf(" X");     any_btn = true; }
+    if (!(s->buttons & PSB_SQUARE))   { hal_debug_printf(" SQ");    any_btn = true; }
+    if (!any_btn) hal_debug_printf(" (none)");
+    hal_debug_printf("\r\n");
+    hal_debug_printf("Sticks: LX=%3u LY=%3u RX=%3u RY=%3u  "
+        "Frames: %lu  Mode: %s\r\n",
+        s->joy_lx, s->joy_ly, s->joy_rx, s->joy_ry,
+        s->frame_count,
+        g_input_mode == INPUT_MODE_PS2 ? "PS2" : "CRSF");
+    hal_debug_printf("Ctr(calib): LX=%u LY=%u RX=%u RY=%u samples=%u\r\n",
+        s->center_lx, s->center_ly, s->center_rx, s->center_ry,
+        s->center_samples);
+}
+#endif /* PS2_ENABLED */
 
 static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint8_t len)
 {
@@ -857,10 +918,9 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
         case 'T': ctrl_state->balance_mode = !ctrl_state->balance_mode; hal_debug_printf("Balance: %d\r\n", ctrl_state->balance_mode); break;
         case 'M':
 #if PS2_ENABLED
-            /* ---- !MODE: 输入模式切换 (PS2_ENABLED) ----
-             * !MODE crsf → 强制 CRSF 模式
-             * !MODE ps2  → 强制 PS2 模式
-             * !MODE auto → 自动检测 (CRSF 优先) */
+            /* ---- !MODE: 输入源运行时切换 (PS2_ENABLED) ----
+             * !MODE crsf → 切换到 CRSF 模式
+             * !MODE ps2  → 切换到 PS2 模式 */
             if (len >= 3 && buf[2] == 'O') {
                 uint8_t p = 5;
                 while (p < len && buf[p] == ' ') p++;
@@ -874,15 +934,8 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
                     g_input_mode = INPUT_MODE_PS2;
                     g_mode_switch_time_ms = hal_get_tick_ms();
                     hal_debug_printf("[MODE] Switched to PS2\r\n");
-                } else if (p + 3 < len && buf[p] == 'a' && buf[p+1] == 'u'
-                           && buf[p+2] == 't' && buf[p+3] == 'o') {
-                    g_input_mode = INPUT_MODE_AUTO;
-                    g_mode_switch_time_ms = hal_get_tick_ms();
-                    g_crsf_state.link_connected = false;
-                    g_ps2_state.connected = false;
-                    hal_debug_printf("[MODE] Switched to AUTO (CRSF first)\r\n");
                 } else {
-                    hal_debug_printf("Usage: !MODE crsf|ps2|auto\r\n");
+                    hal_debug_printf("Usage: !MODE crsf|ps2\r\n");
                 }
                 break;
             }
@@ -907,42 +960,19 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             }
             /* ---- !PS2: PS2 手柄原始状态调试输出 ---- */
 #if PS2_ENABLED
-            if (len >= 3 && buf[2] == 'S' && (len == 3 || buf[3] == '2')) {
-                if (!g_ps2_initialized) {
-                    hal_debug_printf("[PS2] Not initialized\r\n");
-                } else {
-                    const ps2_state_t *s = ps2_get_state();
-                    if (!s) {
-                        hal_debug_printf("[PS2] No controller connected\r\n");
-                    } else {
-                        hal_debug_printf("=== PS2 Controller State ===\r\n");
-                        hal_debug_printf("ID: 0x%02X (%s)  Buttons: 0x%04X\r\n",
-                            s->id, s->analog_mode ? "analog" : "digital", s->buttons);
-                        hal_debug_printf("Pressed:");
-                        if (!(s->buttons & PSB_SELECT))   hal_debug_printf(" SEL");
-                        if (!(s->buttons & PSB_L3))       hal_debug_printf(" L3");
-                        if (!(s->buttons & PSB_R3))       hal_debug_printf(" R3");
-                        if (!(s->buttons & PSB_START))    hal_debug_printf(" START");
-                        if (!(s->buttons & PSB_PAD_UP))   hal_debug_printf(" UP");
-                        if (!(s->buttons & PSB_PAD_RIGHT)) hal_debug_printf(" RIGHT");
-                        if (!(s->buttons & PSB_PAD_DOWN)) hal_debug_printf(" DOWN");
-                        if (!(s->buttons & PSB_PAD_LEFT)) hal_debug_printf(" LEFT");
-                        if (!(s->buttons & PSB_L2))       hal_debug_printf(" L2");
-                        if (!(s->buttons & PSB_R2))       hal_debug_printf(" R2");
-                        if (!(s->buttons & PSB_L1))       hal_debug_printf(" L1");
-                        if (!(s->buttons & PSB_R1))       hal_debug_printf(" R1");
-                        if (!(s->buttons & PSB_TRIANGLE)) hal_debug_printf(" TRI");
-                        if (!(s->buttons & PSB_CIRCLE))   hal_debug_printf(" CIR");
-                        if (!(s->buttons & PSB_CROSS))    hal_debug_printf(" X");
-                        if (!(s->buttons & PSB_SQUARE))   hal_debug_printf(" SQ");
-                        hal_debug_printf("\r\nSticks: LX=%3u LY=%3u RX=%3u RY=%3u  "
-                            "Frames: %lu  Mode: %s\r\n",
-                            s->joy_lx, s->joy_ly, s->joy_rx, s->joy_ry,
-                            s->frame_count,
-                            g_input_mode == INPUT_MODE_PS2 ? "PS2" :
-                            g_input_mode == INPUT_MODE_CRSF ? "CRSF" : "AUTO");
-                    }
-                }
+            if (len >= 3 && buf[2] == 'S' && (len == 3 || (len == 4 && buf[3] == '2'))) {
+                ps2_state_print();
+                break;
+            }
+
+            /* ---- !PS2DBG: PS2 调试观察模式开关 ----
+             * 开启: 每秒打印一次全部通道值 (摇杆/按键/模式/中位校准),
+             *       机器人忽略手柄输入保持静止 — 仅观察通道与数据解析 */
+            if (len >= 7 && buf[2] == 'S' && buf[3] == '2' &&
+                buf[4] == 'D' && buf[5] == 'B' && buf[6] == 'G') {
+                g_ps2_debug_active = !g_ps2_debug_active;
+                hal_debug_printf("[PS2] Debug observe mode: %s\r\n",
+                                 g_ps2_debug_active ? "ON (robot ignores input)" : "OFF");
                 break;
             }
 #endif /* PS2_ENABLED */
@@ -1023,7 +1053,7 @@ bool hal_input_update(control_state_t *ctrl_state)
 {
     if (!ctrl_state) return false;
 
-#if INPUT_CONTROL_MODE == 1
+#if INPUT_CONTROL_MODE == 2
     /* ========== USB CDC 串口模式 ==========
      * 仅通过 USB 虚拟串口接收命令，无 UART1 硬件参与。
      * 非阻塞轮询：getchar_timeout_us(0) 无数据立即返回。 */
@@ -1077,52 +1107,48 @@ bool hal_input_update(control_state_t *ctrl_state)
     uint32_t now = hal_get_tick_ms();
 
 #if PS2_ENABLED
-    /* ========== 自动检测模式切换 ========== */
-    if (g_input_mode == INPUT_MODE_AUTO) {
-        uint32_t crsf_elapsed = (g_last_crsf_frame_ms > 0)
-            ? (now - g_last_crsf_frame_ms) : (now - g_mode_switch_time_ms);
-
-        if (crsf_elapsed > AUTO_DETECT_CRSF_TIMEOUT_MS) {
-            /* CRSF 无信号 → 尝试 PS2 */
-            if (!g_ps2_state.connected) {
-                /* 首次切换到 PS2: 尝试进入模拟模式 */
-                if (ps2_enter_analog_mode(&g_ps2_state)) {
-                    hal_debug_printf("[AUTO] CRSF timeout, switched to PS2\r\n");
-                    g_input_mode = INPUT_MODE_PS2;
-                    g_mode_switch_time_ms = now;
-                }
-            } else {
-                g_input_mode = INPUT_MODE_PS2;
-                g_mode_switch_time_ms = now;
-                hal_debug_printf("[AUTO] Using cached PS2 connection\r\n");
-            }
-        }
-    } else if (g_input_mode == INPUT_MODE_PS2 && g_ps2_state.connected) {
-        /* PS2 模式下若长时间无数据 → 回 CRSF 重试 */
-        uint32_t ps2_elapsed = now - g_ps2_state.last_read_ms;
-        if (ps2_elapsed > AUTO_DETECT_PS2_TIMEOUT_MS) {
-            if ((now - g_mode_switch_time_ms) > MODE_SWITCH_COOLDOWN_MS) {
-                g_input_mode = INPUT_MODE_AUTO;
-                g_mode_switch_time_ms = now;
-                g_ps2_state.connected = false;
-                hal_debug_printf("[AUTO] PS2 timeout, retrying CRSF...\r\n");
-            }
-        }
-    }
-
     /* ========== PS2 模式: 轮询手柄 ========== */
-    if ((g_input_mode == INPUT_MODE_PS2 || g_input_mode == INPUT_MODE_AUTO)
-        && g_ps2_initialized) {
-
+    if (g_input_mode == INPUT_MODE_PS2 && g_ps2_initialized) {
+        /* 最小轮询间隔: 无线接收器对过快轮询敏感 (易返回垃圾帧),
+         * 标准实现 ~20ms 一次; 控制环 10ms 只会重复读到同一帧, 无收益 */
+        static uint32_t last_poll_ms = 0;
+        uint32_t poll_t = hal_get_tick_ms();
+        if ((poll_t - last_poll_ms) >= PS2_POLL_INTERVAL_MS) {
+            last_poll_ms = poll_t;
         if (ps2_read_gamepad(&g_ps2_state)) {
-            /* 如果在 AUTO 模式且 PS2 读取成功, 切换到 PS2 */
-            if (g_input_mode == INPUT_MODE_AUTO) {
-                g_input_mode = INPUT_MODE_PS2;
-                g_mode_switch_time_ms = now;
+            /* 数字模式 (绿灯) → 自动进入模拟模式 (红灯):
+             * 数字帧无摇杆比例输出, 不切换摇杆无法正常控制。
+             * 每秒重试一次直到成功; 进入模拟模式时摇杆需居中 (中位采样)。 */
+            if (!g_ps2_state.analog_mode) {
+                static uint32_t last_analog_attempt_ms = 0;
+                uint32_t t = hal_get_tick_ms();
+                if ((t - last_analog_attempt_ms) >= 1000) {
+                    last_analog_attempt_ms = t;
+                    ps2_enter_analog_mode(&g_ps2_state);
+                    hal_debug_printf("[PS2] Requesting analog mode...\r\n");
+                }
             }
+            /* ---- PS2 调试观察模式: 每秒打印通道值, 机器人不响应 ---- */
+            if (g_ps2_debug_active) {
+                static uint32_t last_dbg_print_ms = 0;
+                if ((poll_t - last_dbg_print_ms) >= 1000) {
+                    last_dbg_print_ms = poll_t;
+                    ps2_state_print();
+                }
+                /* 清空全部运动/姿态指令, 机器人保持站立不动 */
+                ctrl_state->travel_length.x = 0;
+                ctrl_state->travel_length.y = 0;
+                ctrl_state->travel_length.z = 0;
+                ctrl_state->body_rot.x = 0;
+                ctrl_state->body_rot.y = 0;
+                ctrl_state->body_rot.z = 0;
+                return true;
+            }
+
             /* 映射到控制状态 */
             ps2_to_control(&g_ps2_state, ctrl_state);
             return true;
+        }
         }
     }
 #endif /* PS2_ENABLED */
@@ -1137,13 +1163,6 @@ bool hal_input_update(control_state_t *ctrl_state)
 
             /* 检查链接状态 */
             if (g_crsf_state.link_connected) {
-#if PS2_ENABLED
-                /* CRSF 有信号: 重置自动检测, 锁定 CRSF */
-                if (g_input_mode == INPUT_MODE_AUTO) {
-                    g_input_mode = INPUT_MODE_CRSF;
-                    g_mode_switch_time_ms = now;
-                }
-#endif
                 /* 将 CRSF 状态映射到机器人控制 */
                 crsf_to_control(&g_crsf_state, ctrl_state);
                 return true;
@@ -1240,10 +1259,14 @@ void hal_debug_init(void)
 
 void hal_debug_printf(const char *format, ...)
 {
+#if USB_DEBUG_ENABLED
     va_list args;
     va_start(args, format);
     vprintf(format, args);
     va_end(args);
+#else
+    (void)format;   /* USB 数据模式: 调试输出静默, USB CDC 通道专供上位机 */
+#endif
 }
 
 /* ==================== 蜂鸣器实现（无源蜂鸣器, PWM 方波驱动, 本地 GPIO, 不走 I2C） ==================== */
@@ -1637,20 +1660,7 @@ bool hal_is_period_calib_active(void)
 static bool g_imu_available = false;
 
 #if IMU_ENABLED
-/* INT 中断 (GP28): BNO055 融合数据就绪, NDOF ~100Hz
- * 双沿触发对极性不敏感 (INT_CNTL 空闲高/下降沿, 兼容相反配置) */
-static volatile bool g_imu_data_ready = false;
-static volatile uint32_t g_imu_int_count = 0;
 static imu_data_t g_imu_last;           /* 最近一次有效读数 (调试用) */
-
-static void imu_int_callback(uint gpio, uint32_t events)
-{
-    (void)events;
-    if (gpio == IMU_INT_PIN) {
-        g_imu_data_ready = true;
-        g_imu_int_count++;
-    }
-}
 #endif
 
 bool hal_imu_init(void)
@@ -1686,19 +1696,6 @@ bool hal_imu_init(void)
 
     if (g_imu_available) {
         hal_debug_printf("IMU: BNO055 detected at 0x%02X\r\n", BNO055_I2C_ADDR);
-#if IMU_INT_GPIO_ENABLED
-        /* INT 引脚: 输入 + 上拉, 双沿中断 → 数据就绪标志 */
-        g_imu_data_ready = false;
-        g_imu_int_count = 0;
-        gpio_init(IMU_INT_PIN);
-        gpio_set_dir(IMU_INT_PIN, GPIO_IN);
-        gpio_pull_up(IMU_INT_PIN);
-        gpio_set_irq_enabled_with_callback(IMU_INT_PIN,
-                                           GPIO_IRQ_EDGE_RISE | GPIO_IRQ_EDGE_FALL,
-                                           true, &imu_int_callback);
-        hal_debug_printf("IMU: INT interrupt enabled on GP%u (BSX DRDY)\r\n",
-                         IMU_INT_PIN);
-#endif
     } else {
         hal_debug_printf("WARNING: BNO055 not found at 0x%02X after %u retries, IMU disabled\r\n",
                          BNO055_I2C_ADDR, IMU_INIT_RETRY_MAX);
@@ -1719,28 +1716,6 @@ bool hal_imu_read(imu_data_t *data)
         data->valid = false;
         return false;
     }
-
-#if IMU_INT_GPIO_ENABLED
-    /* INT 模式: 优先在数据就绪中断后读取, 避免重复读取同一帧。
-     * 兜底: 若 INT 长时间未触发 (引脚未接线/克隆芯片不支持),
-     * 超时后直接轮询读取, 保证姿态补偿始终工作。 */
-    static uint32_t last_read_ms = 0;
-    uint32_t now = hal_get_tick_ms();
-    if (!g_imu_data_ready) {
-        if ((now - last_read_ms) < IMU_INT_FALLBACK_TIMEOUT_MS) {
-            data->valid = false;
-            return false;
-        }
-        /* 超时未收到 INT → 轮询兜底 (每 20ms 一次) */
-        static uint32_t last_fallback_warn_ms = 0;
-        if ((now - last_fallback_warn_ms) > 5000) {
-            last_fallback_warn_ms = now;
-            hal_debug_printf("[IMU] WARN: INT inactive, poll fallback active\r\n");
-        }
-    }
-    g_imu_data_ready = false;
-    last_read_ms = now;
-#endif
 
     bno055_euler_t raw;
     if (!bno055_read_euler(&raw)) {
@@ -1796,13 +1771,6 @@ static void imu_status_print(void)
     hal_debug_printf("=== IMU Status ===\r\n");
     hal_debug_printf("available: %s  addr: 0x%02X\r\n",
                      g_imu_available ? "YES" : "NO", BNO055_I2C_ADDR);
-
-#if IMU_INT_GPIO_ENABLED
-    hal_debug_printf("INT (GP%u): count=%lu rate≈%lu Hz  pin_now=%d\r\n",
-                     IMU_INT_PIN, g_imu_int_count,
-                     g_imu_int_count / (hal_get_tick_ms() / 1000 + 1),
-                     gpio_get(IMU_INT_PIN));
-#endif
 
     if (g_imu_available) {
         bno055_calib_t calib;
