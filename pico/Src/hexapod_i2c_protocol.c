@@ -14,6 +14,7 @@
 
 #include "hexapod_i2c_protocol.h"
 #include "hexapod_config.h"
+#include "hexapod_hal.h"    /* hal_debug_printf (受 USB_DEBUG_ENABLED 门控) */
 #include <string.h>
 #include <stdio.h>
 #include "pico/stdlib.h"
@@ -50,7 +51,8 @@ uint16_t pca9685_get_pwm_period_us(uint8_t board_idx) {
 static inline bool pca9685_write_reg(uint8_t addr, uint8_t reg, uint8_t data)
 {
     uint8_t buf[2] = {reg, data};
-    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, buf, 2, false);
+    int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, addr, buf, 2, false,
+                                       make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     return (ret == 2);
 }
 
@@ -63,9 +65,11 @@ static inline bool pca9685_write_reg(uint8_t addr, uint8_t reg, uint8_t data)
  */
 static inline bool pca9685_read_reg(uint8_t addr, uint8_t reg, uint8_t *data)
 {
-    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, &reg, 1, true);
+    int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, addr, &reg, 1, true,
+                                       make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     if (ret != 1) return false;
-    ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, addr, data, 1, false);
+    ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, addr, data, 1, false,
+                                  make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     return (ret == 1);
 }
 
@@ -86,7 +90,8 @@ static inline bool pca9685_write_burst(uint8_t addr, uint8_t reg,
     buf[0] = reg;
     memcpy(buf + 1, data, len);
     
-    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, buf, len + 1, false);
+    int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, addr, buf, len + 1, false,
+                                       make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     return (ret == (int)(len + 1));
 }
 
@@ -116,7 +121,7 @@ bool pca9685_init(void)
             mode1 |= PCA9685_MODE1_AI;
             if (pca9685_write_reg(addr, PCA9685_MODE1, mode1)) {
                 g_board_addrs[g_board_count++] = addr;
-                printf("  PCA9685 #%u found at 0x%02X (%s legs)\r\n",
+                hal_debug_printf("  PCA9685 #%u found at 0x%02X (%s legs)\r\n",
                        g_board_count, addr,
                        (addr == PCA9685_ADDR_LEFT) ? "left" : "right");
             }
@@ -124,8 +129,8 @@ bool pca9685_init(void)
     }
 
     if (g_board_count == 0) {
-        printf("  No PCA9685 detected on I2C bus!\r\n");
-        printf("  Check: SDA=GP%d SCL=GP%d power to PCA9685\r\n",
+        hal_debug_printf("  No PCA9685 detected on I2C bus!\r\n");
+        hal_debug_printf("  Check: SDA=GP%d SCL=GP%d power to PCA9685\r\n",
                PCA9685_I2C_SDA_PIN, PCA9685_I2C_SCL_PIN);
         return false;
     }
@@ -312,7 +317,8 @@ bool pca9685_write_all_channels(uint8_t addr, const uint16_t *pulses, uint8_t co
         data[idx + 3] = (uint8_t)((off_count >> 8) & 0x0F); // OFF_H
     }
 
-    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, addr, data, sizeof(data), false);
+    int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, addr, data, sizeof(data), false,
+                                       make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     return (ret == (int)sizeof(data));
 }
 
@@ -384,7 +390,8 @@ void pca9685_free_all(void)
     memset(data + 1, 0, 64);
 
     for (uint8_t i = 0; i < g_board_count; i++) {
-        i2c_write_blocking(PCA9685_I2C_INSTANCE, g_board_addrs[i], data, sizeof(data), false);
+        i2c_write_blocking_until(PCA9685_I2C_INSTANCE, g_board_addrs[i], data, sizeof(data), false,
+                                 make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     }
 }
 
@@ -403,7 +410,7 @@ void pca9685_free_all(void)
  */
 void pca9685_i2c_recover(void)
 {
-    printf("[I2C] Bus recovery started...\r\n");
+    hal_debug_printf("[I2C] Bus recovery started...\r\n");
 
     /* 禁用 I2C 外设，释放引脚 */
     i2c_deinit(PCA9685_I2C_INSTANCE);
@@ -424,7 +431,7 @@ void pca9685_i2c_recover(void)
     gpio_put(PCA9685_I2C_SDA_PIN, 1);
 
     if (sda_stuck) {
-        printf("[I2C] SDA stuck LOW, sending recovery clocks...\r\n");
+        hal_debug_printf("[I2C] SDA stuck LOW, sending recovery clocks...\r\n");
 
         /* 发送最多 9 个 SCL 脉冲。
          * 每个脉冲让从设备释放 1 bit。9 个脉冲 = 完整 1 字节 + ACK。
@@ -440,7 +447,7 @@ void pca9685_i2c_recover(void)
             bool released = gpio_get(PCA9685_I2C_SDA_PIN);
             gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_OUT);
             if (released) {
-                printf("[I2C] SDA released after %d clocks\r\n", i + 1);
+                hal_debug_printf("[I2C] SDA released after %d clocks\r\n", i + 1);
                 break;
             }
         }
@@ -461,22 +468,23 @@ void pca9685_i2c_recover(void)
     gpio_pull_up(PCA9685_I2C_SDA_PIN);
     gpio_pull_up(PCA9685_I2C_SCL_PIN);
 
-    printf("[I2C] Bus recovery complete\r\n");
+    hal_debug_printf("[I2C] Bus recovery complete\r\n");
 }
 
 /* ==================== 调试工具 ==================== */
 
 void pca9685_scan_bus(void)
 {
-    printf("Scanning I2C bus...\r\n");
+    hal_debug_printf("Scanning I2C bus...\r\n");
     
     for (uint8_t addr = 0; addr < 128; addr++) {
         uint8_t dummy;
-        int ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, addr, &dummy, 1, false);
+        int ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, addr, &dummy, 1, false,
+                                          make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
         if (ret > 0) {
-            printf("  Device found at 0x%02X\r\n", addr);
+            hal_debug_printf("  Device found at 0x%02X\r\n", addr);
         }
     }
     
-    printf("Scan complete.\r\n");
+    hal_debug_printf("Scan complete.\r\n");
 }

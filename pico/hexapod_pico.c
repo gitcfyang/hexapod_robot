@@ -39,7 +39,7 @@ bool robot_init(void)
     }
 
     hexapod_set_leg_lift_height(&g_robot, DEFAULT_LEG_LIFT_HEIGHT);
-    hexapod_set_gait(&g_robot, GAIT_RIPPLE_12);
+    hexapod_set_gait(&g_robot, GAIT_TRIPOD_6);   /* 三角步态=六足标准行走; RIPPLE 波浪式逐腿摆动观感如蠕动, 仅作 !G0 备选 */
 
     hal_debug_printf("Robot initialized successfully!\r\n");
     return true;
@@ -213,22 +213,44 @@ int main(void)
      * 解锁时 hexapod_update 才开启供电并输出 PWM。 */
     hal_debug_printf("Boot OK. Servo power OFF — waiting for ARM switch.\r\n");
 
+    /* 启动提示音 — 提前到初始化之前 (有声 = Pico/电源/蜂鸣器正常):
+     * 若下方初始化卡死, 看门狗复位后会再次响起 —
+     * 间隔重复的提示音 = 初始化阶段反复挂起 (先查 I2C) */
+    uint16_t startup_notes[] = {1000, 1500, 2000};
+    uint16_t startup_durations[] = {100, 100, 200};
+    hal_play_sound(3, startup_notes, startup_durations);
+
+    /* 硬件看门狗 — 提前到初始化之前启用 (启动阶段 5s):
+     * I2C 总线若被拉死 (器件损坏/总线短路), 阻塞式读写曾永久挂起
+     * (2026-08 电压尖峰事件实况: 无提示音、无看门狗、无声死机)。
+     * 现在 I2C 操作带 5ms 超时 (hexapod_i2c_protocol.h), 加上此处
+     * 看门狗兜底, 任何启动阶段死锁都会自动复位重试。 */
+    watchdog_enable(5000, 1);
+    hal_debug_printf("Watchdog enabled (boot phase: 5000ms)\r\n");
+
     /* 机器人初始化 (PCA9685 I2C 检测不受舵机供电影响, 逻辑侧 3.3V) */
     if (!robot_init()) {
         /* 初始化失败: 红灯闪烁, 但保持 USB 命令可用 (如 !I2C 诊断) */
         hal_debug_printf("Robot init failed! Use !I2C to check bus, !P to test servos.\r\n");
         while(1) {
+            watchdog_update();  /* 喂狗: 保持本诊断循环存活 (不被 5s 看门狗复位) */
             hal_poll_usb_commands(NULL);
             hal_led_blink(1, 2);
             sleep_ms(500);
         }
     }
 
+    /* 初始化完成 → 看门狗收紧到主循环超时 */
+    watchdog_enable(1500, 1);
+    hal_debug_printf("Watchdog rearmed (main loop: 1500ms)\r\n");
+
     /* 硬件信息打印 */
     hal_debug_printf("\r\n");
     hal_debug_printf("Servo: PCA9685 x2 via I2C (GP14/GP15)\r\n");
 #if INPUT_CONTROL_MODE == 0
     hal_debug_printf("Input: CRSF (ELRS) via UART1 (GP4/GP5) @420000 baud\r\n");
+#elif INPUT_CONTROL_MODE == 1
+    hal_debug_printf("Input: PS2 gamepad via bit-bang SPI (GP6~GP9)\r\n");
 #else
     hal_debug_printf("Input: USB CDC Serial (no UART1 required)\r\n");
 #endif
@@ -253,6 +275,13 @@ int main(void)
     hal_debug_printf("    CH7 (SWC): Speed  CH8 (SWD): Balance\r\n");
 
     hal_debug_printf("\r\nWaiting for ELRS link...\r\n");
+#elif INPUT_CONTROL_MODE == 1
+    /* 打印 PS2 摇杆映射 */
+    hal_debug_printf("\r\nPS2 Control Mapping:\r\n");
+    hal_debug_printf("  L-Stick: Forward/Strafe    R-Stick: Turn/Height\r\n");
+    hal_debug_printf("  START: Arm   SELECT: Balance   L1/R1: Gait   D-Pad: Stance\r\n");
+    hal_debug_printf("  Circle: Emergency Stop   !MODE crsf|ps2: input switch\r\n");
+    hal_debug_printf("\r\nWaiting for PS2 controller...\r\n");
 #else
     hal_debug_printf("\r\nUSB Serial Commands:\r\n");
     hal_debug_printf("  Movement: !F !B !L !R !Q !E !S\r\n");
@@ -262,17 +291,6 @@ int main(void)
     hal_debug_printf("\r\nReady for USB commands.\r\n");
 #endif
     hal_debug_printf("Send '!V' to toggle debug level (current=%u)\r\n", hal_debug_get_level());
-
-    /* 启动提示音 */
-    uint16_t startup_notes[] = {1000, 1500, 2000};
-    uint16_t startup_durations[] = {100, 100, 200};
-    hal_play_sound(3, startup_notes, startup_durations);
-
-    /* ---- 硬件看门狗 ----
-     * 超时 1500ms：任何死锁（I2C 卡死、ISR 风暴）都将在 1.5s 内自动复位。
-     * pause_on_debug=1：调试器挂接时暂停看门狗，防止断点触发复位。 */
-    watchdog_enable(1500, 1);
-    hal_debug_printf("Watchdog enabled (1500ms timeout)\r\n");
 
     /* 主循环 */
     uint32_t last_status_time = 0;
@@ -346,7 +364,9 @@ int main(void)
                 hal_led_set(0, true);
             } else {
 #if INPUT_CONTROL_MODE == 0
-                hal_debug_printf("[IDLE] Waiting for Arm signal...\r\n");
+                hal_debug_printf("[IDLE] Waiting for Arm signal (CH5)...\r\n");
+#elif INPUT_CONTROL_MODE == 1
+                hal_debug_printf("[IDLE] Waiting for START (PS2 arm)...\r\n");
 #else
                 hal_debug_printf("[IDLE] Send !O to arm, !F/!B/!L/!R to move\r\n");
 #endif

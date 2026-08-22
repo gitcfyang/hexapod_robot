@@ -9,6 +9,7 @@
 #include "bno055.h"
 #include "hexapod_i2c_protocol.h"   /* PCA9685_I2C_INSTANCE, I2C 超时等 */
 #include "hardware/i2c.h"
+#include "pico/time.h"    /* make_timeout_time_us */
 
 /* 缓存当前 I2C 地址和校准状态 */
 static uint8_t  g_bno055_addr = 0;
@@ -23,8 +24,9 @@ static bool     g_initialized = false;
 static inline bool bno055_write_reg(uint8_t reg, uint8_t value)
 {
     uint8_t buf[2] = { reg, value };
-    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, g_bno055_addr,
-                                  buf, 2, false);
+    int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, g_bno055_addr,
+                                        buf, 2, false,
+                                        make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     return (ret == 2);
 }
 
@@ -33,11 +35,13 @@ static inline bool bno055_write_reg(uint8_t reg, uint8_t value)
  */
 static inline bool bno055_read_reg(uint8_t reg, uint8_t *data)
 {
-    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, g_bno055_addr,
-                                  &reg, 1, true);   /* nostop=true: 保持总线 */
+    int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, g_bno055_addr,
+                                        &reg, 1, true,   /* nostop=true: 保持总线 */
+                                        make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     if (ret != 1) return false;
-    ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, g_bno055_addr,
-                             data, 1, false);        /* STOP 后释放总线 */
+    ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, g_bno055_addr,
+                                   data, 1, false,      /* STOP 后释放总线 */
+                                   make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     return (ret == 1);
 }
 
@@ -46,11 +50,13 @@ static inline bool bno055_read_reg(uint8_t reg, uint8_t *data)
  */
 static inline bool bno055_read_burst(uint8_t start_reg, uint8_t *data, uint8_t len)
 {
-    int ret = i2c_write_blocking(PCA9685_I2C_INSTANCE, g_bno055_addr,
-                                  &start_reg, 1, true);   /* nostop=true */
+    int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, g_bno055_addr,
+                                        &start_reg, 1, true,   /* nostop=true */
+                                        make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     if (ret != 1) return false;
-    ret = i2c_read_blocking(PCA9685_I2C_INSTANCE, g_bno055_addr,
-                             data, len, false);
+    ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, g_bno055_addr,
+                                   data, len, false,
+                                   make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
     return (ret == len);
 }
 
@@ -92,17 +98,6 @@ bool bno055_init(uint8_t i2c_addr)
 
     /* 使用默认单位: 欧拉角=度, 加速度=m/s², 角速度=dps, 温度=°C
      * UNIT_SEL 默认为 0x00 (Windows 方向约定), 不需要修改。 */
-
-    /* 配置 INT 引脚: 融合数据就绪中断 (ACC_BSX_DRDY)
-     * - INT_MSK/INT_EN bit7 使能并路由到 INT 引脚
-     * - NDOF 模式下按融合输出速率触发 (~100Hz)
-     * - INT_CNTL 在 Page 1 (0x07): 空闲高 + 下降沿触发
-     * 主机侧 (GP28) 用双沿中断接收, 对极性不敏感 */
-    if (!bno055_write_reg(BNO055_REG_INT_MSK, BNO055_INT_BSX_DRDY)) return false;
-    if (!bno055_write_reg(BNO055_REG_INT_EN,  BNO055_INT_BSX_DRDY)) return false;
-    if (!bno055_write_reg(BNO055_REG_PAGE_ID, 0x01)) return false;      /* 切 Page 1 */
-    if (!bno055_write_reg(BNO055_REG_INT_CNTL, BNO055_INT_CNTL_IDLE_H_FALL)) return false;
-    if (!bno055_write_reg(BNO055_REG_PAGE_ID, 0x00)) return false;      /* 回 Page 0 */
 
     /* 切换到 NDOF 融合模式 (9-DOF 绝对姿态) */
     if (!bno055_write_reg(BNO055_REG_OPR_MODE, BNO055_MODE_NDOF)) {

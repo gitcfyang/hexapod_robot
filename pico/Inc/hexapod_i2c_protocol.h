@@ -20,7 +20,7 @@
 #define PCA9685_I2C_BAUD        400000
 #define PCA9685_I2C_SDA_PIN     14   /* GP14: PCB 走线靠近 PCA9685，减少干扰 */
 #define PCA9685_I2C_SCL_PIN     15   /* GP15: PCB 走线靠近 PCA9685，减少干扰 */
-#define PCA9685_I2C_TIMEOUT_US  5000
+#define PCA9685_I2C_TIMEOUT_US  5000  /* 单次I2C操作超时: 总线被拉死/器件无响应时快速失败, 防止阻塞式读写永久挂起 (开机阶段尤其致命) */
 
 /* ==================== PCA9685器件配置 ==================== */
 
