@@ -254,7 +254,7 @@ int main(void)
 #else
     hal_debug_printf("Input: USB CDC Serial (no UART1 required)\r\n");
 #endif
-    hal_debug_printf("Battery: ADC0 (GP26, divider 15/115)\r\n");
+    hal_debug_printf("Battery: ADC2 (GP28, divider 47/377)\r\n");
     hal_debug_printf("Buzzer: GP13 (passive, PWM)\r\n");
     hal_debug_printf("LED: GP25 green (status), GP12 red (alarm)\r\n");
     hal_debug_printf("DC Motor: GP2/GP3 (PWM)\r\n");

@@ -224,9 +224,10 @@ void hal_delay_ms(uint32_t ms)
 /* ==================== 电源管理实现（本地ADC，不走I2C） ==================== */
 
 /*
- * 电池检测 (2S 18650):
- *   分压: R1=100kΩ (电池+), R2=15kΩ (地), ADC 抽头在 R2
- *   ADC 电压 = 电池 × 15/115 → 电池 = ADC × 115/15 ≈ 7.67×
+ * 电池检测 (2S 18650, 新 PCB 2026-08: GP28/ADC2, 原 GP26 已因尖峰损坏):
+ *   分压: R1=330kΩ (电池+), R2=47kΩ (地), ADC 抽头在 R2
+ *   (330k 高串阻限制尖峰电流入 ADC, 与齐纳钳位配合更安全)
+ *   ADC 电压 = 电池 × 47/377 → 电池 = ADC × 377/47 ≈ 8.02×
  */
 
 static bool adc_initialized = false;
@@ -1730,24 +1731,26 @@ bool hal_imu_read(imu_data_t *data)
      *   Pitch → 绕 X 轴 (前后倾斜)
      *   Heading → 绕 Z 轴
      *
-     * 机器人坐标映射 (芯片倒扣安装, 绕 rX 翻转 180°):
+     * 机器人坐标映射 (正常安装, 芯片朝上, 2026-08 新 PCB):
      *
      *   安装几何 (右手定则推导 + 实测验证):
      *     Xc = rX   芯片 X 轴 → 机器人正前方 (用户确认)
-     *     Zc = -rY  倒扣 → 芯片 Z 轴朝下
-     *     Yc = rZ   由 Xc×Yc=Zc 推得 (rX×rZ=-rY ✓)
+     *     Yc = rZ   芯片 Y 轴 → 机器人右侧
+     *     Zc = rY   芯片 Z 轴 → 机器人上方 (正常安装, 不再倒扣)
      *
-     *   平放读数: chip pitch≈180° (绕 Xc 翻转), chip roll≈0
+     *   平放读数: chip pitch≈0, chip roll≈0
+     *   (旧板倒扣 Zc=-rY, 平放 chip pitch≈180° 需 -1800 修正,
+     *    新板已删除该修正项, 轴对应关系不变)
      *
-     *   倾角映射 (同轴同向, 符号均 +1):
-     *     robot_roll  (绕 rX=Xc) ← chip pitch - 180°  [chip pitch 绕 Xc]
+     *   倾角映射 (同轴同向):
+     *     robot_roll  (绕 rX=Xc) ← chip pitch        [chip pitch 绕 Xc]
      *     robot_pitch (绕 rZ=Yc) ← chip roll          [chip roll 绕 Yc]
      *     robot_yaw   (绕 rY)     ← chip heading      (暂不使用)
      *
      * 符号由 IMU_ROLL_SIGN / IMU_PITCH_SIGN 配置,
      * 若补偿加剧倾斜 (正反馈) → 取反对应符号。 */
 
-    data->roll  = IMU_ROLL_SIGN  * (((raw.pitch * 10) / 16) - 1800);
+    data->roll  = IMU_ROLL_SIGN  * ((raw.pitch * 10) / 16);
     data->pitch = IMU_PITCH_SIGN * ((raw.roll  * 10) / 16);
     data->yaw   = (raw.heading * 10) / 16; /* 暂不使用，保留 */
     data->valid = true;

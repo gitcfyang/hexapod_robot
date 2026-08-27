@@ -10,17 +10,21 @@
 - PCA9685: I²C1 GP14(SDA)/GP15(SCL) @400kHz, 内部上拉
   - **⚠️ PCA9685 必须供 3.3V**（不可 5V！5V I2C 上拉会击穿 RP2040 的 GPIO）
   - 2026-06 曾因 PCA9685 模块 5V I2C 上拉倒灌，烧坏 2 块 Pico 的 GP2/GP3
+  - 保护: 总线 TVS 钳位 + BNO055 stub 串 100Ω 限流电阻
+    (主总线走线保持完整, 内部上拉保留作后备, 与外部保护不冲突)
 - PWM: 100Hz 数字舵机, 两片 PCA9685 独立校准
 - 接收器: ELRS CRSF, UART1 GP4/GP5 @420000bps
-- PS2 接收器: bit-bang SPI GP6~GP9 (DAT/CMD/SEL/CLK), CRSF/PS2 自动检测切换
+- PS2 接收器: bit-bang SPI GP6~GP9 (DAT/CMD/SEL/CLK), 与 CRSF 双驱动常编译, !MODE 运行时切换
 - IMU: BNO055 9轴姿态传感器, I²C1 GP14/GP15 (共享), 地址 0x29 (!I2C 实测确认)
-  - BOOT 引脚: GP27 — 固件上电驱动高 (正常应用模式), I2C 初始化失败自动循环 BOOT 恢复 (3 次)
-  - INT 引脚: GP28 — 已接线但 **本板芯片 SW rev 0x0308 不支持 BSX DRDY 中断 (需 ≥0x0314)**
-    - IMU_INT_GPIO_ENABLED=0, 纯轮询读取 (100Hz), 换芯片后改回 1 即可
-  - IMU_ENABLED=1 已启用
-  - ⚠️ **芯片倒扣安装** (PCB 设计失误): Xc=rX(前) Yc=rZ(右) Zc=-rY(下)
-    - 平放 chip pitch≈180°, 映射: robot_roll=+(pitch-180°), robot_pitch=+roll
-    - 符号宏 IMU_ROLL_SIGN/IMU_PITCH_SIGN=+1 (实测验证中)
+  - BOOT 引脚: GP22 — 固件上电驱动高 (正常应用模式), I2C 初始化失败自动循环 BOOT 恢复 (3 次)
+  - INT 引脚: 未引出 (本板芯片 SW rev 0x0308 不支持 BSX DRDY 中断, 需 ≥0x0314;
+    100Hz 轮询足够, 无需 INT 引脚)
+  - IMU_ENABLED=0 (姿态补偿代码就绪, 待新板实测 IMU 后启用)
+  - 安装方向: 正常安装 (芯片朝上): Xc=rX(前) Yc=rZ(右) Zc=rY(上)
+    - 平放 chip pitch≈0, 映射: robot_roll=+(pitch), robot_pitch=+roll
+    - 符号宏 IMU_ROLL_SIGN=-1 / IMU_PITCH_SIGN=+1 (实测验证中)
+  - 保护: VDD 串电源限流电阻 (防闩锁拖垮 3.3V 轨) +
+    I2C stub 各串 100Ω (SDA/SCL, 靠近器件引脚)
   - ⚠️ NDOF 校准 (sys/mag=0) 完成前姿态数据不可靠, 补偿可能注入错误偏移
 - 蜂鸣器: GP13 无源蜂鸣器 (PWM 方波, notes 数组=频率 Hz, 0=休止)
 - 双 LED: GP25 绿色 (状态), GP12 红色 (报警) — 功能分离
@@ -29,71 +33,22 @@
   - **上电默认断电, 由 ARM 解锁开关控制**: 解锁→开供电+输出 PWM; 锁定→停 PWM+断供电
   - 低压/过压自动断电; 电压恢复后仅在解锁状态下重新供电
   - !C/!PER 校准模式进入时强制开启供电 (直接驱动舵机)
-- 电池: GP26 ADC, 分压 15/115 (R1=100kΩ, R2=15kΩ), 2S 18650
+- 电池: GP28 ADC2, 分压 47/377 (R1=330kΩ, R2=47kΩ), 2S 18650
+  - 330k 高串阻限制电压尖峰流入 ADC 的电流, 与齐纳钳位/TVS 配合更安全;
+    满电 8.4V→ADC 1.05V
   - 阈值: 过压 8.8V / 警告 7.0V / 截止 6.6V / 恢复 7.3V
   - 上电先检测电压再开舵机供电; 运行时每 1s 监测
-  - ⚠️ 当前 BATTERY_CHECK_ENABLED=0 临时禁用 (ADC 分压电路排查中), 修复后改回 1
-- 外部扩展: GP0/GP1 预留 UART (上位机/传感器), GP22 闲置带外部输出
+  - ⚠️ BATTERY_CHECK_ENABLED=0, 待新板实测分压电路后改回 1
+- 外部扩展: GP0/GP1 预留 UART (上位机/传感器), GP26/GP27 释放
+  - GP26/GP27 可作两个独立 ADC (ADC0+ADC1: 电流检测/距离传感器/电池温度等),
+    或第二路 I2C (I2C0: GP26=SDA, GP27=SCL, 上位机传感器扩展/外置 ADC/ToF),
+    两引脚相邻走线方便, 亦可作 UART/PWM
   - CMake 已关闭 stdio UART (pico_enable_stdio_uart=0), 调试输出仅走 USB CDC, 保证 GP0/GP1 空闲
 - 足端传感器: 6× 微动开关 GP16~GP21 (输入上拉，开关→GND 闭合读低)
 - 腿: coxa=45mm, femur=75mm, tibia=120mm
 - 舵机零位: FEMUR_SERVO_ZERO=450, TIBIA_SERVO_ZERO=900
 - 底板: coxa基座高出底板25mm
 - ⚠️ I2C 总线上存在未知设备 0x70 (!I2C 全扫描发现, 待确认是否预期)
-
-## 下一版 PCB 引脚修改计划 ★设计草案 (2026-08)
-
-> 依据现版 PCB 实测问题与引脚富余情况规划。**本版固件暂不修改**,
-> 待新 PCB 落地后按下方清单一并同步。
-
-### 修改总览
-
-| 引脚 | 现版功能 | 下一版功能 | 说明 |
-|:---:|------|------|------|
-| GP22 | 闲置 (带外部输出) | **IMU BOOT** | 复用闲置引脚, 无冲突 |
-| GP26 | 电池 ADC (ADC0) | **释放** | 可拓展 I2C 或 ADC |
-| GP27 | IMU BOOT | **释放** | 可拓展 I2C 或 ADC |
-| GP28 | IMU INT | **电池 ADC (ADC2)** | 承接电池检测功能 |
-
-### ① 取消 IMU INT 引脚
-
-- **现状**: 现用模块硅片 SW rev 0x0308, BSX DRDY 数据就绪中断需要
-  ≥0x0314 (Bosch 真品), 本芯片不支持 — INT 引脚当前形同虚设
-  (IMU_INT_GPIO_ENABLED=0, 纯 100Hz 轮询读取)
-- **是否有解**: 唯一解法是换真品 BNO055 (SW≥0x0314)。但本项目姿态环
-  本来就是 100Hz 轮询, 有无"数据就绪"中断零差别, 不值得为它换芯片
-- **未来 C2 撞击检测 (ACC_HIGH_G) 不受影响**: 该中断是加速度计硬件
-  功能, 不依赖硅片版本; 且中断标志锁存, 100Hz 经 I2C 轮询 INT_STA
-  寄存器即可捕获撞击 — **不需要物理 INT 引脚**
-- 结论: 取消无损失, 引脚留给更有价值的用途
-
-### ② IMU BOOT → GP22
-
-- BOOT 引脚仅需普通 GPIO 输出 (高=正常模式, 循环拉低 50ms=恢复),
-  GP22 原为闲置带外部输出, 完全满足
-- 固件侧: IMU_BOOT_GPIO 27 → 22
-
-### ③ 电池 ADC → GP28
-
-- GP28 = ADC2 通道, 与现 GP26 (ADC0) 同为独立模拟输入, 分压电路不变 (15/115)
-- 固件侧: 电池 ADC 初始化引脚 26 → 28
-- 附加收益: 现板 GP26 ADC 通道已于 2026-08 电压尖峰事件中损坏
-  (见"电路保护建议"章节), 改至 GP28 顺带绕开损坏通道
-
-### ④ 释放的 GP26/GP27 拓展方案
-
-- **两个独立 ADC 通道** (ADC0 + ADC1): 电流检测、距离传感器、电池温度等模拟量
-- **或组成第二路 I2C 总线** (I2C0: GP26=SDA, GP27=SCL): 上位机传感器扩展、
-  外置 ADC、ToF 测距等 — RP2040 任意 GPIO 可复用为 I2C, 无需专用引脚
-- 两引脚相邻, 走线方便; 亦可作 UART/PWM 等其他数字接口
-
-### 固件同步清单 (新 PCB 落地后执行)
-
-- [ ] hexapod_config.h: IMU_BOOT_GPIO 27→22, 电池 ADC 引脚 26→28,
-      删除 IMU_INT_GPIO 相关宏
-- [ ] hexapod_hal_pico.c: hal_imu_init BOOT 引脚、ADC 初始化引脚、
-      删除 INT IRQ 相关代码
-- [ ] README / STATUS 的 GPIO 表更新
 
 ## IK 公式 (hexapod_ik.c)
 ```
@@ -145,16 +100,17 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 工作模式: NDOF (9-DOF 融合), 100Hz 欧拉角输出
 - 补偿通道: body_rot_offset (Roll/Pitch 取反, Yaw=0 不补偿)
 - 叠加点: compute_leg_ik() 中 effective_body_rot = body_rot + body_rot_offset
-- 启用: IMU_ENABLED=1 (hexapod_config.h)
+- 启用: IMU_ENABLED=1 (hexapod_config.h; 当前为 0, 待新板实测后启用)
 - 增益: IMU_COMPENSATION_GAIN (×10, 默认 10=1:1 直接补偿)
 - 驱动: bno055.h/c, 通过 hal_imu_init()/hal_imu_read() 封装
 - 容错: 传感器未检测到时打印警告, 固件正常运行 (无补偿)
-- 坐标映射: BNO055 Roll(Y轴) → Robot Roll(X轴), BNO055 Pitch(X轴) → Robot Pitch(Z轴)
--           (具体正负号取决于 IMU 安装方向, 在 hal_imu_read() 中调整)
+- 坐标映射: 芯片朝上安装, Xc=rX(前) Yc=rZ(右) Zc=rY(上),
+  BNO055 Pitch(Xc) → Robot Roll(rX), BNO055 Roll(Yc) → Robot Pitch(rZ)
+  (具体正负号取决于 IMU 安装方向, 在 hal_imu_read() 中调整)
 
 ### IMU 安装位置分析 (右前方, 偏离几何中心)
 
-- 现状: IMU 位于机身右前方, 下一版 PCB 也做不到几何中心 (空间等限制)
+- 现状: IMU 位于机身右前方, 重新布局也难做到几何中心 (空间等限制)
 - **结论: 影响很小, 当前功能无需处理; 位置问题 << 减振/磁干扰问题**
 
 **角速度 / 姿态角 — 与位置完全无关:**
@@ -259,21 +215,23 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 排障方法: 断电测 SDA/SCL 对地电阻 (≈0Ω = 器件把总线拉死);
   逐个断开 I2C 器件上电, 听到正常启动音即找到凶手
 
-### 下一版 PCB: I2C 与电源保护设计 (事件 3 对策) ★2026-08
+### PCB I2C 与电源保护设计 (事件 3 对策)
 
 > 事件 3 复盘: 2S 尖峰 → AO4407A 击穿 + ADC 损坏 + 整条 I2C 总线器件全部失联。
-> 现板 I2C 裸连 (零限流/零钳位), 仅靠 Pico 内部 ~50kΩ 上拉。
+> 旧板 I2C 裸连 (零限流/零钳位), 仅靠 Pico 内部 ~50kΩ 上拉。
 > 尖峰可能的入侵路径: ① VBAT 直穿 PCA9685 输出级→逻辑级→I2C;
 > ② 瞬态沿 PCB 走线耦合到 SDA/SCL; ③ 大电流回流引起地弹。
 >
 > ★ 2026-08-16 根因新推演 (用户猜想, 高度吻合): **PWM 引脚与相邻 VBAT 意外触碰**
-> 是源头。现板 PWM 输出零串联电阻 (成品模块均有), 触碰时灌入电流仅受芯片
+> 是源头。旧板 PWM 输出零串联电阻 (成品模块均有), 触碰时灌入电流仅受芯片
 > 内阻限制 → PCA9685 输出级 NMOS 击穿 → V+ 域 (7.4V) 穿通到 VCC 域 (3.3V)
 > → SDA/SCL 带故障电平 → 沿裸连的 I2C 总线击穿另一颗 PCA9685、BNO055、
 > Pico GP14/15 及邻近 GP26(ADC)。"2S 尖峰"可能即此短路的瞬态本身。
 > IMU 后续发热 = 输入结构打穿后内部短路/闩锁持续拉电流 (不断电会持续恶化)。
 
 #### 按性价比排序的保护清单
+
+> ✅ = 已在新 PCB 落地; 其余为设计建议, 供下版/维修参考。
 
 1. **PWM 输出串联电阻 (★事件根因对策, 投入产出比最高)**
    - 每路 PCA9685 LEDn 输出串 220Ω~470Ω (对照成品模块做法)
@@ -284,21 +242,26 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
    - 电池端子远离舵机信号排针, 布局分侧
    - 防呆/带护套连接器, 杜绝错插搭接
 
-3. **源头钳位**
-   - VBAT 电池入口: SMBJ12A TVS (击穿 13.3V > 2S 满充 8.4V, 钳位 ~19.9V)
+3. **源头钳位** ✅ VBAT 入口 TVS 已落地
+   - VBAT 电池入口: TVS 反并联 (与既有 1N5822 防反接 + PPTC 各管各的:
+     反接/限流/正压尖峰, 无重叠; 型号 SMBJ12A 或 SMBJ18A — 若需覆盖 4S
+     误接场景选 18A, 稳态 16.8V 误接由固件过压检测拒绝开舵机供电兜底)
    - 舵机供电轨 (AO4407A 之后): TVS + 100µF 电解
    - 尖峰被钳在 ~20V 以下 → AO4407A (Vds 30V)、分压网络、PCA9685 全部安全
 
-4. **I2C 总线三级保护 (每线 <¥1)**
-   - SDA/SCL 各串联 100Ω (Pico 侧; 每器件 stub 各串 100Ω 隔离效果更好)
+4. **I2C 总线三级保护 (每线 <¥1)** ✅ BNO055 stub 已落地
+   - SDA/SCL 各串联 100Ω, 串在 BNO055 分支 (stub) 上, 电阻靠近器件引脚
+     (主总线保持完整走线; 注意 100Ω 隔离不了硬短路, 真正隔离需分支缓冲器, 见第 9 条)
    - 双向 TVS 钳位: PESD3V3 (单线) 或 SRV05-4 (4 线阵列)
    - 外置上拉 2.2k~4.7kΩ 到 3.3V (替代内部 ~50k — 兼改善 400kHz 信号边沿)
 
-5. **器件侧解耦 (阻断输出级→逻辑级通道)**
+5. **器件侧解耦 (阻断输出级→逻辑级通道)** ✅ BNO055 VDD 限流已落地
    - 每颗 PCA9685: VCC (3.3V 逻辑) 100nF + 10µF; V+ (舵机电压) 100nF + 100µF + TVS
    - 上电时序: VCC 先于 V+ (AO4407A 供电门控天然满足), 防闩锁
+   - BNO055 VDD 串电源限流电阻: 直接对策闩锁拖垮 3.3V 轨 — 即使 BNO055
+     内部短路, 3.3V 轨只多几十 mA 负载, USB PHY 与其余器件不被波及
 
-6. **ADC 输入保护**: 串联 1kΩ + 100nF RC + 3.3V 齐纳 (引脚已计划改 GP28)
+6. **ADC 输入保护**: 串联 1kΩ + 100nF RC + 3.3V 齐纳 (ADC 引脚已在 GP28)
 
 7. **AO4407A 栅极**: 100Ω 串联电阻 + 可选 Vgs 齐纳钳位 (Vgs 极限 ±25V)
 
@@ -318,8 +281,10 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
   - 教训: 续流二极管只管感性负载反电动势, 无法钳位供电侧的瞬态尖峰 —
     尖峰沿 VBAT 直穿 MOSFET (Vds 击穿) 并经分压网络打进 ADC
   - 关联: 此前 "ADC 分压读数异常" (BATTERY_CHECK_ENABLED=0 排查中) 很可能即此所致
-  - 对策 (下版 PCB): 2S 电池入口 VBAT 对地并联 TVS 管; ADC 输入端加 3.3V 齐纳钳位作二级保护;
-    同时下版已计划电池 ADC 改至 GP28 (见"下一版 PCB 引脚修改计划")
+  - 对策 (已在新 PCB 落地): 2S 电池入口 VBAT 对地并联 TVS 管
+    (与既有 1N5822 防反接 + PPTC 配合); BNO055 增加 I2C stub 串联电阻 +
+    VDD 电源限流电阻; ADC 输入端加 3.3V 齐纳钳位作二级保护;
+    电池 ADC 改至 GP28 (顺带绕开损坏的 GP26 通道)
   - 后续恶化 (2026-08-16): IMU 明显发热 (损伤发展成内部短路/闩锁, 持续拉大电流) →
     拖垮共享 3.3V 轨 → Pico USB PHY 失效, **连 BOOTSEL 大容量模式都不枚举**;
     数字 GPIO 低压仍工作 (蜂鸣器响+红灯闪)。排障: 断电测 IMU VCC 对地电阻
@@ -401,11 +366,6 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 
 ### Phase A: 补偿健壮性 (改动集中在 bno055.c / hal_imu_read)
 
-- **A1 硬件轴重映射**: 用 AXIS_MAP_CONFIG(0x41) + AXIS_MAP_SIGN(0x42)
-  把倒扣修正移入芯片内部, 芯片直接输出机器人坐标系欧拉角,
-  删除软件里的 pitch−180° 和符号宏。
-  意义: 倒扣安装使芯片工作在 pitch≈180° 欧拉奇异点附近,
-  硬件重映射后芯片在正常区间工作, 读数更干净。
 - **A2 重力矢量替代欧拉角**: BNO055 输出重力矢量 (gravity x/y/z),
   atan2 求倾角 — 无奇异点、无翻转问题, 任何安装方向都稳。
 - **A3 校准门控**: sys 校准 < 阈值时补偿不生效 (offset=0),
@@ -421,8 +381,8 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 
 - **C1 防翻倒检测**: |roll| 或 |pitch| > 45° 持续 > 300ms + 角速度突变
   → 紧急停止 + 舵机去扭矩 (翻倒后 18 舵机乱蹬是烧舵机主因之一)。
-- **C2 撞击检测**: ACC_HIGH_G 硬件中断 → 撞击瞬间断舵机供电,
-  芯片硬件中断实现, 不占 CPU。
+- **C2 撞击检测**: ACC_HIGH_G 中断 → 撞击瞬间断舵机供电。
+  无需物理 INT 引脚 — 中断标志锁存, 100Hz 经 I2C 轮询 INT_STA 寄存器即可捕获。
 
 ### Phase D: 地形与航向
 
@@ -539,35 +499,16 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 
 ## 待完善
 - [ ] 用 !C 实测每条腿的 horn_offset
-- [ ] ★ IMU 功能路线图 (见上文章节): Phase A(轴重映射/重力矢量/校准门控)
+- [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
+- [ ] 用 !PER 实测两块 PCA9685 的 PWM_PERIOD_US 并填入 hexapod_i2c_protocol.h
+- [ ] ADC 分压电路实测 (通过后 BATTERY_CHECK_ENABLED 改回 1)
+- [ ] IMU 轴映射正负号实测验证 (倾斜机身观察补偿方向)
+- [ ] ★ IMU 功能路线图 (见上文章节): A(重力矢量/校准门控)
   → B(PD阻尼) → C(防翻倒/撞击) → D(坡度/滑移/航向保持/偏航扰动响应)
 - [ ] ★ 地形适应设计 (见上文章节): 按 P1~P4 细化并实现
   - P1 寻地式落腿 / P2 悬空检测 / P3 空洞检测 / P4 爬升姿态包络
-- [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
-- [ ] 用 !PER 实测两块 PCA9685 的 PWM_PERIOD_US 并填入 hexapod_i2c_protocol.h
-- [x] 电池 ADC 分压器 (15/115) + 上电检测 + 运行监测 + 过压/过放断舵机供电
-  - ⚠️ ADC 分压电路有问题的排查期间 BATTERY_CHECK_ENABLED=0, 修复后改回 1
-- [ ] ★ 下一版 PCB 引脚修改 (见上文章节): 取消 IMU INT / BOOT→GP22 /
-  ADC→GP28 / 释放 GP26+GP27 (I2C 或 ADC 拓展) — 新 PCB 落地前不改代码
-- [ ] ADC 分压电路修复 (读数异常 — 2026-08 事件 3 电压尖峰损坏 GP26 ADC + 2×AO4407A, 见"电路保护建议")
 - [ ] Core1 双核卸载 IK 计算
-- [x] 加入 IMU (BNO055 I²C 驱动 + body_rot_offset 姿态补偿) — 待实测验证
-  - 地址已改为 0x29 (!I2C 实测确认), IMU_ENABLED 仍为 0
-- [x] 硬件看门狗 + I2C 总线自动恢复
-- [x] CH7 站立姿态三段开关 (窄/正常/宽, 平滑过渡)
-- [x] horn_offset 校准机制 (invert 后叠加, 每关节独立)
-- [x] serial_console.py 重写为手动行编辑器 (半行恢复/历史/实时显示)
-- [x] PS2 接收器支持 (bit-bang SPI GP6~GP9, 扩展键保留) — 2026-08-16 实测通过
-  (!PS2 数据/按键/摇杆/控制映射/解锁/运行时切换); 自动检测机制已移除,
-  INPUT_CONTROL_MODE 编译期三选一 (0=CRSF, 1=PS2, 2=USB)
-- [x] PCB 定版 GPIO 同步 (舵机供电/直流电机/双LED/无源蜂鸣器/电池保护)
-- [x] PCA9685 物理通道映射 (0x40 左板 LED7-15, 0x41 右板 LED8-0)
-- [x] !I2C 总线检测命令 (PCA9685/BNO055 定向检测 + 全扫描 + 供电引脚状态)
-- [x] !PER 无示波器 PWM 周期校准模式
-- [x] CMake 显式链接全部 hardware_* 库, 关闭 stdio UART 释放 GP0/GP1
 - [ ] 确认 I2C 总线 0x70 未知设备 (全扫描发现)
 - [ ] 直流电机功能实际应用 (预留接口已就绪)
 - [ ] 外部 UART (GP0/GP1) 上位机协议设计
 - [ ] 足端传感器接入步态逻辑, 自动进行步态调整
-- [x] IMU BOOT/INT 引脚 (GP27/GP28): BOOT 自动恢复 + INT 数据就绪中断 + !IMU 调试命令
-- [ ] IMU 轴映射正负号实测验证 (倾斜机身观察补偿方向)

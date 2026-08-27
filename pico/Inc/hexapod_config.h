@@ -70,20 +70,25 @@
  *   2. 运行电压监测 (hexapod_pico.c) — 每 1s 分级报警/断电
  *   3. 核心循环检查 (hexapod_core.c) — 紧急停止
  * 设为 0 时: 跳过 ADC 读取, 舵机供电无条件开启, 无任何电压报警。
- * ⚠️ 仅当 ADC 分压电路故障排查期间使用, 分压修复后应改回 1 */
-#define BATTERY_CHECK_ENABLED   0   /* ★ ADC 分压有问题的临时关闭 */
+ * ⚠️ 新 PCB (2026-08) 已将 ADC 改至 GP28 (绕开旧板损坏的 GP26) +
+ *   VBAT 入口 TVS + ADC 输入齐纳钳位, 分压电路待新板实测正常后改回 1 */
+#define BATTERY_CHECK_ENABLED   0   /* ★ 待新 PCB 实测分压电路后启用 */
 
-/* ==================== 电池检测配置 (GP26 ADC, 2S 18650) ==================== */
+/* ==================== 电池检测配置 (GP28 ADC2, 2S 18650) ==================== */
 
-/* 分压电阻: R1=100kΩ (电池+), R2=15kΩ (地), ADC 抽头在 R2
- * ADC 电压 = 电池电压 × R2/(R1+R2) = 电池 × 15/115
- * → 电池电压 = ADC 电压 × 115/15 ≈ 7.67×
- * 电池 8.4V (满) → ADC 1.10V;  6.6V (空) → ADC 0.86V  (安全范围) */
-#define BATTERY_ADC_PIN         26
-#define BATTERY_ADC_INPUT       0
+/* 分压电阻: R1=330kΩ (电池+), R2=47kΩ (地), ADC 抽头在 R2
+ *   (新 PCB 2026-08 由 100k+15k 改来: 串阻提高到 330k, 电压尖峰时
+ *    流入 ADC 的电流被进一步限制, 与齐纳钳位配合更安全)
+ * ADC 电压 = 电池电压 × R2/(R1+R2) = 电池 × 47/377
+ * → 电池电压 = ADC 电压 × 377/47 ≈ 8.02×
+ * 电池 8.4V (满) → ADC 1.05V;  6.6V (空) → ADC 0.82V  (安全范围)
+ * 新 PCB (2026-08): 电池 ADC 从 GP26 改至 GP28 (ADC2),
+ *   顺带绕开旧板被电压尖峰损坏的 GP26 ADC 通道 (见 STATUS 事件 3) */
+#define BATTERY_ADC_PIN         28
+#define BATTERY_ADC_INPUT       2
 #define ADC_REF_VOLTAGE         3300
 #define ADC_RESOLUTION          4095
-#define BATTERY_DIVIDER_RATIO   7.667f    /* 115/15, 2S 18650 */
+#define BATTERY_DIVIDER_RATIO   8.021f    /* 377/47, 2S 18650 */
 
 /* 2S 18650 电压阈值 (mV)
  *   8.4V = 充满 (4.2V/节)
@@ -113,13 +118,14 @@
  *   PCB 实测: 本板 BNO055 应答在 0x29 (!I2C 检测确认) */
 #define BNO055_I2C_ADDR         0x29
 
-/* ⚠️ 安装方向: 芯片倒扣 (绕 rX 翻转 180°, PCB 设计失误)
- *   安装几何: Xc=rX(前), Yc=rZ(右), Zc=-rY(下)
- *   平放时 chip pitch≈180°, chip roll≈0
+/* 安装方向: 正常安装 (芯片朝上, 2026-08 新 PCB 已修正倒扣失误)
+ *   安装几何: Xc=rX(前), Yc=rZ(右), Zc=rY(上)
+ *   (旧板倒扣为 Zc=-rY(下), 平放 chip pitch≈180° 需要 -1800 修正,
+ *    新板正常安装后平放 chip pitch≈0, 修正项已删除)
  *   轴映射 (hal_imu_read):
- *     robot_roll  = IMU_ROLL_SIGN  × (chip_pitch - 180°)
+ *     robot_roll  = IMU_ROLL_SIGN  × chip_pitch
  *     robot_pitch = IMU_PITCH_SIGN × chip_roll
- *   符号推导: Xc与rX同向, Yc与rZ同向 → 均 +1
+ *   轴对应关系与旧板相同 (Xc=rX, Yc=rZ 未变), 仅去掉翻转偏移
  *   实测验证: 机器人平放 → !IMU 的 roll/pitch 应 ≈0;
  *   若补偿加剧倾斜 (正反馈) → 取反对应符号 */
 #define IMU_ROLL_SIGN           -1
@@ -127,12 +133,12 @@
 
 /* ==================== IMU BOOT/INT 引脚 ==================== */
 
-/* BOOT 引脚 (GP27): 上电保持高电平 → BNO055 进入正常应用模式
- * (拉低则进入 bootloader 模式)。
+/* BOOT 引脚 (GP22, 新 PCB 2026-08 由 GP27 改来): 上电保持高电平
+ * → BNO055 进入正常应用模式 (拉低则进入 bootloader 模式)。
  * 启用后: 固件启动时驱动 BOOT=高; I2C 初始化失败时自动循环
  * BOOT 引脚 (拉低 50ms → 释放 → 等待 POR) 并重试, 实现自动恢复 */
 #define IMU_BOOT_GPIO_ENABLED   1
-#define IMU_BOOT_PIN            27
+#define IMU_BOOT_PIN            22
 #define IMU_INIT_RETRY_MAX      3    /* 初始化失败自动恢复重试次数 */
 
 /* IMU 补偿增益 (×10, 10 = 1:1 直接补偿)
