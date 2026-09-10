@@ -31,9 +31,16 @@ jobs:
         working-directory: pico/build
         run: make -j$(nproc)
 
-      - name: Upload UF2 to Release
+      - name: Upload firmware and hardware files to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: pico/build/hexapod_pico.uf2
+          files: |
+            pico/build/hexapod_pico.uf2
+            hardware/pcb/board/gerber/*.zip
+            hardware/pcb/schematic.pdf
+            hardware/pcb/board/assembly/*.csv
+            hardware/bom/hexapod_bom.csv
+            hardware/bom/hexapod_bom.md
+            hardware/mechanical/*.step
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
