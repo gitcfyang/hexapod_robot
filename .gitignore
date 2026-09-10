@@ -4,6 +4,14 @@ pico/build/
 *.uf2
 tools/__pycache__/
 
+# 硬件 EDA 临时文件 (KiCad / 立创EDA)
+*-backups/
+fp-info-cache
+*.kicad_prl
+*.kicad_sch-bak
+*.kicad_pcb-bak
+*.epbak
+
 # IDE / Editor
 .vscode/
 .idea/
