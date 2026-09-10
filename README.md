@@ -23,7 +23,7 @@ cd pico/build && make -j$(nproc)
 ## 硬件概览
 
 - MCU: Pico (RP2040) · 舵机: 18× 双轴数字舵机, 2× PCA9685 · IMU: BNO055 (I²C 0x29)
-- 电池: 2S 18650, GP28 ADC2 分压 47/377 (330k+47k)，低压/过压/过放自动断舵机供电
+- 电池: 2S 18650, GP28 ADC2 分压 47/377 (330k+47k)，低压/过压/过放自动断舵机供电（双路AO4407A实现）
   （当前 `BATTERY_CHECK_ENABLED=0`，待新板实测分压后启用）
 - 足端微动开关 ×6 · 无源蜂鸣器 · 双 LED · 直流电机 ×2
 - 完整 GPIO 分布、电池保护分级行为: 见 [STATUS.md](STATUS.md) 硬件章节
@@ -51,7 +51,7 @@ cd pico/build && make -j$(nproc)
 hexapod_robot/
 ├── pico/        # RP2040 固件 (HAL 结构: Inc/Src)
 ├── tools/       # 串口控制台 serial_console.py · IK 仿真 ik_gait_debug.py
-├── hardware/    # PCB 源工程/Gerber/BOM/机械 STEP (规范见 hardware/README.md)
+├── hardware/    # PCB 设计/机械/BOM (见 hardware/README.md)
 ├── README.md
 └── STATUS.md    # 固件细节: GPIO/参数/步态/调试/电路保护
 ```

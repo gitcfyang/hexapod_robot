@@ -2,7 +2,8 @@
 
 ## 硬件
 - 硬件设计文件: [hardware/](hardware/) — PCB 源工程 (立创EDA) / 原理图 PDF /
-  Gerber / 贴装 BOM+坐标 / 全项目 BOM / 机械 STEP (规范见 hardware/README.md)
+  Gerber / 贴装 BOM+坐标 / 全项目 BOM (含购买链接) / 机械 STEP
+  (说明见 hardware/README.md)
 - MCU: Raspberry Pi Pico (RP2040)
 
 ### GPIO 分布 (PCB 定版)
