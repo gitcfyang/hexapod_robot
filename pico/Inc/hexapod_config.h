@@ -273,14 +273,14 @@
 /* 机身姿态旋转范围 (0.1° 单位)
  * 摇杆满量程 (±500) 映射到的机身旋转角。
  * body_rot = stick * BODY_ROTATION_MAX / 500
- * 500 = 50.0°, 即摇杆推到底时机身倾斜 50° */
-#define BODY_ROTATION_MAX         500
+ * 400 = 40.0°, 即摇杆推到底时机身倾斜 40° */
+#define BODY_ROTATION_MAX         400
 
 /* ---- CRSF 摇杆→控制量 缩放参数 ----
  * 摇杆范围 -500~+500, 映射到实际运动参数 */
 #define TRAVEL_MAX_FORWARD_MM   150     /* 满杆步长 (mm)，约体长1/3 */
 #define TRAVEL_MAX_STRAFE_MM     110     /* 满杆平移步长 (mm) */
-#define TRAVEL_MAX_TURN_MM       60    /* 满杆旋转步长 (mm) */
+#define TRAVEL_MAX_TURN_MM       70    /* 满杆旋转步长 (mm) */
 #define LIFT_SPEED_MM_PER_TICK   100      /* 升降速度 (mm/周期), 油门杆用 */
 #define LIFT_HEIGHT_MIN_MM      5      /* 最低抬腿高度 (mm) */
 #define LIFT_HEIGHT_MAX_MM      60     /* 最高抬腿高度 (mm) */
