@@ -1,230 +1,65 @@
 # Hexapod Robot
 
-六足机器人固件，基于 Raspberry Pi Pico (RP2040)。
+六足机器人，基于 Raspberry Pi Pico (RP2040)。18 路数字舵机（2× PCA9685）、
+BNO055 IMU 自动调平，支持 ELRS CRSF / PS2 手柄 / USB 三种输入。
 
-## 硬件
+## 特性
 
-- **MCU**: Raspberry Pi Pico (RP2040)
-- **舵机**: 18 路数字舵机，2× PCA9685 驱动
-- **接收器**: ELRS CRSF (UART) / PS2 无线手柄 (编译期选择默认, 运行时可切换)
-- **IMU**: BNO055 9轴姿态传感器 (I²C 0x29, 可选)
-- **I²C**: I2C1, GP14 (SDA) / GP15 (SCL) @400kHz
-  - 保护: 总线 TVS 钳位 + BNO055 stub 串 100Ω 限流电阻
-- **足端传感器**: 6× 微动开关，GP16~GP21 (输入上拉，落地→GND)
-- **蜂鸣器**: GP13 (无源蜂鸣器，PWM 方波驱动)
-- **双 LED**: GP25 绿色 (状态) / GP12 红色 (报警)
-- **直流电机**: GP2/GP3 (PWM 调速，10kHz)
-- **舵机供电控制**: GP10 (左) / GP11 (右)，电池异常自动断电
-- **电池检测**: GP28 ADC2，分压 47/377 (R1=330kΩ + R2=47kΩ, 2S 18650)，低压/过压报警 + 过放保护
-  - 保护: VBAT 入口 TVS + ADC 输入齐纳钳位 + 330k 高串阻限制尖峰电流入 ADC
-  - ⚠️ 当前 `BATTERY_CHECK_ENABLED=0`（待新板实测分压电路后启用）
-- **腿节**: Coxa 45mm / Femur 75mm / Tibia 120mm
+- 100Hz 控制循环 + 实时 IK 解算；四种步态（三角 6/8、波纹、波浪）+ 仿生连续变速
+- 平衡模式（机身姿态直接控制）+ IMU 姿态补偿自动调平（可选）
+- CRSF / PS2 双驱动常编译，`!MODE` 运行时切换，无需焊接插拔
+- 电池保护（过压/低压/过放自动断舵机供电）、硬件看门狗、I2C 总线自恢复
+- PCB 设计、Gerber、全项目 BOM、机械 STEP 全部开源（见 [hardware/](hardware/)）
 
-## GPIO 分布 (PCB 定版)
-
-| GPIO | 功能 | 说明 |
-|:---:|------|------|
-| GP0 | 外部 TX | 预留: 上位机/传感器扩展 |
-| GP1 | 外部 RX | 预留: 上位机/传感器扩展 |
-| GP2 | 直流电机 1 | PWM 调速 (10kHz) |
-| GP3 | 直流电机 2 | PWM 调速 (10kHz) |
-| GP4 | CRSF TX | UART1 @420000 baud |
-| GP5 | CRSF RX | UART1 @420000 baud |
-| GP6~GP9 | PS2 接收机 | bit-bang SPI (DAT/CMD/SEL/CLK) |
-| GP10 | 左舵机供电 | 高电平=供电，低压自动断电 |
-| GP11 | 右舵机供电 | 高电平=供电，低压自动断电 |
-| GP12 | 红色 LED | 报警指示 (与绿 LED 功能分离) |
-| GP13 | 无源蜂鸣器 | PWM 方波发声 |
-| GP14 | I2C1 SDA | PCA9685 + BNO055 @400kHz |
-| GP15 | I2C1 SCL | PCA9685 + BNO055 @400kHz |
-| GP16~GP21 | 足端微动开关 | 输入上拉，落地→GND |
-| GP22 | IMU BOOT | 上电高=正常模式，初始化失败自动循环恢复 |
-| GP25 | 绿色 LED | Pico 板载，状态指示 |
-| GP26 | 释放 | 可拓展 ADC0 或第二路 I2C（I2C0: GP26=SDA, GP27=SCL） |
-| GP27 | 释放 | 可拓展 ADC1 或第二路 I2C |
-| GP28 | 电池 ADC (ADC2) | 分压 47/377 (330k+47k)，2S 18650 |
-
-## 电池保护 (2S 18650)
-
-| 电压 | 状态 | 行为 |
-|:---:|------|------|
-| > 8.8V | **过压** | 红灯常亮 + 蜂鸣，**断开两路舵机供电**（误接 3S/电源故障） |
-| 7.3V ~ 8.8V | 正常 | 绿灯运行 |
-| 7.0V ~ 7.3V | 低压警告 | 红灯 2Hz 闪烁，可继续运行 |
-| 6.6V ~ 7.0V | 严重低压 | 红灯快闪 + 蜂鸣 |
-| < 6.6V | 过放保护 | 红灯常亮 + 蜂鸣，**断开两路舵机供电** |
-
-- **上电检测**: 每次启动先测电压，超出 6.6V~8.8V 安全窗口拒绝启动舵机供电，每 5s 复查，恢复后自动继续启动
-- **分压计算**: ADC 电压 = 电池 × 47/377 → 电池 = ADC × 377/47 ≈ 8.02×
-- **恢复机制**: 电压回到安全窗口后自动重新接通舵机供电
-
-## 结构
-
-```
-hexapod_robot/
-├── README.md
-├── STATUS.md                         # 详细固件状态与参数说明
-├── pico/                             # RP2040 固件
-│   ├── CMakeLists.txt                # CMake 构建配置
-│   ├── hexapod_pico.c                # 入口：主循环、调试输出
-│   ├── Inc/                          # 头文件
-│   │   ├── hexapod_config.h          #   机械参数、舵机映射、CRSF 通道
-│   │   ├── hexapod_types.h           #   数据结构定义
-│   │   ├── hexapod_core.h            #   核心控制与机器人实例
-│   │   ├── hexapod_ik.h              #   逆运动学 (IK)
-│   │   ├── hexapod_gait.h            #   步态引擎
-│   │   ├── hexapod_math.h            #   三角函数查表
-│   │   ├── hexapod_crsf.h            #   CRSF 协议解析
-│   │   ├── hexapod_ps2.h             #   PS2 手柄 bit-bang SPI 协议
-│   │   ├── hexapod_hal.h             #   硬件抽象层接口
-│   │   ├── hexapod_i2c_protocol.h    #   PCA9685 I²C 协议
-│   │   └── bno055.h                  #   BNO055 IMU 寄存器映射
-│   └── Src/                          # 实现文件
-│       ├── hexapod_core.c            #   控制循环、IK 集成、转向步态
-│       ├── hexapod_ik.c              #   单腿 IK + 机身旋转矩阵
-│       ├── hexapod_gait.c            #   波纹/三角/波浪步态序列
-│       ├── hexapod_math.c            #   sin/cos/acos/atan4 查表实现
-│       ├── hexapod_crsf.c            #   ELRS 通道解析、摇杆映射
-│       ├── hexapod_ps2.c             #   PS2 手柄驱动、摇杆/按键映射
-│       ├── hexapod_hal_pico.c        #   Pico 硬件驱动 (I²C/UART/舵机/IMU/足端开关)
-│       ├── hexapod_i2c_protocol.c    #   PWM 校准、批量写入
-│       └── bno055.c                  #   BNO055 I²C 驱动 (NDOF 融合)
-└── tools/
-    ├── ik_gait_debug.py              # IK + 步态 Python 仿真可视化
-    └── serial_console.py             # USB 串口交互控制台 (手动行编辑器/历史/实时显示)
-```
-
-## 控制
-
-| 模式 | CH1 (Roll) | CH2 (Pitch) | CH3 (Throttle) | CH4 (Yaw) |
-|---|---|---|---|---|
-| 正常 | 左右平移 | 前进/后退 | 机身高度 | 原地转向 |
-| 平衡 | 机身横滚 | 机身俯仰 | 机身高度 | 机身偏航 |
-
-- CH5: 解锁/锁定 — **解锁时才开启舵机供电并输出 PWM，锁定时切断两路舵机供电**
-- CH6: 步态切换 (低=三角6 / 中=三角8 / 高=波浪24)
-- CH7: 站立姿态 (低=窄80% / 中=正常100% / 高=宽120%)
-- CH8: 平衡模式开关
-
-## PS2 无线手柄
-
-在 hexapod_config.h 的 `INPUT_CONTROL_MODE` 中选择默认输入源 (0=CRSF, 1=PS2, 2=USB)；
-无线电模式下 CRSF 和 PS2 驱动常编译，一块板子同时接上两个接收器后，
-用 `!MODE crsf` / `!MODE ps2` 运行时切换，无需焊接或插拔。
-
-| PS2 接收器引脚 | GPIO | 说明 |
-|:---:|:---:|------|
-| DAT (DI) | GP6 | 手柄→主机数据, 输入+内部上拉 |
-| CMD (DO) | GP7 | 主机→手柄命令, 推挽输出 |
-| SEL (ATT) | GP8 | 片选, 通讯期间拉低 |
-| CLK | GP9 | 时钟, 空闲高 |
-
-**控制映射:**
-
-| 操控 | 正常模式 | 姿态模式 (SELECT) |
-|------|----------|-------------------|
-| 左摇杆 ←→ (LX) | 原地旋转 | 机身偏航 |
-| 左摇杆 ↑↓ (LY) | 机身高度 (积分) | 机身高度 (积分) |
-| 右摇杆 ←→ (RX) | 左右平移 | 机身横滚 |
-| 右摇杆 ↑↓ (RY) | 前进/后退 | 机身俯仰 |
-| START | 解锁/锁定 | 解锁/锁定 |
-| SELECT | 姿态模式开关 (进入响一声) | 姿态模式开关 |
-| D-Pad ↑↓ | 步态切换 (三角6/三角8/波浪24) | 步态切换 |
-| D-Pad ←→ | 站立姿态 (窄/正常/宽 循环) | 站立姿态 |
-| ○ (Circle) | 紧急停止 | 紧急停止 |
-| × + D-Pad | 抬腿高度微调 | 抬腿高度微调 |
-
-> **高度积分控制**: LY 是弹簧摇杆 (自动回中), 回中 = 高度保持不变,
-> 上推/下推 = 高度逐渐升高/降低 (满行程约 2 秒走完全量程)。
-> 摇杆幅度越大变化越快 — 等效 CRSF CH3 旋钮的稳定手感。
-
-**按钮功能分层:**
-
-| 层级 | 按钮 | 功能 | CRSF 等效 |
-|------|------|------|:---:|
-| 核心 | RX / RY | 左右平移 + 前进/后退 | CH1+CH2 |
-| 核心 | LY / LX | 机身高度 (积分) + 原地旋转 | CH3+CH4 |
-| 核心 | START | 解锁/锁定 | CH5 |
-| 核心 | D-Pad ↑↓ | 步态切换 (三角6/三角8/波浪24) | CH6 |
-| 核心 | D-Pad ←→ | 站立姿态 (窄/正常/宽 循环) | CH7 |
-| 核心 | SELECT | 姿态模式开关 | CH8 |
-| 核心 | ○ (Circle) | 紧急停止 | — |
-| 核心 | × + D-Pad | 抬腿高度微调 | — |
-| 保留 | □ (Square) | 自动归位/站立 (future) | ❌ 无 |
-| 保留 | L3 | 自动校准触发 (future) | ❌ 无 |
-| 保留 | R3 | 控制灵敏度切换 (future) | ❌ 无 |
-| 保留 | L2 | 辅助功能 A (future) | ❌ 无 |
-| 保留 | R2 | 辅助功能 B (future) | ❌ 无 |
-
-> **扩展/保留功能仅在 PS2 模式下生效。** CRSF 模式下系统正常运行，不依赖这些通道。
-
-**调试命令:**
-
-| USB 命令 | 效果 |
-|------|------|
-| `!PS2` | 打印 PS2 手柄原始状态 (按键 + 摇杆 + 模式) |
-| `!MODE crsf` | 切换到 CRSF |
-| `!MODE ps2` | 切换到 PS2 |
-
-## IMU 姿态补偿 (可选)
-
-启用 `IMU_ENABLED=1` 后，BNO055 实时测量机身倾斜角度，通过 `body_rot_offset` 自动叠加到 IK 解算，实现机身自动调平：
-
-```
-BNO055 (I²C 0x29) → 欧拉角读取 → body_rot_offset (取反)
-                                               ↓
-CRSF 摇杆 → body_rot ─────────────→ [ + ] → IK 旋转矩阵 → 舵机
-```
-
-- Roll/Pitch 补偿生效，Yaw 不补偿（避免与转向冲突）
-- 两种模式（正常/平衡）均受益
-- 传感器未检测到时自动降级，不影响基本功能
-- 安装方向: 芯片朝上，chip pitch→robot roll、chip roll→robot pitch；BOOT 引脚 GP22
-- IMU 保护: VDD 串限流电阻（防闩锁拖垮 3.3V 轨）+ I2C stub 串 100Ω
-
-## 编译
+## 快速开始
 
 ```bash
 cd pico/build && make -j$(nproc)
 ```
 
-编译产物 `hexapod_pico.uf2` 拖入 Pico 的 USB 盘即可烧录。
+编译产物 `hexapod_pico.uf2` 拖入 Pico 的 USB 盘即烧录。
+调试控制台：`python3 tools/serial_console.py`（自动连接、断线重连）。
 
-## 调试
+## 硬件概览
 
-USB CDC 串口命令：
+- MCU: Pico (RP2040) · 舵机: 18× 双轴数字舵机, 2× PCA9685 · IMU: BNO055 (I²C 0x29)
+- 电池: 2S 18650, GP28 ADC2 分压 47/377 (330k+47k)，低压/过压/过放自动断舵机供电
+  （当前 `BATTERY_CHECK_ENABLED=0`，待新板实测分压后启用）
+- 足端微动开关 ×6 · 无源蜂鸣器 · 双 LED · 直流电机 ×2
+- 完整 GPIO 分布、电池保护分级行为: 见 [STATUS.md](STATUS.md) 硬件章节
 
-| 命令 | 功能 |
-|---|---|
-| `!C` | 交互式舵机校准 |
-| `!V` | 切换调试等级 (0-3) |
-| `!P<id> <ang>` | 单舵机角度控制 |
-| `!O` / `!S` | 解锁 / 停止 |
-| `!F` / `!B` / `!L` / `!R` | 方向移动 |
-| `!G<n>` | 步态切换 (0-4) |
-| `!M<n>` | 站立姿态 (-1=窄, 0=正常, 1=宽, 空格可省略) |
-| `!A` | 打印全部 18 路舵机角度 |
-| `!I2C` | I2C 总线检测 (PCA9685/BNO055/全扫描) |
-| `!IMU` | IMU 状态 (欧拉角/中断计数/校准状态) |
-| `!PER` | PCA9685 PWM 周期校准模式 |
-| `!PER0/1 <us>` | 设置左/右板周期并实时生效 |
-| `!PERO 0/1` | horn_offset 偏移量开关 (默认 ON) |
-| `!PERQ` | 退出周期校准并打印最终值 |
-| `!PS2` | 打印 PS2 手柄原始状态 |
-| `!PS2DBG` | PS2 调试观察模式开关 (每秒打印全部通道值, 机器人不响应输入) |
-| `!MODE crsf\|ps2` | 输入源切换 |
+## 机架
 
-快捷用法: `python3 tools/serial_console.py` 可直接输入 `<id> <angle>` (自动加 `!P` 前缀)，
-支持 ↑↓ 命令历史、半行输入不被串口数据打断、Ctrl+C 清行、Ctrl+D 退出。
-**自动连接**: 持续扫描串口 (by-id 中的 Pico 优先 → ttyACM*)，设备出现即连接、
-掉线/复位自动重连不退出 — 先启动脚本再给机器人上电即可捕获完整开机日志；
-未连接时输入的命令自动排队，连接成功后立即发送。可用参数指定固定端口: `serial_console.py ttyACM0`
+本项目机架使用 18× **双轴舵机**（STEP 模型见 [hardware/mechanical/](hardware/mechanical/)）。
+低成本替代可用 3D 打印方案 [MakeYourPet/hexapod](https://github.com/MakeYourPet/hexapod)
+(MIT，MG996R 单轴舵机)：移植本固件只需修改 [pico/Inc/hexapod_config.h](pico/Inc/hexapod_config.h)
+的腿节长度、舵机零位、安装角等参数（详见 STATUS.md），IK 与步态算法本身无需修改（同为 3 关节腿）。
 
-详见 [STATUS.md](STATUS.md)。
+## 控制
+
+| 模式 | CH1 | CH2 | CH3 | CH4 | CH5~CH8 |
+|---|---|---|---|---|---|
+| 正常 | 左右平移 | 前进/后退 | 机身高度 | 原地转向 | 解锁 / 步态 / 站立姿态 / 平衡模式 |
+| 平衡 | 机身横滚 | 机身俯仰 | 机身高度 | 机身偏航 | 同上 |
+
+输入源由 `INPUT_CONTROL_MODE` 编译期选择（0=CRSF, 1=PS2, 2=USB），
+无线电模式下可用 `!MODE crsf|ps2` 运行时切换。PS2 完整按键映射见 STATUS.md。
+
+## 结构
+
+```
+hexapod_robot/
+├── pico/        # RP2040 固件 (HAL 结构: Inc/Src)
+├── tools/       # 串口控制台 serial_console.py · IK 仿真 ik_gait_debug.py
+├── hardware/    # PCB 源工程/Gerber/BOM/机械 STEP (规范见 hardware/README.md)
+├── README.md
+└── STATUS.md    # 固件细节: GPIO/参数/步态/调试/电路保护
+```
 
 ## 状态
 
 > ⚠️ **项目仍在持续开发中，功能和接口可能随时变动。**
 
 ## License
-This project is licensed under the GNU General Public License v3.0 — see [LICENSE](LICENSE) for details.
+
+固件: GNU GPLv3（见 [LICENSE](LICENSE)）。硬件文件授权另行约定（见 [hardware/README.md](hardware/README.md)）。
