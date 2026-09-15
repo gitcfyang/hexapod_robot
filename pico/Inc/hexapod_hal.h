@@ -306,4 +306,11 @@ bool hal_is_calibration_active(void);
  */
 bool hal_is_period_calib_active(void);
 
+/**
+ * @brief 导出当前校准数据 (供非易失存储模块保存)
+ * @param offsets_out 输出 18 路舵盘偏移 (0.1°), ID = leg*3 + joint; 传 NULL 仅取掩码
+ * @return done_mask, bit i 置位表示第 i 个舵机已完成校准
+ */
+uint32_t hal_calib_export(int16_t offsets_out[18]);
+
 #endif /* HEXAPOD_HAL_H */

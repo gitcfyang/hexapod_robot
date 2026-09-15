@@ -13,6 +13,7 @@
 #include "hexapod_core.h"
 #include "hexapod_gait.h"
 #include "hexapod_crsf.h"
+#include "hexapod_store.h"
 #if PS2_ENABLED
 #include "hexapod_ps2.h"
 #endif
@@ -502,6 +503,17 @@ static void calib_dump(void)
     hal_debug_printf("\r\n");
 }
 
+/* 导出校准数据给非易失存储模块 (offset = best - 900) */
+uint32_t hal_calib_export(int16_t offsets_out[18])
+{
+    uint32_t mask = 0;
+    for (uint8_t i = 0; i < 18; i++) {
+        if (offsets_out) offsets_out[i] = (int16_t)(g_calib_best[i] - 900);
+        if (g_calib_done[i]) mask |= (1u << i);
+    }
+    return mask;
+}
+
 /* 退出校准模式 */
 static void calib_quit(void)
 {
@@ -874,6 +886,33 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
     /* ---- !IMU: IMU 状态 (欧拉角/中断/校准) ---- */
     if (buf[1] == 'I' && len >= 3 && buf[2] == 'M') {
         imu_status_print();
+        return true;
+    }
+
+    /* ---- 非易失存储命令 (!SAVE / !LOG / !LOGC) ----
+     * 位置: 校准拦截与 ctrl_state 判空之前 —— 校准模式内必须可用
+     * (!C 调完 → !SAVE 落盘是自然工作流, 且校准时机器人必然静止,
+     *  是整扇区擦除最安全的上下文)。 */
+    if ((buf[1] == 'S' || buf[1] == 's') && len >= 5 &&
+        buf[2] == 'A' && buf[3] == 'V' && buf[4] == 'E') {
+        bool safe = (!ctrl_state || !ctrl_state->robot_on ||
+                     hal_is_calibration_active() || hal_is_period_calib_active());
+        store_save_calib(safe);
+        return true;
+    }
+    if ((buf[1] == 'L' || buf[1] == 'l') && len >= 4 &&
+        buf[2] == 'O' && buf[3] == 'G') {
+        if (len >= 5 && (buf[4] == 'C' || buf[4] == 'c')) {
+            bool safe = (!ctrl_state || !ctrl_state->robot_on ||
+                         hal_is_calibration_active() || hal_is_period_calib_active());
+            if (safe) {
+                store_clear_log();
+            } else {
+                hal_debug_printf("[STORE] Refuse: robot is armed, disarm first (!S)\r\n");
+            }
+        } else {
+            store_dump_log();
+        }
         return true;
     }
 

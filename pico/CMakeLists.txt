@@ -46,6 +46,7 @@ add_executable(hexapod_pico
     Src/hexapod_crsf.c
     Src/hexapod_ps2.c
     Src/bno055.c
+    Src/hexapod_store.c
 )
 
 pico_set_program_name(hexapod_pico "hexapod_pico")
@@ -70,6 +71,7 @@ target_link_libraries(hexapod_pico
         hardware_sync       # save_and_disable_interrupts (I2C 临界区)
         hardware_watchdog   # 主循环硬件看门狗
         hardware_irq        # UART1 中断处理 (irq_set_exclusive_handler)
+        hardware_flash      # 非易失存储: flash_range_erase/program (hexapod_store.c)
 )
 
 # Add the standard include files to the build

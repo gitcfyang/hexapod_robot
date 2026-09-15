@@ -21,6 +21,8 @@
 #include "hexapod_config.h"
 #include "hexapod_crsf.h"
 #include "hexapod_i2c_protocol.h"
+#include "hexapod_hal.h"
+#include "hexapod_store.h"
 
 /* 全局机器人实例 */
 static hexapod_t g_robot;
@@ -132,6 +134,10 @@ int main(void)
     hal_debug_printf("Hexapod Robot - Raspberry Pi Pico\r\n");
     hal_debug_printf("=================================\r\n");
 
+    /* 非易失存储初始化: 扫描日志环头 + 记录 BOOT 事件
+     * (此阶段看门狗尚未启用, flash 写安全) */
+    store_init();
+
     /* ==================== 上电电池检测 (先于舵机供电) ====================
      *
      * 安全设计:
@@ -153,6 +159,7 @@ int main(void)
          * 可能原因: 误接 3S 电池 / 电源故障 / 分压电阻焊接错误 */
         hal_debug_printf("BATTERY OVERVOLTAGE (%u mV > %u mV)! Servo power DISABLED.\r\n",
                          boot_voltage, BATTERY_OVERVOLTAGE_MV);
+        store_log_event(STORE_EVT_BATT_OV, boot_voltage);
         hal_led_set(1, true);  /* 红色 LED 常亮 */
         uint16_t ov_alarm_notes[] = {1200, 0, 1200, 0, 1200};
         uint16_t ov_alarm_dur[]   = {200, 100, 200, 100, 400};
@@ -179,6 +186,7 @@ int main(void)
         /* 电压过低: 拒绝启动, 红色 LED 常亮 + 蜂鸣报警 */
         hal_debug_printf("BATTERY TOO LOW (%u mV < %u mV)! Servo power DISABLED.\r\n",
                          boot_voltage, BATTERY_CUTOFF_MV);
+        store_log_event(STORE_EVT_BATT_CUTOFF, boot_voltage);
         hal_led_set(1, true);  /* 红色 LED 常亮 */
         uint16_t alarm_notes[] = {200, 0, 200, 0, 200};
         uint16_t alarm_dur[]   = {200, 100, 200, 100, 400};
@@ -202,6 +210,7 @@ int main(void)
     } else if (boot_voltage < BATTERY_WARNING_MV) {
         /* 低压警告: 允许启动但红灯闪烁提醒 */
         hal_debug_printf("BATTERY LOW (%u mV)! Charge soon.\r\n", boot_voltage);
+        store_log_event(STORE_EVT_BATT_WARN, boot_voltage);
     }
 #else
     /* 电池检测已禁用 (BATTERY_CHECK_ENABLED=0): 跳过 ADC 读取 */
@@ -239,6 +248,16 @@ int main(void)
             sleep_ms(500);
         }
     }
+
+    /* 非易失校准: 加载并覆盖运行时配置
+     * (舵机供电未开, 此时写入 PWM 周期无实际输出, 时序安全) */
+    if (store_load()) {
+        store_apply_to_robot(&g_robot);
+        hal_debug_printf("[STORE] Calibration loaded from flash (offsets + periods)\r\n");
+    } else {
+        hal_debug_printf("[STORE] No valid calibration - using hexapod_config.h defaults\r\n");
+    }
+    store_flush_pending(true);
 
     /* 初始化完成 → 看门狗收紧到主循环超时 */
     watchdog_enable(1500, 1);
@@ -310,6 +329,12 @@ int main(void)
         if (now - last_update >= CONTROL_LOOP_PERIOD_MS) {
             hexapod_update(&g_robot);
             last_update = now;
+
+            /* 事件日志回写: 仅在安全上下文刷入 flash。行走中页编程关中断
+             * ~1-3ms 会导致 CRSF (420000 baud, 32B FIFO) 丢帧, 故仅缓冲。 */
+            store_flush_pending(!g_robot.state.robot_on ||
+                                hal_is_calibration_active() ||
+                                hal_is_period_calib_active());
 
 #if INPUT_CONTROL_MODE == 0
             /* 统计 CRSF 帧到达数 */
@@ -398,6 +423,7 @@ int main(void)
                     hal_servo_power_set_all(false);
                     hal_debug_printf("[BATT] OVERVOLTAGE %u mV! Servo power DISCONNECTED.\r\n",
                                      voltage);
+                    store_log_event(STORE_EVT_BATT_OV, voltage);
                     hal_led_set(1, true);  /* 红灯常亮 */
                     uint16_t ov_notes[] = {1200, 0, 1200, 0, 1200};
                     uint16_t ov_dur[]   = {150, 100, 150, 100, 300};
@@ -410,6 +436,7 @@ int main(void)
                     hal_servo_power_set_all(false);
                     hal_debug_printf("[BATT] CUTOFF %u mV! Servo power DISCONNECTED.\r\n",
                                      voltage);
+                    store_log_event(STORE_EVT_BATT_CUTOFF, voltage);
                     hal_led_set(1, true);  /* 红灯常亮 */
                     uint16_t alarm_notes[] = {200, 0, 200, 0, 200};
                     uint16_t alarm_dur[]   = {150, 100, 150, 100, 300};
@@ -428,6 +455,7 @@ int main(void)
                             hal_servo_power_set_all(true);
                             hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
                                              voltage);
+                            store_log_event(STORE_EVT_BATT_RECOVER, voltage);
                         } else {
                             hal_debug_printf("[BATT] Recovered %u mV. Power stays OFF (locked).\r\n",
                                              voltage);
@@ -446,6 +474,7 @@ int main(void)
                         hal_servo_power_set_all(true);
                         hal_debug_printf("[BATT] Recovered %u mV. Servo power restored.\r\n",
                                          voltage);
+                        store_log_event(STORE_EVT_BATT_RECOVER, voltage);
                     } else {
                         hal_debug_printf("[BATT] Recovered %u mV. Power stays OFF (locked).\r\n",
                                          voltage);
