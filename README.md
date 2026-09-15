@@ -9,6 +9,10 @@ BNO055 IMU 自动调平，支持 ELRS CRSF / PS2 手柄 / USB 三种输入。
 - 平衡模式（机身姿态直接控制）+ IMU 姿态补偿自动调平（可选）
 - CRSF / PS2 双驱动常编译，`!MODE` 运行时切换，无需焊接插拔
 - 电池保护（过压/低压/过放自动断舵机供电）、硬件看门狗、I2C 总线自恢复
+- 非易失存储：校准参数（18 路 horn_offset + PWM 周期）存 flash 掉电保持，
+  事件日志环形记录（BOOT/电池/校准），`!SAVE` / `!LOG` / `!LOGC`
+- TCP/IP 远程访问：串口控制台内置 TCP 桥接（多客户端广播 + 命令反向下发），
+  可 headless 运行，配 `tools/tcp_monitor.py` 远程操作
 - PCB 设计、Gerber、全项目 BOM、机械 STEP 全部开源（见 [hardware/](hardware/)）
 
 ## 快速开始
@@ -19,6 +23,8 @@ cd pico/build && make -j$(nproc)
 
 编译产物 `hexapod_pico.uf2` 拖入 Pico 的 USB 盘即烧录。
 调试控制台：`python3 tools/serial_console.py`（自动连接、断线重连）。
+远程访问：控制台默认同时开 TCP 桥接（`127.0.0.1:7100`），
+另开终端 `python3 tools/tcp_monitor.py` 即可远程收发命令（可多开）。
 
 ## 硬件概览
 
@@ -50,7 +56,8 @@ cd pico/build && make -j$(nproc)
 ```
 hexapod_robot/
 ├── pico/        # RP2040 固件 (HAL 结构: Inc/Src)
-├── tools/       # 串口控制台 serial_console.py · IK 仿真 ik_gait_debug.py
+├── tools/       # 串口控制台 serial_console.py (+ TCP 桥接) · IK 仿真 ik_gait_debug.py
+│              # tcp_monitor.py 远程客户端 · fake_robot.py/test_bridge.py 无硬件测试
 ├── hardware/    # PCB 设计/机械/BOM (见 hardware/README.md)
 ├── README.md
 └── STATUS.md    # 固件细节: GPIO/参数/步态/调试/电路保护

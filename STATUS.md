@@ -478,6 +478,84 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 校准: `!A` 看输出 → `!P<id> <angle>` 找最佳位置 → offset = 最佳 − IK输出
 - 位置: hexapod_config.h 每条腿的 `coxa/femur/tibia_horn_offset` 字段
 
+## 非易失存储 (flash 校准 + 事件日志) ★2026-09
+
+> 解决两个真实痛点: ① 校准值 (horn_offset / PWM 周期) 掉电即丢, 只能手抄回
+> hexapod_config.h 重新烧录; ② 电池保护/校准等事件无历史记录, 事后无法复盘。
+> 实现: `pico/Src/hexapod_store.c` + `pico/Inc/hexapod_store.h`
+
+### 扇区布局 (2MB flash 末尾两块)
+
+| 偏移 | 大小 | 用途 | 写入时机 |
+|---|---|---|---|
+| `0x1FE000` | 4KB | 校准记录 (56B, 整页写入) | 仅 `!SAVE` |
+| `0x1FF000` | 4KB | 事件日志环形 (512 条 × 8B) | 页编程追加; 仅 `!LOGC` 擦除 |
+
+固件 text ≈68KB, 末两扇区空闲; 两块物理独立, 日志写满不影响校准记录。
+
+```c
+/* 校准记录 56B, CRC32 覆盖全部前置字段 */
+typedef struct __attribute__((packed)) {
+    uint32_t magic;              /* 0x43584548 "HEXC" */
+    uint16_t version;            /* 1 — 版本不符即回退默认值 */
+    uint16_t reserved;
+    int16_t  horn_offsets[18];   /* 0.1°, ID = leg*3+joint */
+    uint32_t done_mask;          /* bit i = 第 i 路已校准 */
+    uint16_t pwm_period_us[2];   /* 板0/板1 (0x40/0x41) */
+    uint32_t crc32;
+} store_calib_record_t;
+
+/* 日志条目 8B: 32 条/页; type=0xFF 表示已擦除(无效) */
+typedef struct __attribute__((packed)) {
+    uint8_t type; uint8_t flags; uint16_t data; uint32_t t_ms;
+} store_log_entry_t;
+```
+
+事件类型: `BOOT` (data=看门狗复位原因) / `BATT_OV` / `BATT_CUTOFF` /
+`BATT_WARN` / `BATT_RECOVER` / `CALIB_SAVED` (data=已校准路数) / `LOG_CLEARED`
+
+### XIP 写安全 (单核 RP2040 的关键约束)
+
+`flash_range_erase/program` 期间 XIP 停摆 → 窗口内执行到的**任何**代码
+必须驻留 RAM, 否则取指挂死:
+
+- 全部写路径用 `__no_inline_not_in_flash_func` 包装 (erase / program / erase+program)
+- **`watchdog_update()` 是 flash 函数, 窗口内不可调用** → 直接写
+  `watchdog_hw->load = 10000000` (5000ms×1000×2, RP2040-E1 errata 系数)
+- CRC32 用位操作实现而**非查表**: 表在 `.rodata` (flash), 窗口内取指会挂死;
+  56B ≈ 0.4ms, 相对数百 ms 的擦除可忽略
+- 构建后用 `arm-none-eabi-nm` 确认 `store_flash_*` / `store_feed_*` 地址 ≥ `0x20000000`
+
+### 写策略: 行走中不碰 flash
+
+页编程关中断 1~3ms, 而 CRSF UART1 @420000 baud 的 32B FIFO 仅 762µs 即满
+→ 行走中写 flash 丢帧约 4 倍, 且不足以触发 200ms 断链自动停走。
+
+- `store_log_event()` 只入 16 条 RAM 环形缓冲 (满则丢最新, `s_dropped++`)
+- 主循环每轮调 `store_flush_pending(safe)`, 每轮最多刷 1 条 (限制单次阻塞)
+- `safe` = 未解锁 (`!robot_on`=false) 或校准模式中 (机器人静止);
+  `!SAVE` 与启动时强制刷
+- 断电最多丢当前会话 ≤16 条; BOOT/校准事件发生在安全上下文, 立即落盘
+
+### 启动行为
+
+1. banner 后 `store_init()`: 线性扫描定位环头 (首个 `type==0xFF`) → 写 `BOOT` 事件
+   (此时看门狗尚未启用, 写安全)
+2. `robot_init()` 后校验校准记录 (magic + version + CRC32): 通过 →
+   `store_apply_to_robot()` 覆盖默认 horn_offset 与 PWM 周期, 打印
+   `[STORE] Calibration loaded`; 失败 (空 flash / 断电写坏 / 版本不符) →
+   `[STORE] No valid calibration — using defaults`, 回退 `hexapod_config.h` 默认值
+3. `!SAVE` 写入后回读校验, 不符则重试一次; 仍败 → `[STORE] Save FAILED`
+
+### 安全护栏
+
+- `!SAVE` / `!LOGC` 在已解锁 (行走) 状态被拒绝, 提示先 `!S` 停走 —
+  `!LOGC` 的整扇区擦除耗时数百 ms, 行走中执行必然丢帧
+- 无校准数据 (`done_mask==0`) 时 `!SAVE` 拒绝
+- `!SAVE` **允许在校准模式内使用** — `!C` 调完直接落盘是自然工作流
+  (校准模式机器人必然静止, 属安全上下文)
+- 单记录设计: `!SAVE` 中途断电会同时损坏新旧值, 接受并文档化 (回退默认值)
+
 ## 调试工具
 - USB CDC 串口命令 (CRSF 模式下也可用), 完整列表:
 
@@ -504,6 +582,12 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 | `!PS2` | 打印 PS2 手柄原始状态 |
 | `!PS2DBG` | PS2 调试观察模式开关 (每秒打印通道值, 机器人不响应输入) |
 | `!MODE crsf\|ps2` | 输入源切换 |
+| `!SAVE` | 校准参数存 flash (掉电保持; 行走中拒绝, 需先 `!S`) |
+| `!LOG` | 打印 flash 事件日志 (BOOT/电池/校准) |
+| `!LOGC` | 清空事件日志 (行走中拒绝) |
+
+> ⚠️ `!SAVE` 与 `!S` (停止) 仅靠长度区分 — 固件按 `buf[1..4]` 精确匹配 "SAVE",
+> 故 `!S` 仍是停止、`!SAVE` 才是存盘。`!LOG` / `!LOGC` 同理 (LOGC 更长)。
 - **tools/serial_console.py**: USB 串口交互控制台 (2026-08 重写为手动行编辑器)
   - 半行输入不被串口数据打断 (固件消息到达时自动恢复正在输入的内容)
   - ↑↓ 命令历史, 退格, Ctrl+C 清行, Ctrl+D 退出, 超长命令截断 (15 字符)
@@ -513,6 +597,34 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
     设备出现即连接; 拔掉/复位/重新上电后**不退出**, 自动重连
   - ★ 先启动脚本再给机器人上电 → 捕获完整开机日志 (解决"开机时间窗口极短
     无法观察"问题); 未连接时输入的命令自动排队, 连接成功后立即发送
+  - ★ 2026-09 TCP/IP 桥接: 串口数据经 TCP 广播给多个客户端, 客户端命令反向下发
+    (`--port` 默认 7100, `--host` 默认 127.0.0.1, `--no-tcp` 可禁用)
+- **tools/tcp_monitor.py**: TCP 桥接客户端 — 打印机器人输出 + stdin 行透传
+  (`python3 tools/tcp_monitor.py [--host H] [--port 7100]`); 可多实例同时连接
+- **tools/fake_robot.py**: 无硬件测试用假机器人 (配 socat pty 对), 附
+  `!BURST <n>` 测试钩子
+- `tools/test_bridge.py`: TCP 桥接端到端回归测试 (socat pty 模拟串口, 18 项断言 —
+  双向转发 / 多客户端广播 / 慢客户端断开 / 串口重连恢复)
+
+### TCP 桥接的数据流与线程安全 ★2026-09
+
+```
+串口 fd ──读──> 主线程 ──bridge_publish()──> tcp_tx 队列 ──> TCP 线程 ──> 各客户端
+客户端  ──> TCP 线程 ──> tcp_rx 队列 ──自唤醒管道──> 主线程 ──send_line()──> 串口 fd
+```
+
+- ★ **串口 fd 只由主线程读写**; TCP 线程只碰套接字; 两者仅经线程安全队列通信
+- `_wake_r/_wake_w` 非阻塞自唤醒管道: TCP 线程收到命令后立即唤醒主 select
+  (否则命令要等最长 0.5s 的 select 超时才被处理)
+- `_clients_lock` 是**非递归**锁 → 发送与断开必须在锁外做:
+  持锁 `send()` 会挡住主线程的 `bridge_publish()`; 持锁调 `_drop_client()`
+  会自死锁 (它要重入取同一把锁)
+- 单客户端积压 > 64KB (应用层队列) 判定为慢消费者并断开; 其余客户端不受影响
+- 客户端命令复用 `send_line()` 语义 (同一套 15 字符截断/`!P` 前缀/排队);
+  串口断连期间的命令进 `tcp_pending` (上限 8, 丢最旧), 重连后刷出
+- **headless 运行**: stdin 非终端时自动跳过 termios 原始模式并完全不监听键盘
+  (否则 stdin 恒可读会把主循环拖成忙等), 控制通道只剩 TCP —
+  可在 N100 上做后台服务, 从另一台机器用 `tcp_monitor.py` 远程操作
 - tools/ik_gait_debug.py: Python 仿真可视化
 
 ## IMU 功能路线图 ★设计草案 (2026-08)
@@ -658,6 +770,10 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
 - [ ] 用 !PER 实测两块 PCA9685 的 PWM_PERIOD_US 并填入 hexapod_i2c_protocol.h
 - [ ] ADC 分压电路实测 (通过后 BATTERY_CHECK_ENABLED 改回 1)
+- [ ] ★ 非易失存储硬件冒烟 (固件已构建通过, 待实机验证):
+      `[STORE] Flash storage init` 启动行 → `!C` 调 2 路舵机 → `!SAVE` 见
+      `Saved OK` → **断电重启** → `[STORE] Calibration loaded` → `!A` 确认偏移生效
+      → `!LOG` 见 2×BOOT + CALIB_SAVED → `!LOGC` 清空 → 解锁后 `!SAVE` 应被拒
 - [ ] 查证事件 3 旧板: 损坏 FET 失效模式 (G-S 短=栅氧击穿; G-S 完好+D-S 短=热击穿/雪崩)
       + 大铜箔与电池负极的实际连接宽度
 - [ ] 接地实测验证 (先测后下结论):
