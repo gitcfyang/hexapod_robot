@@ -281,7 +281,6 @@
 #define TRAVEL_MAX_FORWARD_MM   150     /* 满杆步长 (mm)，约体长1/3 */
 #define TRAVEL_MAX_STRAFE_MM     110     /* 满杆平移步长 (mm) */
 #define TRAVEL_MAX_TURN_MM       70    /* 满杆旋转步长 (mm) */
-#define LIFT_SPEED_MM_PER_TICK   100      /* 升降速度 (mm/周期), 油门杆用 */
 #define LIFT_HEIGHT_MIN_MM      5      /* 最低抬腿高度 (mm) */
 #define LIFT_HEIGHT_MAX_MM      60     /* 最高抬腿高度 (mm) */
 
@@ -439,9 +438,10 @@
 
 /* ---- 休息状态足端 (舵机全0°, 底板贴地) ---- */
 /* 站立时足端在 coxa 下方的基准深度 (mm)。
- * 机身高度调节通过 body_pos.y 在此基础上偏移:
- *   init_pos_y = INIT_Y - body_pos.y
- * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±70mm)。 */
+ * 机身高度调节**不在此处**叠加; body_pos.y 由 IK 层施加:
+ *   init_pos_y = INIT_Y
+ *   ik.c: relative_pos.y = target_foot.y + body_pos.y
+ * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±90mm)。 */
 #define INIT_Y               50
 
 /* 足端在 coxa 基座坐标系中的站立位置
@@ -556,29 +556,14 @@
  *   右侧板 0x41 (ID 0~8): 从前至后 LED8~LED0
  *     RF: LED8,7,6  → RM: LED5,4,3    → RR: LED2,1,0
  */
+/* 仅 Coxa 需要具名 (被 !PER 校准的 6 路中位列表引用)。
+ * Femur / Tibia 的 ID 由 hal_get_servo_id() 按 leg*3+1 / leg*3+2 推出, 不另设宏。 */
 #define SERVO_RR_COXA       0     /* 右后 Coxa  */
-#define SERVO_RR_FEMUR      1     /* 右后 Femur */
-#define SERVO_RR_TIBIA      2     /* 右后 Tibia */
-
 #define SERVO_RM_COXA       3     /* 右中 Coxa  */
-#define SERVO_RM_FEMUR      4     /* 右中 Femur */
-#define SERVO_RM_TIBIA      5     /* 右中 Tibia */
-
 #define SERVO_RF_COXA       6     /* 右前 Coxa  */
-#define SERVO_RF_FEMUR      7     /* 右前 Femur */
-#define SERVO_RF_TIBIA      8     /* 右前 Tibia */
-
 #define SERVO_LR_COXA       9     /* 左后 Coxa  */
-#define SERVO_LR_FEMUR      10    /* 左后 Femur */
-#define SERVO_LR_TIBIA      11    /* 左后 Tibia */
-
 #define SERVO_LM_COXA       12    /* 左中 Coxa  */
-#define SERVO_LM_FEMUR      13    /* 左中 Femur */
-#define SERVO_LM_TIBIA      14    /* 左中 Tibia */
-
 #define SERVO_LF_COXA       15    /* 左前 Coxa  */
-#define SERVO_LF_FEMUR      16    /* 左前 Femur */
-#define SERVO_LF_TIBIA      17    /* 左前 Tibia */
 
 /* ==================== 配置数据结构 ==================== */
 

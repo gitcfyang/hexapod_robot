@@ -97,12 +97,12 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ```
 
 ## 关键参数 (hexapod_config.h)
-- 站立: INIT_Y=60mm (DEFAULT_INIT_Y=80 在 hexapod_core.h)
-- DEFAULT_INIT_Y=80mm, INIT_Y 是 config 级宏
+- 站立: INIT_Y=50mm (config 级宏, 直接赋给各腿 init_pos_y; core.c:269 target_foot.y = init_pos_y + gait_pos.y)
+- 机身高度不以 init_pos_y 表达, 而由 body_pos.y 在 IK 层叠加 (ik.c:248 relative_pos.y = target_foot.y + body_pos.y)
 - COXA_ANGLE: RR=1350, RM=900, RF=450 (左镜像)
 - FOOT_DX: RR=-113, RM=0, RF=113 (左镜像)
 - FOOT_DZ: RR=113, RM=160, RF=113 (左镜像)
-- 步长: TRAVEL_MAX_FORWARD=150mm, STRAFE=110mm, TURN=60mm
+- 步长: TRAVEL_MAX_FORWARD=150mm, STRAFE=110mm, TURN=70mm
 - 抬腿: LIFT_HEIGHT 5-60mm
 - 机身高度调节: BODY_HEIGHT_RANGE_MM=±90mm
 
@@ -115,7 +115,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 ## 控制链路
 ```
 正常模式:
-  CRSF CH1-8 → 两级死区 → 仿生连续变速 → 子步态插值(1200微步)
+  CRSF CH1-8 → 两级死区 → 仿生连续变速 → 子步态插值(每个步态步长细分为 100 子步)
   → [IMU body_rot_offset 取反叠加] → IK → servo batch → I²C (PCA9685) → 100Hz PWM
 
 平衡模式:
@@ -186,8 +186,9 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 用 PWM_PERIOD_US (每板实测周期) 直接计算脉宽计数值
 - 不依赖 PCA9685 振荡器精度
 - `pulse_to_count = pulse_us × 4096 / pwm_period_us`
-- 当前: 100Hz → PWM_PERIOD_US_BOARD0=8475 (0x40 左板), BOARD1=9434 (0x41 右板), 待 !PER 实测校准
-- 两块 PCA9685 使用独立的校准值，消除器件间振荡器差异
+- 当前: 100Hz → PWM_PERIOD_US_BOARD0=9500 (0x40 左板), BOARD1=9500 (0x41 右板), 已用 !PER 实测标定
+- 两块 PCA9685 的换算周期各自独立可设 (g_board_pwm_period_us[2])，用于补偿器件间振荡器差异；
+  实测两板标定值恰好相同 (均为 9500)，独立设置有备无患
 - I²C 写入失败检测 + 自动重试 + 连续 3 次失败自动总线恢复 (I2C spec 3.1.16)
 
 ### !PER 无示波器周期校准
@@ -205,8 +206,8 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
 - 控制循环: 100Hz (CONTROL_LOOP_PERIOD_MS=10ms)
 - PCA9685 PWM: 100Hz
 - IK 解算: 100Hz (原 50Hz)，每次更新每帧 PWM 都有新角度
-- I2C 批量写入: ~1.5ms/板，占空比 ~30% (200Hz 下 5ms 周期)
-- 第二块 PCA9685 接入后 I2C 占空比 ~60%，仍有 2ms IK 计算余量（200hz下）
+- I2C 批量写入: ~1.5ms/板，占空比 ~15% (100Hz 下 10ms 周期)
+- 第二块 PCA9685 接入后 I2C 占空比 ~30%，仍有 7ms 余量（100Hz 下）
 
 ## 输入控制模式
 - 编译期默认输入源: `INPUT_CONTROL_MODE` (hexapod_config.h)
@@ -290,7 +291,7 @@ S_f = ±(acos((Lf²+a²-Lt²)/(2·Lf·a)) - atan4(y,d) - FEMUR_ZERO) + horn
   "Boot OK. Servo power OFF — waiting for ARM switch.")
 - 根因: `PCA9685_I2C_TIMEOUT_US` 宏早已定义 (5000µs) 但**从未接入任何 I2C 调用**
 - 修复: 全部 I2C 阻塞调用改为 `_until` 变体 + 5ms 超时
-  (hexapod_i2c_protocol.c 7 处 / bno055.c 3 处 / hexapod_hal_pico.c 3 处)
+  (hexapod_i2c_protocol.c 7 处 / bno055.c 5 处 / hexapod_hal_pico.c 3 处)
 - 加固 (hexapod_pico.c):
   - 启动提示音提前到 robot_init 之前 — 有声=电源/蜂鸣器正常;
     间隔重复提示音 = 初始化反复挂起 (看门狗复位循环)
@@ -621,7 +622,7 @@ typedef struct __attribute__((packed)) {
   会自死锁 (它要重入取同一把锁)
 - 单客户端积压 > 64KB (应用层队列) 判定为慢消费者并断开; 其余客户端不受影响
 - 客户端命令复用 `send_line()` 语义 (同一套 15 字符截断/`!P` 前缀/排队);
-  串口断连期间的命令进 `tcp_pending` (上限 8, 丢最旧), 重连后刷出
+  串口断连期间的命令存入 `state["pending"]` (单值, 只保留最新一条, 更早的直接丢弃), 重连后刷出
 - **headless 运行**: stdin 非终端时自动跳过 termios 原始模式并完全不监听键盘
   (否则 stdin 恒可读会把主循环拖成忙等), 控制通道只剩 TCP —
   可在 N100 上做后台服务, 从另一台机器用 `tcp_monitor.py` 远程操作
@@ -766,9 +767,9 @@ typedef struct __attribute__((packed)) {
 - 腿部走线: 足端开关线缆随腿运动 → 硅胶线 + 应力释放
 
 ## 待完善
-- [ ] 用 !C 实测每条腿的 horn_offset
+- [x] 用 !C 实测每条腿的 horn_offset (已完成: 18 路标定值固化在 hexapod_config.h 各腿 *_horn_offset)
 - [ ] 用 !W 实测舵机机械极限, 收紧 SERVO_xxx_MIN/MAX
-- [ ] 用 !PER 实测两块 PCA9685 的 PWM_PERIOD_US 并填入 hexapod_i2c_protocol.h
+- [x] 用 !PER 实测两块 PCA9685 的 PWM_PERIOD_US 并填入 hexapod_i2c_protocol.h (已完成: 9500/9500)
 - [ ] ADC 分压电路实测 (通过后 BATTERY_CHECK_ENABLED 改回 1)
 - [ ] ★ 非易失存储硬件冒烟 (固件已构建通过, 待实机验证):
       `[STORE] Flash storage init` 启动行 → `!C` 调 2 路舵机 → `!SAVE` 见

@@ -580,18 +580,3 @@ void hexapod_apply_stance(hexapod_t *robot)
     }
 }
 
-/**
- * @brief 调整到机身高度
- *        将腿部初始位置Y设置为目标高度
- *        公式：init_pos_y = DEFAULT_INIT_Y - body_pos.y（身体抬升则腿需向下伸展）
- */
-void hexapod_adjust_to_body_height(hexapod_t *robot)
-{
-    if (!robot) return;
-    
-    /* 根据机身高度调整所有腿的Y坐标
-     * body_pos.y 正值 = 抬升机身，腿需要向下伸展（init_pos_y 减小/变负） */
-    for (int i = 0; i < CNT_LEGS; i++) {
-        robot->leg_configs[i].init_pos_y = DEFAULT_INIT_Y - robot->state.body_pos.y;
-    }
-}

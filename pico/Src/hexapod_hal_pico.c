@@ -203,9 +203,9 @@ uint8_t hal_get_servo_id(leg_index_t leg_index, uint8_t joint)
 {
     if (leg_index >= CNT_LEGS || joint >= 3) return 0;
     
-    /* 舵机ID布局：
-     *   0~2: RR, 3~5: RM, 6~8: RF  -> PCA9685 #1 (0x40)
-     *   9~11: LR, 12~14: LM, 15~17: LF -> PCA9685 #2 (0x41)
+    /* 舵机ID布局 (ID = leg*3 + joint; joint: 0=coxa 1=femur 2=tibia)：
+     *   0~8:   RR/RM/RF (右半身) -> 板 0x41 (ADDR=VCC)
+     *   9~17:  LR/LM/LF (左半身) -> 板 0x40 (ADDR=GND)
      */
     return leg_index * 3 + joint;
 }
