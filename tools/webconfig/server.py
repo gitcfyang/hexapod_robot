@@ -170,6 +170,19 @@ RE_RC = re.compile(r"^\[RC\] (locked|unlocked)$")
 # 约定是 0 = 舵机中位 1500µs, 偏移即"该舵机停在中位时 IK 该输出的角度"。
 RE_HO = re.compile(r"^\[HO\] id=(\d+) off=(-?\d+)$")
 
+# 端口状态 (固件 hal_pico.c: ports_status_print / !PORTS) —— 网页「端口」页:
+#   [PORTS] uart0: en=0 baud=115200
+#   [PORTS] input: mode=0 baud=420000
+#   [PORTS] motors: en=1 lv1=0 lv2=0
+#   [PORTS] foot: en=1 s0=1 s1=1 s2=1 s3=1 s4=1 s5=1
+#   [PORTS] ext: mode=0 a0=0 a1=0
+#   [PORTS] gpio: g23fn=0 g23lv=0 g24fn=0 g24lv=0 g29fn=0 g29lv=1
+#   [PORTS] fixed: spwl=0 spwr=0 ledr=0 ledg=1 boot=1
+# 与 RE_PER 同理: 节名走白名单 (节名对不上整行丢掉, 页面上少一行而无报错),
+# 值里带 g23fn 这种"编号+字段名"的键, 所以不能按 <字母><数字>= 去切。
+RE_PORTS = re.compile(
+    r"^\[PORTS\] (uart0|input|motors|foot|ext|gpio|fixed): (.*)$")
+
 
 class Telemetry:
     """各子系统的最新状态。每次解析更新后整体推给前端 (前端只渲染最后一份)。"""
@@ -187,6 +200,7 @@ class Telemetry:
             "ver": {},
             "rc": {},          # 遥控门: {"locked": bool}
             "ho": {},          # 舵盘偏移: {"offs": {id: 0.1°}}
+            "ports": {},       # 端口: 每节一个键 (uart0/input/motors/foot/ext/gpio/fixed)
             "run": {},         # 供电/运行: {"on": bool, x/y/z/gait/lift (仅 [RUN] 行带)}
         }
 
@@ -428,6 +442,17 @@ def parse_line(telem, line):
             offs[int(m.group(1))] = int(m.group(2))
             snap = {"offs": dict(offs)}
         return "ho", snap
+
+    # 端口状态: 同样是每节独立合并 (7 行一条一条地到, 分节存才不至于渲染半张表)
+    m = RE_PORTS.match(line)
+    if m:
+        fields = {}
+        for k, v in RE_PARAM_KV.findall(m.group(2)):
+            try:
+                fields[k] = int(v)
+            except ValueError:
+                fields[k] = v
+        return "ports", telem.update("ports", {m.group(1): fields})
 
     m = RE_U0TX.match(line)
     if m:
@@ -976,7 +1001,8 @@ def handle_param(body):
 
 # ==================== 轮询 ====================
 
-def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0, rc_iv=2.0):
+def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0, rc_iv=2.0,
+                  ports_iv=2.0):
     """
     定时下发只读命令喂仪表盘。仅在"有浏览器 + 已连接 + 未暂停 + 桥接在线"时发,
     其余时候完全不打扰串口 (否则会污染同时在用的串口终端)。
@@ -992,6 +1018,7 @@ def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0, rc_iv=2.0):
     "调试页还开着"的续租 —— 停了它, 固件 6 秒后就把遥控器放进来。
     """
     next_batt = next_imu = next_servo = next_i2c = next_periph = next_rc = 0.0
+    next_ports = 0.0
     while True:
         time.sleep(0.1)
         with _subs_lock:
@@ -1022,6 +1049,11 @@ def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0, rc_iv=2.0):
         if periph_iv > 0 and now >= next_periph:
             BRIDGE.send("!PERIPH")
             next_periph = now + periph_iv
+        # 端口状态同理。这一页要看的是"引脚此刻的电平" (足端开关/空闲脚),
+        # 但 2s 一跳已经够用: 再密就白占固件的 20ms 控制循环 (7 行输出)
+        if ports_iv > 0 and now >= next_ports:
+            BRIDGE.send("!PORTS")
+            next_ports = now + ports_iv
 
 
 # ==================== 入口 ====================
@@ -1047,12 +1079,15 @@ def main():
                     help="!PERIPH (外设状态) 轮询间隔秒 (0=关)")
     ap.add_argument("--rc-interval", type=float, default=2.0,
                     help="遥控门心跳间隔秒 (!RC 0; 固件 6s 收不到就自解锁, 0=关)")
+    ap.add_argument("--ports-interval", type=float, default=2.0,
+                    help="!PORTS (端口状态: 引脚归属与电平) 轮询间隔秒 (0=关)")
     ap.add_argument("--no-poll", action="store_true", help="完全禁用自动轮询")
     args = ap.parse_args()
 
     if args.no_poll:
         args.batt_interval = args.imu_interval = args.servo_interval = 0
         args.i2c_interval = args.periph_interval = args.rc_interval = 0
+        args.ports_interval = 0
 
     def on_line(line):
         _stats["lines"] += 1
@@ -1069,7 +1104,8 @@ def main():
         # 面板是给"没人认领"的行用的。参数行一次 !CFG 就是几十行; [CH] 是 5Hz
         # 推送; !PERIPH 每 2s 6 行; rc 心跳每 ~2s 一条 —— 都会把日志冲掉。
         # (FAIL/WARN 提示行解析不出来, 仍然照常进日志)
-        if not (parsed and parsed[0] in ("params", "per", "ch", "rc", "run", "ho")):
+        if not (parsed and parsed[0] in ("params", "per", "ch", "rc", "run", "ho",
+                                         "ports")):
             broadcast({"t": "raw", "line": line})
         if parsed:
             key, snap = parsed
@@ -1102,7 +1138,7 @@ def main():
     threading.Thread(target=poller_thread, daemon=True, name="poller",
                      args=(args.batt_interval, args.imu_interval, args.servo_interval,
                            args.i2c_interval, args.periph_interval,
-                           args.rc_interval)
+                           args.rc_interval, args.ports_interval)
                      ).start()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)

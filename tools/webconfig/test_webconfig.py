@@ -13,6 +13,7 @@
 用法: python3 tools/webconfig/test_webconfig.py
 """
 
+import html
 import json
 import os
 import re
@@ -29,6 +30,10 @@ ROOT = os.path.dirname(TOOLS)
 sys.path.insert(0, HERE)
 
 import server as wc                                     # noqa: E402
+
+# 端口行正则: 差分检查 (把固件+server 回退成旧版) 时 server 上还没有这个属性,
+# 按"一行都不认"处理, 让断言红而不是 AttributeError 把整段跑挂
+RE_PORTS = getattr(wc, "RE_PORTS", re.compile(r"(?!x)x"))
 
 PTY_A, PTY_B = "/tmp/wc_fakerobot", "/tmp/wc_robotport"
 BRIDGE_PORT, HTTP_PORT = 7199, 8099
@@ -151,6 +156,19 @@ S_PER = [
     "[PER] pwm: 0=0 1=1500 2=0 3=5000 4=0 5=0 6=0 7=0 8=0 9=0 10=0 11=0 12=0 13=0",
     "[PER] pwmperiod: l=9500 r=9500",
 ]
+# 端口状态 (hexapod_hal_pico.c: ports_status_print / !PORTS) —— 一行一节,
+# 节名是 server.py 的白名单契约。轮询线程每 2 秒问一次。逐字取自固件格式:
+# 足端报的是引脚原始电平 (低=触地), input 的波特率是 uart_init 返回的实际值。
+S_PORTS = [
+    "[PORTS] uart0: en=1 baud=115200",
+    "[PORTS] input: mode=0 baud=420000",
+    "[PORTS] motors: en=1 lv1=0 lv2=1",
+    "[PORTS] foot: en=1 s0=1 s1=0 s2=1 s3=1 s4=1 s5=1",
+    "[PORTS] ext: mode=0 a0=0 a1=0",
+    "[PORTS] gpio: g23fn=1 g23lv=1 g24fn=0 g24lv=0 g29fn=0 g29lv=1",
+    "[PORTS] fixed: spwl=1 spwr=1 ledr=0 ledg=1 boot=1",
+]
+
 # 舵盘机械中心偏移 (固件 hal_pico.c: calib_horn_print_all / calib_horn_record)。
 # 18 行逐字取自固件格式; 值是 config.h 里各腿的默认偏移。
 S_HO = [f"[HO] id={i} off={v}" for i, v in enumerate(
@@ -234,7 +252,7 @@ RE_SAVE_ACK = re.compile(r"if \(/\\\[STORE\\\] ([^/]+)/\.test\(ev\.line\)\)")
 # 网页的分页表 (index.html 的 PAGES) 必须覆盖固件里出现的每一个分组,
 # 否则那组参数在网页上无处可去 —— 加参数时忘了配页面就会静默丢一个组。
 WEB_GROUPS = {"batt", "motion", "stance", "geo", "tune", "dir", "imu", "chan", "per",
-              "sys", "modes"}
+              "sys", "modes", "port"}
 
 
 def test_firmware_contract():
@@ -390,6 +408,69 @@ def test_firmware_contract():
           "`!P ${CAL.sel} ${v}`" in html)
     check("页码缓存 ho 帧并挂到 SSE 分发上",
           'case "ho": renderHo(ev.d); break;' in html)
+    # !A 报的是角度而不是脉宽 (同样是 0=中位那套单位, 与 !P/!HO 一致)。改成
+    # .pulses 会让校准页的滑条整体差 1500, 被自己的 min/max 夹成恒 ±900 ——
+    # [5] 的探针会真喂一帧抓这个 (那边是行为检查, 这里是格式约定)
+    check("!A 报的是角度 (与 !P 同一套单位), 不是脉宽",
+          "g_servo_batch.angles[i]" in hal)
+
+    # 端口页 (!PORTS / !GPO 与 port 组的六个参数)。这批的坑全在"静默"上:
+    #   ① 分发顺序 —— !PORTS 若落到 switch 里, case 'P' 会把它读成 "!P<id>
+    #      <angle>", 舵机 0 真的会转到中位; !GPO 落到 case 'G' 则一声不吭。
+    #      两者的判据只有"拦在 switch 之前", 静态可查;
+    #   ② 关掉的外设必须拒绝, 不能静默记账 —— !MOTOR 会回显一个没发生的占空比;
+    #   ③ 六个参数挂在 PARAM_HIDE 里, 页面若拼错名字, 参数就从页面上凭空消失。
+    check("server 与固件对 [PORTS] 行的格式约定一致",
+          '"[PORTS] uart0: en=%ld baud=%ld' in hal
+          and getattr(wc, "RE_PORTS", None) is not None
+          and all(wc.RE_PORTS.match(l) is not None for l in S_PORTS))
+    # find 而不是 index: 差分检查时旧固件里没有这两段, 要的是"红"不是 ValueError
+    i_ports = hal.find("if (buf[1] == 'P' && len >= 6 &&")
+    i_gpo = hal.find("if (buf[1] == 'G' && len >= 4 &&")
+    check("!PORTS 拦在 switch 之前 (case 'P' 会让舵机 0 真转到中位)",
+          -1 < i_ports < hal.index("case 'P':") and "ports_status_print();" in hal)
+    check("!GPO 拦在 switch 之前 (case 'G' 会静默吞掉整条命令)",
+          -1 < i_gpo < hal.index("case 'G':") and "cmd_gpo(buf, len);" in hal)
+    check("!GPO 只认三个空闲脚, 且输入态拒绝写电平",
+          "free_gpio_index(pin)" in hal and "g_free_gpio_pins[3] = {23, 24, 29}" in hal
+          and "[PORTS] GPO Refuse: gp%ld fn=%ld (need 1=output)" in hal)
+    check("电机被收回 (dc_motor_en=0) 时 !MOTOR 明确拒绝, 不静默记账",
+          "[PORTS] motors: disabled (dc_motor_en=0)" in hal
+          and "if (!DC_MOTOR_ENABLED) return;" in hal)
+    check("足端检测关掉时读 API 一律报未触地 (不把上拉当触地)",
+          hal.count("if (!FOOT_SW_ENABLED)") >= 2)
+    check("端口功能由快照-应用驱动 (改完即时生效, 无需重启)",
+          "static int32_t s_dc_motor  = -1;" in hal
+          and "static int32_t s_foot_sw   = -1;" in hal
+          and "static int32_t s_gp_fn[3]  = {-1, -1, -1};" in hal)
+    check("串口输入的波特率可运行期生效 (真机 CRSF 不受影响)",
+          "static void input_uart_serial_setup(void)" in hal
+          and "!g_crsf_mode && INPUT_BAUD_SERIAL != s_serial_baud" in hal)
+    check("端口页上报的是实际生效的 UART1 波特率, 不是参数值",
+          "s_input_baud_actual = uart_init(" in hal
+          # 取定义那一份 (前面还有前置声明与分发点两处同名)
+          and "s_input_baud_actual" in hal[hal.rindex("void ports_status_print(void)"):])
+    # 六个 port 参数必须真的在固件表里 (缺一个 = 页面上那个下拉永远下发失败)。
+    # [2] 段已校验名字长度/字符集, 这里只管"是不是 port 组的、是不是六个都全"。
+    port_rows = [n for n, _, g in rows if g == "port"]
+    check("固件表里有 port 组的六个参数",
+          set(port_rows) == {"dc_motor_en", "foot_sw_en", "gp23_fn", "gp24_fn",
+                             "gp29_fn", "input_baud_serial"},
+          str(sorted(port_rows)))
+    # PARAM_HIDE 把它们的通用滑条摘掉了, 所以页面必须在别处引用每个名字 ——
+    # 名字拼错时下拉不认它, 参数就整个从页面上消失, 且不报任何错
+    hide_blk = re.search(r"const PARAM_HIDE = new Set\(\[.*?\]\);", html, re.S)
+    rest = html.replace(hide_blk.group(0), "") if hide_blk else html
+    missing = [n for n in port_rows if f'"{n}"' not in rest]
+    check("六个 port 参数都挂进了端口页的下拉 (PARAM_HIDE 之外有引用)",
+          not missing, "无引用: " + ", ".join(missing))
+    check("网页有端口页 (tab + PAGES + SSE 分发 + 初始化)",
+          'data-tab="ports"' in html and 'id: "ports"' in html
+          and 'case "ports": renderPorts(ev.d); break;' in html
+          and "initPortsPage();" in html and "renderPortsConfig();" in html)
+    check("空闲脚的电平走即时命令 !GPO, 不走参数 (电平本来就不是能存的状态)",
+          "`!GPO ${r.pin} ${e.target.checked ? 1 : 0}`" in html
+          and 'id="pt-stale"' in html)
 
 
 # ==================== [3] 端到端 ====================
@@ -408,7 +489,32 @@ FAKE_PARAMS = {
     "combo_arm":     [515,  0,    2047, 515,  "",   "modes"],
     # 几何页的一个普通滑条参数 (带单位, 只为覆盖页面生成)
     "leg_coxa_mm":   [45,   20,   80,   45,   "mm", "geo"],
+    # 端口页的六个 (port 组): 页面上是下拉框, 走同一套 参数帧 / set 通道 ——
+    # PARAM_HIDE 把它们从通用滑条里摘掉, 但值仍在参数表里, 保存/恢复默认照常
+    "dc_motor_en":   [1,    0,    1,    1,    "",   "port"],
+    "foot_sw_en":    [1,    0,    1,    1,    "",   "port"],
+    "gp23_fn":       [1,    0,    1,    0,    "",   "port"],
+    "gp24_fn":       [0,    0,    1,    0,    "",   "port"],
+    "gp29_fn":       [0,    0,    1,    0,    "",   "port"],
+    "input_baud_serial": [115200, 2400, 1000000, 115200, "baud", "port"],
+    # 外设页那一组里与端口页共用显示的两个 (端口页只换了个控件的样子)
+    "uart0_en":      [1,    0,    1,    1,    "",   "per"],
+    "uart0_baud":    [115200, 2400, 1000000, 115200, "baud", "per"],
 }
+
+# 假固件的空闲脚电平 (真固件里在 SIO 的输出寄存器上): !GPO 写它, !PORTS 报它。
+# 归属 (gpXX_fn) 是参数, 留在 FAKE_PARAMS 里 —— 与真固件一样, "这脚是谁的"与
+# "这脚现在什么电平"是两回事。
+FAKE_PORTS = {"g23lv": 1, "g24lv": 0, "g29lv": 1}
+
+
+def gpio_line():
+    """按 ports_print_gpio() 的格式生成 gpio 行 (归属取参数, 电平取 FAKE_PORTS)"""
+    out = ["[PORTS] gpio:"]
+    for pin in (23, 24, 29):
+        out.append(f"g{pin}fn={FAKE_PARAMS[f'gp{pin}_fn'][0]}")
+        out.append(f"g{pin}lv={FAKE_PORTS[f'g{pin}lv']}")
+    return " ".join(out)
 
 
 def param_line(name):
@@ -591,6 +697,39 @@ def test_parser():
     check("外设: 单节更新不动其他节",
           per2["motors"] == {"m1": 0, "m2": 0} and per2["uart0"]["baud"] == 115200,
           str(sorted(per2)))
+
+    # 端口状态: 一次 !PORTS 是 7 行, 每行一节 (与外设页同一套分节合并)
+    t = wc.Telemetry()
+    kinds = [wc.parse_line(t, l) for l in S_PORTS]
+    check("端口: 7 行各成一节", [k[0] if k else None for k in kinds] == ["ports"] * 7)
+    # 缺 "ports" 键时按空表处理 —— 让上面那条 FAIL 说明问题, 而不是 KeyError
+    # 把整段测试打断 (差分检查时后面的契约段就再也跑不到了)
+    pt = t.snapshot().get("ports", {})
+    check("端口: UART0 使能与波特率",
+          pt.get("uart0") == {"en": 1, "baud": 115200}, str(pt.get("uart0")))
+    check("端口: 输入模式与实际生效波特率",
+          pt.get("input") == {"mode": 0, "baud": 420000}, str(pt.get("input")))
+    check("端口: 电机使能与两路电平",
+          pt.get("motors") == {"en": 1, "lv1": 0, "lv2": 1}, str(pt.get("motors")))
+    # 六路足端开关: 保持原始电平 (低=触地), 不下任何"触地"判定 ——
+    # 极性是硬件接法, 固件这一页只报引脚真相
+    check("端口: 六路足端电平逐路",
+          pt.get("foot") == {"en": 1, "s0": 1, "s1": 0, "s2": 1, "s3": 1, "s4": 1, "s5": 1},
+          str(pt.get("foot")))
+    check("端口: 外部排针模式与 ADC 读数",
+          pt.get("ext") == {"mode": 0, "a0": 0, "a1": 0}, str(pt.get("ext")))
+    check("端口: 三路空闲脚的用途与电平成对出现",
+          pt.get("gpio") == {"g23fn": 1, "g23lv": 1, "g24fn": 0, "g24lv": 0,
+                             "g29fn": 0, "g29lv": 1}, str(pt.get("gpio")))
+    check("端口: 固定脚只报有电平意义的几个",
+          pt.get("fixed") == {"spwl": 1, "spwr": 1, "ledr": 0, "ledg": 1, "boot": 1},
+          str(pt.get("fixed")))
+    # 分节合并: !GPO 之后固件只重打 gpio 一行, 另外六节必须还在
+    wc.parse_line(t, "[PORTS] gpio: g23fn=1 g23lv=0 g24fn=0 g24lv=0 g29fn=0 g29lv=1")
+    pt2 = t.snapshot().get("ports", {})
+    check("端口: 单节更新不动其他节 (GPO 只回 gpio 行)",
+          pt2.get("gpio", {}).get("g23lv") == 0
+          and pt2.get("uart0", {}).get("baud") == 115200, str(sorted(pt2)))
 
     # 舵盘偏移: 18 行累积成 {id: 偏移}, 单路回执与全量同一格式
     t = wc.Telemetry()
@@ -790,6 +929,24 @@ def fake_response(cmd):
     if cmd.startswith("!HO "):          # 设中心: 回显 "偏移 = 该角度" (0=中位约定)
         sid, _, ang = cmd[4:].partition(" ")
         return [f"[HO] id={int(sid)} off={int(ang)}"]
+    if cmd.startswith("!GPO "):         # 空闲脚电平: 输入态拒绝, 输出态回打 gpio 行
+        pin, _, lv = cmd[5:].partition(" ")
+        if f"gp{pin}_fn" not in FAKE_PARAMS:
+            return ["[PORTS] Usage: !GPO <23|24|29> <0|1>"]
+        fn = FAKE_PARAMS[f"gp{pin}_fn"][0]
+        if fn != 1:                     # 与固件同一道门: 输入脚不给写电平
+            return [f"[PORTS] GPO Refuse: gp{pin} fn={fn} (need 1=output)"]
+        FAKE_PORTS[f"g{pin}lv"] = int(lv)
+        return [gpio_line()]            # 立刻回打 gpio 行, 与固件一致
+    if cmd == "!PORTS":                 # 端口状态: uart0 与 gpio 两节反映"当前"
+        return [f"[PORTS] uart0: en={FAKE_PARAMS['uart0_en'][0]}"
+                f" baud={FAKE_PARAMS['uart0_baud'][0]}",
+                "[PORTS] input: mode=0 baud=420000",
+                "[PORTS] motors: en=1 lv1=0 lv2=1",
+                "[PORTS] foot: en=1 s0=1 s1=0 s2=1 s3=1 s4=1 s5=1",
+                "[PORTS] ext: mode=0 a0=0 a1=0",
+                gpio_line(),
+                "[PORTS] fixed: spwl=1 spwr=1 ledr=0 ledg=1 boot=1"]
     # 两个"有状态"的命令: 应答取决于之前收到过什么, 否则"锁没锁上/供没供电"
     # 在测试里看不出区别 (回放假固件只做回声时最容易漏掉的一类)
     if cmd == "!RC" or cmd.startswith("!RC "):      # 无参 = 锁, 有参 = 按参数
@@ -1118,6 +1275,88 @@ GATE_POLL_IV = 0.5
 CHROME = next((p for p in (shutil.which(n) for n in
                            ("google-chrome", "chromium", "chromium-browser")) if p), None)
 
+# 「脚本跑到底」只证明顶层那一遍没抛异常: 页面里吃 SSE 帧的渲染函数 (renderPorts/
+# renderPortsConfig/renderHo…) 在 file:// 下一次也不会被调到, 它们内部抛异常照样
+# PASS (端口页那批全是新增函数, 正是最容易漏的一类)。所以再复制一份页面, 在末尾
+# 追加一段探针: 直接喂合成帧, 把算出来的东西写进 DOM, dump 出来一比对就知道
+# "这些函数真跑过、且结果是对的"。探针自己 try/catch, 抛了就写 THROW 进 DOM。
+PORTS_FRAME = {
+    "uart0": {"en": 1, "baud": 115200},
+    "input": {"mode": 0, "baud": 420000},
+    "motors": {"en": 1, "lv1": 0, "lv2": 1},
+    "foot": {"en": 1, "s0": 1, "s1": 0, "s2": 1, "s3": 1, "s4": 1, "s5": 1},
+    "ext": {"mode": 0, "a0": 7, "a1": 8},
+    "gpio": {"g23fn": 1, "g23lv": 1, "g24fn": 0, "g24lv": 0, "g29fn": 0, "g29lv": 1},
+    "fixed": {"spwl": 1, "spwr": 1, "ledr": 0, "ledg": 1, "boot": 1},
+}
+
+
+def _port_param(name, val, lo, hi, dfn, unit="", grp="port"):
+    """合成一个参数对象 (字段与固件 params_print_one 一一对应)"""
+    return {"name": name, "val": val, "min": lo, "max": hi, "def": dfn,
+            "unit": unit, "grp": grp, "chg": int(val != dfn)}
+
+
+# dc_motor_en=0 (帧里 gpio 的 g23fn=1 相反) → 下拉必须回填到「GPIO 输入」;
+# gp23_fn=0 → 电平复选框必须是灰的 (输出态才给点); input_baud_serial 取一个
+# 不在下拉候选里的值, 顺带验证"选项外临时插一条"的兜底。
+PROBE_PARAMS = {"list": {
+    "dc_motor_en": _port_param("dc_motor_en", 0, 0, 1, 1),
+    "gp23_fn": _port_param("gp23_fn", 0, 0, 1, 0),
+    "input_baud_serial": _port_param("input_baud_serial", 74880, 2400, 1000000,
+                                     115200, "baud"),
+    "uart0_en": _port_param("uart0_en", 1, 0, 1, 1, "", "per"),
+}}
+
+# 舵机帧与偏移帧 (校准页的三段接线: !A 建格子 → !HOS 填偏移 → 选中一路看面板)。
+# ⚠️ !A 报的是 g_servo_batch.angles[i] —— 与 !P 同一套角度单位 (0=中位 1500µs,
+# ±900=±90°), 不是脉宽。校准面板的滑条就是这套单位, 两边必须一致: 差一个 1500
+# 的偏置会让滑条被自己的 min/max 夹住 (看着像"角度恒为 ±900", 不会报任何错)。
+# 喂第 3 路 -120 是想同时钉住"面板显示的是这一路的角度"而不是碰巧的默认值。
+PROBE_SERVO = {"boards": {"0": {"angles": {str(i): i * 20 - 180 for i in range(18)}}}}
+PROBE_HO = {"offs": {str(i): v for i, v in
+                     enumerate([-10, 55, 8, 12, 85, 68, 0, 40, 30,
+                                -25, 60, 70, 15, 35, 45, 5, 20, 25])}}
+
+PROBE_JS = """
+<div id="probe"></div>
+<script>
+try {
+  renderPorts(""" + json.dumps(PORTS_FRAME) + """);
+  renderParams(""" + json.dumps(PROBE_PARAMS) + """);
+  renderServo(""" + json.dumps(PROBE_SERVO) + """);
+  renderHo(""" + json.dumps(PROBE_HO) + """);
+  selectCalServo(3);
+  var out = {
+    rows: document.querySelectorAll("#pt-rows .ptrow").length,
+    uart0: $("pts-uart0").textContent,
+    dcm: $("pt-sel-motors").value,          /* 行 key 是 motors, 参数名才是 dc_motor_en */
+    g23dis: $("pt-cfgl-gp23").disabled,     /* gp23_fn=0 (输入) → 复选框必须是灰的 */
+    g23: $("pts-gp23").textContent,
+    g24: $("pts-gp24").textContent,
+    foot: $("pts-foot").textContent,
+    inb: $("pt-cfgs-input").value,
+    fixed1: $("ptf-1").textContent,
+    fixed2: $("ptf-2").textContent,
+    calCells: document.querySelectorAll("#cal-servos .servo").length,
+    calOff3: document.querySelector("#calsv3 .off").textContent,
+    calSel: $("cal-sel").textContent,
+    calOffBox: $("cal-off").textContent,
+    calAng: $("cal-ang").value,
+    calHidden: $("cal-edit").hidden,
+  };
+  /* 第二拍: 把 gp23_fn 换成「输出」再喂一帧低电平 —— 复选框要跟着引脚的实测
+   * 电平走 (勾选状态是"这一脚现在什么电平", 不是"这次会话里我点过什么") */
+  renderParams({list: {"gp23_fn": """ + json.dumps(_port_param("gp23_fn", 1, 0, 1, 0)) + """}});
+  renderPorts({gpio: {"g23fn": 1, "g23lv": 0, "g24fn": 0, "g24lv": 0,
+                      "g29fn": 0, "g29lv": 1}});
+  out.g23dis2 = $("pt-cfgl-gp23").disabled;
+  out.g23chk2 = $("pt-cfgl-gp23").checked;
+  $("probe").textContent = JSON.stringify(out);
+} catch (e) { $("probe").textContent = "THROW " + e; }
+</script>
+"""
+
 
 def test_page_js():
     if not CHROME:
@@ -1125,7 +1364,11 @@ def test_page_js():
         return
     prof = "/tmp/wc_chrome_profile"
     shutil.rmtree(prof, ignore_errors=True)
-    page = "file://" + os.path.join(HERE, "index.html")
+    src = open(INDEX_HTML, encoding="utf-8").read()
+    probe_path = "/tmp/wc_page_probe.html"
+    with open(probe_path, "w", encoding="utf-8") as f:
+        f.write(src.replace("</body>", PROBE_JS + "</body>"))
+    page = "file://" + probe_path
     with open("/tmp/wc_chrome.log", "wb") as errlog:
         try:
             r = subprocess.run(
@@ -1143,6 +1386,53 @@ def test_page_js():
     got = m.group(1) if m else None
     check("页面脚本执行到底 (状态行不再停在「检测中…」)", got == "断开，重连中…",
           f"wel-web = {got!r}; 浏览器日志 /tmp/wc_chrome.log")
+
+    # 加在页面末尾的探针 HTML 就是上面写进去的那段: </body> 之前
+    if "id=\"probe\"" not in dom:
+        check("探针脚本挂进了页面 (否则下面的断言无从谈起)", False, "没找到 #probe")
+        return
+    m = re.search(r'id="probe">([^<]*)<', dom)
+    got = html.unescape(m.group(1)) if m else ""
+    if got.startswith("THROW"):
+        check("端口页渲染函数能跑通 (喂合成帧不抛异常)", False, got)
+        return
+    try:
+        pr = json.loads(got)
+    except json.JSONDecodeError:
+        check("端口页渲染函数能跑通 (喂合成帧不抛异常)", False, repr(got))
+        return
+    check("端口页渲染函数能跑通 (喂合成帧不抛异常)", True)
+    check("端口页建出 8 行引脚 (uart0/输入/电机/足端/外部 + 三路空闲)",
+          pr.get("rows") == 8, str(pr.get("rows")))
+    check("端口页状态列按帧渲染 (UART0 与六路足端的实测值)",
+          pr.get("uart0") == "使能 · 115200 波特"
+          and pr.get("foot") == "检测 · 高 低 高 高 高 高 · 触地 1/6",
+          str({k: pr.get(k) for k in ("uart0", "foot")}))
+    check("空闲脚状态列报「归属 · 电平」(输入/输出各一行)",
+          pr.get("g23") == "输出 · 高" and pr.get("g24") == "输入 · 低",
+          str((pr.get("g23"), pr.get("g24"))))
+    check("固定脚两行的实测电平也回填 (来自 fixed 节)",
+          pr.get("fixed1") == "GP10 高 · GP11 高"
+          and pr.get("fixed2") == "LED 红 低 · 绿 高 · IMU BOOT 高",
+          str((pr.get("fixed1"), pr.get("fixed2"))))
+    check("功能下拉按参数值回填, 且输入脚的电平复选框是灰的",
+          pr.get("dcm") == "0" and pr.get("g23dis") is True,
+          str((pr.get("dcm"), pr.get("g23dis"))))
+    check("切成输出后复选框可点, 且勾选状态跟着引脚的实测电平",
+          pr.get("g23dis2") is False and pr.get("g23chk2") is False,
+          str((pr.get("g23dis2"), pr.get("g23chk2"))))
+    check("下拉外的波特率值临时插一条, 不显示成空选",
+          pr.get("inb") == "74880", str(pr.get("inb")))
+
+    # 校准页的逐舵机面板 (用户诉求的那个): 同一个探针里顺手喂 !A 与 !HOS 两帧,
+    # 再点选一路 —— 选中格高亮、格子里的偏移、面板上的偏移/角度三者要同时对上
+    check("校准页建出 18 格, 且 !HOS 帧把偏移写进对应格",
+          pr.get("calCells") == 18 and pr.get("calOff3") == "偏移 12",
+          str((pr.get("calCells"), pr.get("calOff3"))))
+    check("选中一路后面板报「哪一路 / 当前偏移 / 当前角度」",
+          pr.get("calSel") == "#3 · R · coxa" and pr.get("calOffBox") == "12"
+          and pr.get("calAng") == "-120" and pr.get("calHidden") is False,
+          str({k: pr.get(k) for k in ("calSel", "calOffBox", "calAng", "calHidden")}))
 
 
 def wait_dev(port, up, timeout=20):
@@ -1203,6 +1493,7 @@ def test_connect_gate():
           "--batt-interval", str(GATE_POLL_IV), "--imu-interval", str(GATE_POLL_IV),
           "--servo-interval", str(GATE_POLL_IV), "--i2c-interval", str(GATE_POLL_IV),
           "--periph-interval", str(GATE_POLL_IV),
+          "--ports-interval", str(GATE_POLL_IV),
           "--rc-interval", str(GATE_POLL_IV)], "/tmp/wc_server2.log", HERE),
     ]:
         spawn(args, log, cwd)
@@ -1393,7 +1684,7 @@ def main():
     # 参数分页: 每页一个 tab 按钮 + 一个卡片宿主。页面本身由 JS 按 PAGES 生成,
     # 所以断言生成器的输入 (PAGES 里的 id) 与 HTML 里的 tab 按钮两边都在。
     for pid in ("gait", "stance", "geo", "radio", "modes", "power", "balance", "per",
-                "ctrl"):
+                "ctrl", "ports"):
         check(f"页面含参数分页 tab: {pid}",
               f'data-tab="{pid}"' in raw_page and f'id: "{pid}"' in raw_page)
     check("分页的组覆盖固件全部分组",
@@ -1428,10 +1719,13 @@ def main():
     hidden = _re.findall(r'"(\w+)"', m_hide.group(1)) if m_hide else []
     firm = {n for n, _, _ in
             RE_TABLE_ROW.findall(open(PARAMS_C, encoding="utf-8").read())}
-    want_hide = {"input_mode"} | {n for n in firm if n.startswith(("mode_", "combo_"))}
-    check("input_mode 与 19 个 mode_*/combo_* 不生成通用滑条 (自定义控件接管)",
+    # 端口页的六个同理 (下拉比滑条直观), 所以也在这份名单里
+    want_hide = ({"input_mode"} | {n for n in firm if n.startswith(("mode_", "combo_"))}
+                 | {"dc_motor_en", "foot_sw_en", "gp23_fn", "gp24_fn", "gp29_fn",
+                    "input_baud_serial"})
+    check("input_mode/19 个 mode_*/combo_*/6 个 port 参数不生成通用滑条 (自定义控件接管)",
           set(hidden) == want_hide and len(hidden) == len(want_hide)
-          and len(hidden) == 20, f"PARAM_HIDE={hidden}")
+          and len(hidden) == 26, f"PARAM_HIDE={hidden}")
     check("PARAM_HIDE 里的名字都是真参数 (防拼错导致参数凭空消失)",
           set(hidden) <= firm,
           "不存在: " + ", ".join(sorted(set(hidden) - firm)))
@@ -1658,6 +1952,56 @@ def main():
     check("[HO] 行不进日志面板 (18 行一条, 每轮询会把日志冲掉)",
           not any(e.get("t") == "raw" and wc.RE_HO.match(e.get("line", ""))
                   for e in evs),
+          str([e.get("line") for e in evs if e.get("t") == "raw"][:3]))
+
+    # ---- 端口页: !PORTS 全量回读 / !GPO 写空闲脚电平 ----
+    # 与 !HOS 同一套路: 服务端仍是 --no-poll, 所以端口帧只可能来自下面这几条 POST
+    sse_p = sse_open()
+    time.sleep(0.3)
+    r = json.loads(http_post("/cmd", "!PORTS"))
+    check("POST /cmd 下发 !PORTS", r.get("ok") is True, str(r))
+    evs = sse_drain(sse_p, 3, stop_when=lambda e: any(
+        x.get("t") == "ports" and {"uart0", "motors", "gpio", "fixed"} <= set(x.get("d", {}))
+        for x in e))
+    pt = next((e["d"] for e in reversed(evs)
+               if e.get("t") == "ports" and "fixed" in e.get("d", {})), None)
+    check("SSE 收到 !PORTS 的七节端口帧", pt is not None, str(evs[:4]))
+    if pt:
+        check("端口帧: UART0 与电机节",
+              pt.get("uart0") == {"en": 1, "baud": 115200}
+              and pt.get("motors") == {"en": 1, "lv1": 0, "lv2": 1}, str(sorted(pt)))
+        check("端口帧: 六路足端电平 (低=触地, 不下判定) 与固定脚电平",
+              pt.get("foot", {}).get("s1") == 0 and pt.get("foot", {}).get("s0") == 1
+              and pt.get("fixed", {}).get("ledg") == 1,
+              str(pt.get("foot")) + " " + str(pt.get("fixed")))
+        check("端口帧: 三路空闲脚的归属与电平成对出现",
+              pt.get("gpio") == {"g23fn": 1, "g23lv": 1, "g24fn": 0, "g24lv": 0,
+                                 "g29fn": 0, "g29lv": 1}, str(pt.get("gpio")))
+
+    # !GPO: 写完电平固件立刻回打 gpio 行 (不用等下一次轮询) —— 前端就靠这条
+    # 即时刷新, 否则勾选框会等到 2 秒后的轮询才反映出来
+    http_post("/cmd", "!GPO 23 0")
+    evs = sse_drain(sse_p, 3, stop_when=lambda e: any(
+        x.get("t") == "ports" and x.get("d", {}).get("gpio", {}).get("g23lv") == 0
+        for x in e))
+    check("!GPO <pin> <0|1> 写电平并即时回打 gpio 行",
+          any(e.get("d", {}).get("gpio", {}).get("g23lv") == 0
+              for e in evs if e.get("t") == "ports"),
+          str([e for e in evs if e.get("t") == "ports"][:2]))
+    check("[PORTS] 行不进日志面板 (7 行一条, 每 2 秒会把日志冲掉)",
+          not any(e.get("t") == "raw" and RE_PORTS.match(e.get("line", ""))
+                  for e in evs),
+          str([e.get("line") for e in evs if e.get("t") == "raw"][:3]))
+
+    # 输入态的空闲脚不给写电平 (页面上复选框灰掉了, 但命令通道不设权限 ——
+    # 手敲 /cmd 也能到, 所以固件必须拒绝, 而且得说明白不肯在哪)
+    http_post("/cmd", "!GPO 24 1")
+    evs = sse_drain(sse_p, 2, stop_when=lambda e: any(
+        "GPO Refuse" in x.get("line", "") for x in e if x.get("t") == "raw"))
+    sse_p.close()
+    check("输入态的空闲脚拒绝写电平 (拒绝理由进日志, 不是静默)",
+          any("GPO Refuse" in e.get("line", "")
+              for e in evs if e.get("t") == "raw"),
           str([e.get("line") for e in evs if e.get("t") == "raw"][:3]))
 
     r = json.loads(http_post("/poll", "off"))

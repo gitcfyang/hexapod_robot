@@ -933,6 +933,48 @@
  * 只差一个后缀, 写成 if (EXT_I2C_MODE_I2C) 恒真而编译器一声不吭。 */
 #define EXT_PIN_MODE                    (g_params.ext_i2c_mode)
 
+/* ---- 端口功能 (port 组, 网页「端口」页) ----
+ *
+ * 几组复用引脚"跑什么"的开关, Betaflight 端口页语义。共同约定:
+ *   0 号态 = 把引脚释放成普通 GPIO 输入 (上拉关闭), 这样任何时候都能从
+ *   网页把一路引脚收回来, 不需要重烧固件。
+ *
+ * ⚠️ 都是运行时参数, 由 hal_periph_poll 每 20ms 快照应用 —— 改完立即生效,
+ *    不需要重启。!PORTS 报告当前实际状态 (含电平), 网页端口页靠它刷新。
+ * ⚠️ 只有这几组是"可切换"的: UART0/UART1/I2C1 的引脚归属是硬约束
+ *    (RP2040 的 UART/I2C 只映射到固定引脚, 且 I2C1 被舵机总线占用),
+ *    端口页对它们只提供"开/关"与波特率, 不提供换脚。 */
+
+/* GP2/GP3: 直流电机 PWM (1) 还是普通 GPIO 输入 (0)。
+ * 置 0 后 !MOTOR 拒绝执行, 引脚回到高阻输入 —— 接线改动前先在这里停掉,
+ * 免得电机命令打到别的东西上。 */
+#define DC_MOTOR_ENABLED_DEFAULT        1
+#define DC_MOTOR_ENABLED                (g_params.dc_motor_en)
+
+/* GP16-21: 六路足端开关检测 (1) 还是普通 GPIO 输入 (0)。
+ * 当前足端检测还没有调用方 (步态尚未用到), 所以置 0 只是让读 API 停用:
+ * 一律返回"未触地", 引脚保持输入上拉供 !PORTS 读电平。 */
+#define FOOT_SW_ENABLED_DEFAULT         1
+#define FOOT_SW_ENABLED                 (g_params.foot_sw_en)
+
+/* GP23/GP24/GP29: 三个空闲脚, 0=输入 1=输出 (输出初值 0, 电平靠 !GPO 写)。
+ * 输入态读电平, 输出态 !GPO 才能改 —— 输入态发 !GPO 会被拒绝。 */
+#define GPIO_FN_INPUT                   0
+#define GPIO_FN_OUTPUT                  1
+#define GPIO23_FN_DEFAULT               GPIO_FN_INPUT
+#define GPIO24_FN_DEFAULT               GPIO_FN_INPUT
+#define GPIO29_FN_DEFAULT               GPIO_FN_INPUT
+#define GPIO23_FN                       (g_params.gp23_fn)
+#define GPIO24_FN                       (g_params.gp24_fn)
+#define GPIO29_FN                       (g_params.gp29_fn)
+
+/* UART1 (GP4/GP5) 串口输入模式的波特率。
+ * ⚠️ 真机上 UART1 恒以 CRSF 420000 运行 (见 hal_input_init), 这个参数
+ *    只在 INPUT_CONTROL_MODE==2 之外的串口分支生效; 网页端口页对它的
+ *    说明必须如实写 —— 否则用户会以为改它就能让 CRSF 换速率。 */
+#define INPUT_BAUD_SERIAL_DEFAULT       115200
+#define INPUT_BAUD_SERIAL               (g_params.input_baud_serial)
+
 /* ---- 空闲 PWM 通道 (2× PCA9685 共 32 路, 舵机占 18 路) ----
  * 剩下 14 路做通用 PWM 输出 (测试工具语义: 值只在 RAM, 断电不保持)。
  *

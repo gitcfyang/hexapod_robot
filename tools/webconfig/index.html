@@ -249,6 +249,26 @@
   #per-tx { flex: 1; min-width: 8rem; }
   .perdot { font-size: 11px; }
 
+  /* ---------- 端口页 ---------- */
+  /* Betaflight 式的端口表: 一行一组引脚 —— 名字 | 引脚 | 功能 | 配置 | 实测状态。
+   * 状态列最宽: 那里面放的是六路开关电平/实际波特率这类原始值, 窄了会折行。 */
+  .ptrow {
+    display: grid;
+    grid-template-columns: 110px 130px 150px minmax(120px, 1fr) minmax(150px, 260px);
+    align-items: center; gap: .5rem; padding: .25rem 0; max-width: 1000px;
+    border-bottom: 1px solid var(--surface-400);
+  }
+  .ptrow:last-child { border-bottom: 0; }
+  .ptrow .plabel { font-size: 12px; color: var(--surface-800); }
+  .ptrow .ppin { font-size: 11px; color: var(--surface-600); }
+  .ptrow select { font-size: 12px; padding: .1rem .2rem; }
+  .ptrow .pstate { font-size: 11px; color: var(--surface-800); }
+  .ptrow .pstate.dim { color: var(--surface-600); }
+  .ptrow .ck { display: flex; gap: .25rem; align-items: center; font-size: 12px;
+               cursor: pointer; }
+  /* 固定脚的表: 没有下拉, 名字列宽一点 (「舵机电源」这种四字标题) */
+  .ptrow.fixed { grid-template-columns: 240px minmax(150px, 1fr); }
+
   /* ---------- 「?」悬停解释 (参数名后面那个小圈) ---------- */
   /* 纯 CSS 气泡: 不占点击、不弹窗。内容在 data-tip 里 (见 HELP 表) */
   .phelp {
@@ -450,6 +470,7 @@
       <button class="tab" data-tab="ctrl">控制</button>
       <button class="tab" data-tab="calib">校准</button>
       <button class="tab" data-tab="per">外设</button>
+      <button class="tab" data-tab="ports">端口</button>
       <button class="tab" data-tab="log">日志</button>
     </nav>
 
@@ -1318,7 +1339,7 @@ setInterval(() => {
 const GROUP_NAME = {
   batt: "电池", motion: "运动", stance: "站立姿态",
   tune: "手感 / 死区", dir: "方向取反", imu: "IMU", chan: "通道映射",
-  modes: "模式", per: "外设开关", sys: "系统",
+  modes: "模式", per: "外设开关", port: "端口功能", sys: "系统",
 };
 
 /* 难懂参数的解释 (参数名后面的「?」, 悬停显示)。
@@ -1352,8 +1373,9 @@ const HELP = {
 
 /* 不生成通用滑条的参数 —— 页面给了更合适的控件, 再摆一个滑条是同一个变量的
  * 第二种说法, 只会让人以为改了没反应:
- *   input_mode — 遥控页的输入源按钮 (CRSF / PS2);
- *   mode_* / combo_* — 模式页的矩阵与组合键控件 (打包值, 滑条没法用)。
+ *   input_mode — 遥控页的输入源按钮 (CRSF / PS2) 与端口页的功能下拉;
+ *   mode_* / combo_* — 模式页的矩阵与组合键控件 (打包值, 滑条没法用);
+ *   port 组的六个 — 端口页的功能下拉 (0/1 的选择器比滑条直观)。
  * 值本身仍在参数表里: 照常参与保存 / 恢复默认 / 未保存计数。 */
 const PARAM_HIDE = new Set([
   "input_mode",
@@ -1361,6 +1383,7 @@ const PARAM_HIDE = new Set([
   "mode_sn", "mode_sp", "mode_sw",
   "combo_arm", "combo_bal", "combo_gnext", "combo_gprev",
   "combo_snext", "combo_sprev", "combo_lup", "combo_ldn", "combo_estop",
+  "dc_motor_en", "foot_sw_en", "gp23_fn", "gp24_fn", "gp29_fn", "input_baud_serial",
 ]);
 
 /* 四个摇杆功能 ↔ 参数名的对应 (两协议共用)。页面上的格子按通道号反查这张表,
@@ -1783,6 +1806,249 @@ function renderModesConfig() {
   }
 }
 
+/* ---------------- 端口页 ----------------
+ * Betaflight 的端口页语义: 一行一组引脚, 选这一组"现在是干什么的"。三类行:
+ *   ① 复用脚 —— 功能下拉就是那个 port 组参数 (uart0_en 在外设组, input_mode
+ *      在通道组, 其余六个在 port 组), 一律走 sendSet 那条参数通道, 所以照常
+ *      参与保存/恢复默认/未保存计数;
+ *   ② 空闲脚 GP23/24/29 —— 功能选「输出」后配置列才出现电平复选框, 它发
+ *      !GPO (即时命令, 不落盘: 电平本来就不是能存的状态);
+ *   ③ 固定脚 —— 只显示归属与实测电平。RP2040 的 UART/I2C 只能落在固定的脚上
+ *      (I2C1 已给舵机总线), 所以这几行没有下拉可给。
+ * 状态列的数据来自 !PORTS 轮询 (server --ports-interval, 默认 2 秒一次),
+ * 报的是引脚此刻的实测电平 —— 参数与硬件对不上时, 这一列看得出来。 */
+
+/* 下拉里没有当前值时临时插一个选项 (用户在日志页手敲 !CFG 设的怪值, 或固件
+ * 新加的档位): 直接赋值会变成空选, 看着像"这个参数丢了" */
+function setSelectValue(sel, v) {
+  if (!sel || document.activeElement === sel) return;   /* 正在操作就别抢 */
+  const s = String(v);
+  if (!Array.from(sel.options).some(o => o.value === s)) {
+    const o = document.createElement("option");
+    o.value = s;
+    o.textContent = s + " (自定义)";
+    sel.appendChild(o);
+  }
+  sel.value = s;
+}
+
+/* 两个串口的波特率候选 (固件 range 是 2400~1000000, 这几个是常用档) */
+const BAUDS = [9600, 19200, 38400, 57600, 115200, 230400, 460800, 921600];
+
+const PORT_ROWS = [
+  { key: "uart0", title: "UART0", pins: "GP0 TX · GP1 RX",
+    pname: "uart0_en", opts: [[0, "关闭"], [1, "UART"]],
+    cfg: { kind: "select", pname: "uart0_baud", opts: BAUDS.map(b => [b, b + ""]) },
+    hint: "外部串口模块 (GPS / 上位机 / 第二个接收机)。收到的整行转到日志页, " +
+          "发送在外设页的输入框。",
+    state: d => d.uart0 && (d.uart0.en ? `使能 · ${d.uart0.baud} 波特` : "关闭") },
+  { key: "input", title: "输入 UART1", pins: "GP4 TX · GP5 RX",
+    pname: "input_mode", opts: [[0, "CRSF 接收机"], [1, "PS2 手柄"]],
+    cfg: { kind: "select", pname: "input_baud_serial", opts: BAUDS.map(b => [b, b + ""]) },
+    hint: "遥控输入走这一路。CRSF (ELRS) 固定 420000 波特, 右边的波特率下拉只在" +
+          "串口输入模式下生效 —— 真机上改它不会动遥控链路。",
+    state: d => d.input && `${d.input.mode ? "PS2 手柄" : "CRSF"} · ${d.input.baud} 波特` },
+  { key: "motors", title: "直流电机", pins: "GP2 · GP3",
+    pname: "dc_motor_en", opts: [[0, "GPIO 输入"], [1, "电机 PWM"]],
+    hint: "两路单向调速 (无方向脚)。选「GPIO 输入」= 把这两个脚交出来给别的东西用, " +
+          "此时 !MOTOR 命令会被固件拒绝。",
+    state: d => d.motors && (d.motors.en
+      ? `PWM · GP2 ${d.motors.lv1 ? "高" : "低"} · GP3 ${d.motors.lv2 ? "高" : "低"}`
+      : "已释放 · 两个脚是高阻输入") },
+  { key: "foot", title: "足端开关", pins: "GP16 ~ GP21",
+    pname: "foot_sw_en", opts: [[0, "GPIO 输入"], [1, "足端检测"]],
+    hint: "六路着地检测 (RR RM RF LR LM LF 依次对应 GP16~GP21)。开关闭合 → 接地, " +
+          "所以状态列里低 = 触地。选「GPIO 输入」= 读 API 一律报未触地。",
+    state: d => {
+      if (!d.foot) return null;
+      const sw = [d.foot.s0, d.foot.s1, d.foot.s2, d.foot.s3, d.foot.s4, d.foot.s5];
+      const lv = sw.map(v => (v ? "高" : "低")).join(" ");
+      const touch = sw.filter(v => !v).length;
+      return d.foot.en ? `检测 · ${lv} · 触地 ${touch}/6` : `已释放 · 电平 ${lv}`;
+    } },
+  { key: "ext", title: "外部排针", pins: "GP26 · GP27",
+    pname: "ext_i2c_mode", opts: [[0, "关闭"], [1, "软件 I2C"], [2, "ADC"]],
+    hint: "第二路 I2C 或两路 ADC。这两个脚在 RP2040 上只能走 I2C1, 而 I2C1 已给" +
+          "舵机总线, 所以 I2C 是固件位翻转出来的 (约 50kHz)。",
+    state: d => d.ext && (d.ext.mode === 0 ? "关闭"
+      : `${["关闭", "软件 I2C", "ADC"][d.ext.mode]} · a0=${d.ext.a0} a1=${d.ext.a1} mV`) },
+  { key: "gp23", title: "空闲脚 GP23", pins: "GP23",
+    pname: "gp23_fn", opts: [[0, "输入"], [1, "输出"]], pin: 23,
+    cfg: { kind: "level" },
+    hint: "没被任何外设占用的脚。选「输出」后右边出现电平复选框 (发 !GPO)。",
+    state: null },          /* 三行共用下面对 ports.gpio 的渲染 */
+  { key: "gp24", title: "空闲脚 GP24", pins: "GP24",
+    pname: "gp24_fn", opts: [[0, "输入"], [1, "输出"]], pin: 24,
+    cfg: { kind: "level" }, hint: "同上。", state: null },
+  { key: "gp29", title: "空闲脚 GP29", pins: "GP29",
+    pname: "gp29_fn", opts: [[0, "输入"], [1, "输出"]], pin: 29,
+    cfg: { kind: "level" }, hint: "同上 (这块板上它是最后一个空脚)。", state: null },
+];
+
+/* 固定功能的那几行 (没有下拉, 只在状态列里报实测电平) */
+const PORT_FIXED = [
+  ["I2C1 · GP14 SDA / GP15 SCL", "400kHz · 两块 PCA9685 + BNO055 占用 (舵机总线)"],
+  ["舵机电源 · GP10 左 / GP11 右", null],
+  ["蜂鸣器 GP13 · LED GP12 红 / GP25 绿 · IMU BOOT GP22", null],
+  ["电池 ADC · GP28", "分压比在「电源」页标定, 读数在状态页"],
+];
+
+const portsCustomHTML = `
+    <div class="box wide">
+      <h2>引脚分配</h2>
+      <div class="ptrow" style="border-bottom:0;color:var(--surface-600)">
+        <div class="plabel">端口</div><div class="ppin">引脚</div>
+        <div class="plabel">功能</div><div class="plabel">配置</div>
+        <div class="plabel">实测状态</div>
+      </div>
+      <div id="pt-rows"></div>
+      <div class="note" style="margin-top:.4rem">
+        <span id="pt-stale" class="perdot dim">端口状态: —</span> ·
+        「功能」下拉写的是<b>参数</b> (改完即时生效, 按「保存到 Flash」掉电保持);
+        空闲脚的电平复选框发 <code>!GPO</code>, <b>是即时命令、不落盘</b>
+        (切回输入再切输出会回到低电平)。输入态下复选框是灰的 —— 固件也会拒绝
+        在输入脚上写电平。<br>
+        <b>UART1 的波特率下拉只在串口输入模式下生效</b>: 遥控链路 (CRSF) 恒
+        420000 波特, 改它不会动遥控。下面「外设」页也有
+        <code>uart0_en</code> / <code>uart0_baud</code> / <code>ext_i2c_mode</code>
+        的滑条, 与这里是同一个参数 (两处联动)。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>固定功能</h2>
+      <div class="ptrow fixed" style="border-bottom:0;color:var(--surface-600)">
+        <div class="plabel">占用</div><div class="plabel">说明</div>
+      </div>
+      <div id="pt-fixed"></div>
+      <div class="note" style="margin-top:.4rem">
+        这几个脚不能从本页改: RP2040 的 UART/I2C 只能落在固定的引脚上, 而两条
+        I2C、两条 UART 都已经各归其主。要腾出它们得改板子或重烧固件 ——
+        放这里是为了让「哪些脚还是自由的」一眼可查。
+      </div>
+    </div>`;
+
+let PORTS = {};               /* 端口页的状态对象 (last = 上次收到 ports 帧的时刻) */
+PORTS.last = 0;
+
+function initPortsPage() {
+  const host = $("pt-rows");
+  if (!host) return;
+
+  for (const r of PORT_ROWS) {
+    const row = document.createElement("div");
+    row.className = "ptrow";
+    row.id = "pt-row-" + r.key;
+    row.innerHTML =
+      `<div class="plabel" title="${r.hint}">${r.title}</div>` +
+      `<div class="ppin" title="${r.pins}">${r.pins}</div>` +
+      `<select id="pt-sel-${r.key}">` +
+        r.opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join("") +
+      `</select>` +
+      `<div class="ptcfg" id="pt-cfg-${r.key}"></div>` +
+      `<div class="pstate" id="pts-${r.key}">—</div>`;
+    host.appendChild(row);
+
+    $("pt-sel-" + r.key).onchange = e => sendSet(r.pname, parseInt(e.target.value, 10));
+
+    const cfg = $("pt-cfg-" + r.key);
+    if (r.cfg && r.cfg.kind === "select") {
+      const sel = document.createElement("select");
+      sel.id = "pt-cfgs-" + r.key;
+      sel.innerHTML = r.cfg.opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join("");
+      sel.onchange = e => sendSet(r.cfg.pname, parseInt(e.target.value, 10));
+      cfg.appendChild(sel);
+    } else if (r.cfg && r.cfg.kind === "level") {
+      /* 电平是即时命令 (不落盘), 所以走 sendCmd 而不是 sendSet */
+      cfg.innerHTML = `<label class="ck"><input type="checkbox" id="pt-cfgl-${r.key}">高电平</label>`;
+      $("pt-cfgl-" + r.key).onchange = e =>
+        sendCmd(`!GPO ${r.pin} ${e.target.checked ? 1 : 0}`);
+    }
+  }
+
+  const fixed = $("pt-fixed");
+  if (fixed) {
+    PORT_FIXED.forEach(([what, why], i) => {
+      const row = document.createElement("div");
+      row.className = "ptrow fixed";
+      row.innerHTML = `<div class="plabel">${what}</div>` +
+                      `<div class="pstate" id="ptf-${i}">${why || "—"}</div>`;
+      fixed.appendChild(row);
+    });
+  }
+}
+
+/* 参数回显 (在 renderParams 末尾调): 下拉跟着参数值走 */
+function renderPortsConfig() {
+  for (const r of PORT_ROWS) {
+    const p = curParams[r.pname];
+    if (p) setSelectValue($("pt-sel-" + r.key), p.val);
+
+    if (!r.cfg) continue;
+    if (r.cfg.kind === "select") {
+      const cp = curParams[r.cfg.pname];
+      if (cp) setSelectValue($("pt-cfgs-" + r.key), cp.val);
+    } else if (r.cfg.kind === "level") {
+      /* 只有"输出"态才允许写电平 —— 灰掉比让用户点了被拒更省事 */
+      const box = $("pt-cfgl-" + r.key);
+      if (!box || !p) continue;
+      box.disabled = p.val !== 1;
+      if (box.disabled && document.activeElement !== box) box.checked = false;
+    }
+  }
+
+  /* 固定脚那两行里带实测电平的, 值来自 !PORTS 帧 (见 renderPorts) */
+  const f = PORTS.fixed, r1 = $("ptf-1"), r2 = $("ptf-2");
+  if (f && r1 && r2) {
+    r1.textContent = `GP10 ${f.spwl ? "高" : "低"} · GP11 ${f.spwr ? "高" : "低"}`;
+    r2.textContent =
+      `LED 红 ${f.ledr ? "高" : "低"} · 绿 ${f.ledg ? "高" : "低"} · IMU BOOT ${f.boot ? "高" : "低"}`;
+  }
+}
+
+function renderPorts(d) {
+  PORTS.last = Date.now();
+
+  for (const r of PORT_ROWS) {
+    if (!r.state) continue;
+    const text = r.state({ ...PORTS, ...d });
+    if (text) setPortsState(r.key, text);
+  }
+
+  const g = d.gpio;
+  if (g) for (const r of PORT_ROWS) {
+    if (r.pin === undefined) continue;
+    const fn = g[`g${r.pin}fn`], lv = g[`g${r.pin}lv`];
+    if (fn === undefined) continue;
+    setPortsState(r.key, `${fn ? "输出" : "输入"} · ${lv ? "高" : "低"}`);
+    /* 复选框跟着实测电平走 (刷新页面/换了别的标签页操作后, 它得反映引脚真相
+     * 而不是"这次会话里我点过什么")。正在点的那个不抢 —— 与滑条同一道理 */
+    const box = $("pt-cfgl-" + r.key);
+    if (box && !box.disabled && document.activeElement !== box) box.checked = (lv === 1);
+  }
+
+  /* 两行固定脚的电平 (与 renderPortsConfig 共用同一份渲染) */
+  Object.assign(PORTS, d);
+  renderPortsConfig();
+}
+
+function setPortsState(key, text) {
+  const el = $("pts-" + key);
+  if (!el) return;
+  el.textContent = text;
+  el.className = "pstate";
+}
+
+/* 状态是轮询来的 (--ports-interval): 关掉轮询/桥接断了/没有浏览器连着时这里
+ * 会一直是旧值。超过 5 秒没更新就把标记点亮 (与外设页同一个套路) */
+setInterval(() => {
+  const el = $("pt-stale");
+  if (!el) return;
+  const stale = !PORTS.last || Date.now() - PORTS.last > 5000;
+  el.textContent = stale ? "端口状态: 无数据" : "端口状态: 已连接";
+  el.className = "perdot " + (stale ? "dim" : "ok");
+}, 1000);
+
 /* ---------------- 校准页: 电压标定 ----------------
  * 单点标定, 全在页面侧算: 分压比 = 万用表实测电池电压 ÷ ADC 引脚电压。
  * 引脚电压 (BATT.pin_mv) 与分压比无关 —— 它是 ADC 上真实量到的电压,
@@ -2013,6 +2279,12 @@ const PAGES = [
           "上面的卡片是<b>直接驱动</b> (即时生效、不进参数表、不存 flash，" +
           "数值每 2 秒从固件轮询回来)；下面「外设开关」那五项才是参数，" +
           "要掉电保持得按「保存到 Flash」。" },
+  { id: "ports", title: "端口", groups: ["port"], custom: portsCustomHTML,
+    note: "每一组引脚「现在是干什么的」: 复用脚在「功能」下拉里选用途，" +
+          "自由脚 (GP23/24/29) 可以切成输出并用复选框给电平。" +
+          "功能下拉写的是参数，改完即时生效、按「保存到 Flash」掉电保持；" +
+          "空闲脚的<b>电平是即时命令 (!GPO)，不落盘</b>。" +
+          "本页的 UART0 / 输入 / 外部排针与外设页、遥控页是同一批参数 (两处联动)。" },
 ];
 
 function buildParamPages() {
@@ -2077,6 +2349,7 @@ let curParams = {};           // 最近一次 params 快照的 list
 initPerPage();                // 外设页的滑条/按钮 (DOM 已由上一步建好)
 initCtrlPage();               // 控制页的 PWM 周期滑条 (同上)
 initModesPage();              // 模式页的矩阵行/组合键行 (同上)
+initPortsPage();              // 端口页的引脚表格行 (同上)
 initCalibPage();              // 校准页的电压标定输入框 (IMU 卡只用 data-cmd, 无需 JS)
 
 /* ---------------- 「有改动未保存」判定 ----------------
@@ -2275,6 +2548,8 @@ function renderParams(d) {
   renderModesConfig();
   /* 校准页的电压卡也吃参数帧 (分压比的现值与「非默认」高亮) */
   renderCalibVolt();
+  /* 端口页的功能下拉也吃参数帧 (port 组被 PARAM_HIDE 藏了, 得自己回填) */
+  renderPortsConfig();
 }
 
 /* ---------------- 开始页 ↔ 调试页 ----------------
@@ -2433,6 +2708,7 @@ function connect() {
       case "ho": renderHo(ev.d); break;
       case "ch": renderCh(ev.d); break;
       case "per": renderPer(ev.d); break;
+      case "ports": renderPorts(ev.d); break;
       case "run": renderRun(ev.d); break;
       case "rc": renderRc(ev.d); break;
       case "params": renderParams(ev.d); break;

@@ -38,8 +38,8 @@
  * @brief 全部运行时参数 (RAM 实体, 定义在 hexapod_params.c)
  *
  * 字段名 = 参数表里的名字, 与 hexapod_config.h 的宏一一对应。
- * 十一组 (见 param_t.group), 网页每页显示一到多组 (modes 组在「模式」页,
- * 不是滑条而是矩阵界面)。
+ * 十二组 (见 param_t.group), 网页每页显示一到多组 (modes 组在「模式」页,
+ * 不是滑条而是矩阵界面; port 组在「端口」页, 是逐对引脚的功能选择器)。
  */
 typedef struct {
     /* ---- 电池 (batt) ---- */
@@ -163,6 +163,17 @@ typedef struct {
     int32_t uart0_en;            /* 外部 UART0 (GP0/GP1) 使能 0/1 */
     int32_t uart0_baud;          /* 外部 UART0 波特率 */
     int32_t ext_i2c_mode;        /* GP26/27 用途 0=关 1=软件 I2C 2=ADC */
+
+    /* ---- 端口功能 (port) ----
+     * 复用引脚上"跑什么"的选择 (Betaflight 端口页语义)。这些不是外设参数
+     * 而是引脚归属: 0 号态一律是"释放成普通 GPIO 输入", 所以任何时候都能
+     * 从这一页把一路引脚收回来。运行期由 hal_periph_poll 快照应用。 */
+    int32_t dc_motor_en;         /* GP2/GP3 1=直流电机 PWM 0=释放为 GPIO 输入 */
+    int32_t foot_sw_en;          /* GP16-21 1=足端开关检测 0=GPIO 输入 (读 API 停用) */
+    int32_t gp23_fn;             /* GP23 用途 0=输入 1=输出 (输出值靠 !GPO) */
+    int32_t gp24_fn;             /* GP24 用途 0=输入 1=输出 */
+    int32_t gp29_fn;             /* GP29 用途 0=输入 1=输出 */
+    int32_t input_baud_serial;   /* UART1 串口输入模式波特率 (CRSF 恒 420000) */
 } hexapod_params_t;
 
 /** 全局参数实体。config.h 的宏全部指向这里, 因此本符号必须尽早存在。 */

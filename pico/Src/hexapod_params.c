@@ -161,6 +161,14 @@ static const param_t s_table[] = {
     { "uart0_en",       &g_params.uart0_en,         0,      1, UART0_ENABLED_DEFAULT,         "", "per" },
     { "uart0_baud",     &g_params.uart0_baud,    2400, 1000000, UART0_BAUD_DEFAULT,        "baud", "per" },
     { "ext_i2c_mode",   &g_params.ext_i2c_mode,     0,      2, EXT_I2C_MODE_DEFAULT,          "", "per" },
+
+    /* ---- 端口功能 ---- */
+    { "dc_motor_en",    &g_params.dc_motor_en,      0,      1, DC_MOTOR_ENABLED_DEFAULT,     "", "port" },
+    { "foot_sw_en",     &g_params.foot_sw_en,       0,      1, FOOT_SW_ENABLED_DEFAULT,      "", "port" },
+    { "gp23_fn",        &g_params.gp23_fn,          0,      1, GPIO23_FN_DEFAULT,            "", "port" },
+    { "gp24_fn",        &g_params.gp24_fn,          0,      1, GPIO24_FN_DEFAULT,            "", "port" },
+    { "gp29_fn",        &g_params.gp29_fn,          0,      1, GPIO29_FN_DEFAULT,            "", "port" },
+    { "input_baud_serial", &g_params.input_baud_serial, 2400, 1000000, INPUT_BAUD_SERIAL_DEFAULT, "baud", "port" },
 };
 
 const param_t *params_table(void) { return s_table; }

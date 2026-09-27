@@ -557,6 +557,10 @@ void hal_servo_power_set_all(bool enable)
 
 static bool dc_motor_initialized = false;
 
+/* 上次设的占空比 (这两个引脚没有回读通道, 缓存即"上次设的值")。
+ * 声明放在这里是为了 !PORTS / 端口页把电机释放成 GPIO 时能一并清零。 */
+static uint16_t g_motor_duty[2] = {0, 0};
+
 void hal_dc_motor_init(void)
 {
     /* 电机1: GP2 = PWM1A, 电机2: GP3 = PWM1B — 同属 slice 1 */
@@ -574,6 +578,9 @@ void hal_dc_motor_init(void)
 
 void hal_dc_motor_set(uint8_t motor, uint16_t duty_percent)
 {
+    /* 端口页把 GP2/GP3 让给普通 GPIO 时 (dc_motor_en=0), 电机命令一律不执行:
+     * 引脚已经不是 PWM 功能了, 再写通道电平只是白写。 */
+    if (!DC_MOTOR_ENABLED) return;
     if (!dc_motor_initialized) hal_dc_motor_init();
     if (motor > 1) return;
     if (duty_percent > 1000) duty_percent = 1000;
@@ -584,12 +591,44 @@ void hal_dc_motor_set(uint8_t motor, uint16_t duty_percent)
     pwm_set_chan_level(slice, (motor == 0) ? PWM_CHAN_A : PWM_CHAN_B, level);
 }
 
+/** @brief 释放 GP2/GP3 回普通 GPIO 输入 (端口页 dc_motor_en 置 0 时调用) */
+static void dc_motor_detach(void)
+{
+    uint slice = pwm_gpio_to_slice_num(DC_MOTOR1_PIN);
+    pwm_set_chan_level(slice, PWM_CHAN_A, 0);
+    pwm_set_chan_level(slice, PWM_CHAN_B, 0);
+    pwm_set_enabled(slice, false);
+
+    const uint8_t pins[2] = {DC_MOTOR1_PIN, DC_MOTOR2_PIN};
+    for (uint8_t i = 0; i < 2; i++) {
+        gpio_set_function(pins[i], GPIO_FUNC_SIO);
+        gpio_init(pins[i]);
+        gpio_set_dir(pins[i], GPIO_IN);
+        gpio_disable_pulls(pins[i]);
+    }
+
+    dc_motor_initialized = false;
+    g_motor_duty[0] = g_motor_duty[1] = 0;
+}
+
+/** @brief 端口功能: GP2/GP3 跑电机 PWM (en=1) 还是普通 GPIO 输入 (en=0) */
+static void dc_motor_apply(bool en)
+{
+    if (en) {
+        hal_dc_motor_init();   /* 幂等: 重设功能/清零/使能 */
+    } else {
+        dc_motor_detach();
+    }
+}
+
 /* ==================== 输入设备实现（UART1串口，不走I2C） ==================== */
 
 #define INPUT_UART_ID           uart1
 #define INPUT_UART_TX_PIN       4
 #define INPUT_UART_RX_PIN       5
-#define INPUT_UART_BAUD_SERIAL  115200
+/* 串口输入模式的波特率是运行时参数 (INPUT_BAUD_SERIAL, 端口页可调); CRSF 恒
+ * 420000 不跟参数走。真机上 g_crsf_mode 恒为 true, 所以那个参数实际只在
+ * INPUT_CONTROL_MODE==2 之外的串口分支生效 —— 网页端口页对此有如实说明。 */
 #define INPUT_UART_BAUD_CRSF    420000
 
 #define INPUT_BUF_SIZE          64
@@ -851,6 +890,47 @@ bool hal_input_is_ps2(void)
     return g_input_mode == INPUT_MODE_PS2;
 }
 
+#if INPUT_CONTROL_MODE != 2
+/* 上次装配 UART1 时用的串口波特率 (只跟踪串口分支, CRSF 恒 420000)。
+ * 装配函数自己写这个快照, 所以不存在"装好了但快照没跟上"的中间态。 */
+static int32_t s_serial_baud = 0;
+
+/* UART1 实际装配成的波特率 —— uart_init 的返回值 (SDK 会挑最接近的可达值,
+ * 与请求值可能差一点)。!PORTS 报这个而不是参数值: 网页上改了波特率, 要看到
+ * 的是"硬件到底跑在多少", 而不是"我请求了多少"。 */
+static uint32_t s_input_baud_actual = 0;
+
+/**
+ * @brief 装配 UART1 为串口输入 (波特率取 INPUT_BAUD_SERIAL 参数)
+ *
+ * 首次初始化与运行期改波特率都走这里。改速率必须整条重来 (uart_deinit →
+ * uart_init) 并清空 RX 缓冲: 旧速率下收到的半截字节留在环形缓冲里, 换速率
+ * 后会被当成新数据的开头, 解析出一串垃圾。
+ */
+static void input_uart_serial_setup(void)
+{
+    /* 重配前先摘中断, 免得 deinit 期间还进回调 (首次调用时是空操作) */
+    uart_set_irq_enables(INPUT_UART_ID, false, false);
+    if (uart_is_enabled(INPUT_UART_ID)) uart_deinit(INPUT_UART_ID);
+
+    s_input_baud_actual = uart_init(INPUT_UART_ID, (uint32_t)INPUT_BAUD_SERIAL);
+    gpio_set_function(INPUT_UART_TX_PIN, GPIO_FUNC_UART);
+    gpio_set_function(INPUT_UART_RX_PIN, GPIO_FUNC_UART);
+    uart_set_format(INPUT_UART_ID, 8, 1, UART_PARITY_NONE);
+
+    irq_set_exclusive_handler(UART1_IRQ, input_uart_irq_handler);
+    irq_set_enabled(UART1_IRQ, true);
+    uart_set_irq_enables(INPUT_UART_ID, true, false);
+
+    input_rx_head = 0;
+    input_rx_tail = 0;
+
+    s_serial_baud = INPUT_BAUD_SERIAL;
+    hal_debug_printf("Serial input initialized (%ld baud)\r\n",
+                     (long)INPUT_BAUD_SERIAL);
+}
+#endif /* INPUT_CONTROL_MODE != 2 */
+
 void hal_input_sync_mode(void)
 {
 #if INPUT_CONTROL_MODE == 2
@@ -862,6 +942,12 @@ void hal_input_sync_mode(void)
     bool want_ps2 = (g_params.input_mode == INPUT_MODE_PS2);
     if (want_ps2 != (g_input_mode == INPUT_MODE_PS2)) {
         hal_input_init(want_ps2 ? INPUT_TYPE_PS2 : INPUT_TYPE_CRSF);
+    }
+
+    /* 串口输入模式的波特率同样跟参数走 (端口页可调)。真机上 g_crsf_mode 恒
+     * true, 这条分支不会跑 —— 它是给 USB-CDC 之外的串口构建留的。 */
+    if (!g_crsf_mode && INPUT_BAUD_SERIAL != s_serial_baud) {
+        input_uart_serial_setup();
     }
 #endif
 }
@@ -901,7 +987,7 @@ bool hal_input_init(input_type_t type)
 #if INPUT_CONTROL_MODE != 2
     if (g_crsf_mode) {
         /* CRSF 模式：420000 baud */
-        uart_init(INPUT_UART_ID, INPUT_UART_BAUD_CRSF);
+        s_input_baud_actual = uart_init(INPUT_UART_ID, INPUT_UART_BAUD_CRSF);
         gpio_set_function(INPUT_UART_TX_PIN, GPIO_FUNC_UART);
         gpio_set_function(INPUT_UART_RX_PIN, GPIO_FUNC_UART);
 
@@ -914,20 +1000,8 @@ bool hal_input_init(input_type_t type)
 
         hal_debug_printf("CRSF input initialized (420000 baud)\r\n");
     } else {
-        /* 串口命令模式：115200 baud */
-        uart_init(INPUT_UART_ID, INPUT_UART_BAUD_SERIAL);
-        gpio_set_function(INPUT_UART_TX_PIN, GPIO_FUNC_UART);
-        gpio_set_function(INPUT_UART_RX_PIN, GPIO_FUNC_UART);
-
-        irq_set_exclusive_handler(UART1_IRQ, input_uart_irq_handler);
-        irq_set_enabled(UART1_IRQ, true);
-        uart_set_irq_enables(INPUT_UART_ID, true, false);
-
-        /* 清空串口接收缓冲 */
-        input_rx_head = 0;
-        input_rx_tail = 0;
-
-        hal_debug_printf("Serial input initialized (115200 baud)\r\n");
+        /* 串口命令模式: 装配与波特率热改走同一个函数, 免得两处各写一遍 */
+        input_uart_serial_setup();
     }
 #else
     /* USB CDC 串口模式：无需 UART1 硬件，USB 虚拟串口由 stdio 提供 */
@@ -1223,7 +1297,6 @@ static void ps2_state_print(void)
 #define PERIPH_U0_LINE_MAX      80      /* 转发的 UART0 单行长度上限 */
 
 /* ---- 状态缓存 (这些引脚都没有回读通道, 缓存即"上次设的值") ---- */
-static uint16_t g_motor_duty[2]  = {0, 0};
 static uint16_t g_buzz_freq      = 0;
 static uint16_t g_buzz_ms        = 0;
 static uint8_t  g_ext_i2c_found  = 0;
@@ -1396,6 +1469,51 @@ static void ext_uart_apply(bool en, int32_t baud)
     }
 }
 
+/* ---- 端口功能应用 (port 组: GP2/3, GP16-21, GP23/24/29) ----
+ *
+ * 由 hal_periph_poll 快照对比驱动, 与上面三个 apply 同一个套路:
+ * 参数是唯一真源, 硬件跟着参数走。
+ * 三组都是"二选一": 要么跑复用功能, 要么释放成普通 GPIO 输入 —— 释放态
+ * 一律关上下拉, 免得悬空引脚被上拉/下拉定住, 让 !PORTS 读到的电平骗人。 */
+
+/* 三个空闲脚 (RP2040 上没被任何外设占用的引脚)。顺序 == 端口页的显示顺序 ==
+ * !GPO 白名单顺序, 加引脚时三处一起改。 */
+static const uint8_t g_free_gpio_pins[3] = {23, 24, 29};
+
+/** @brief 引脚号 → 空闲脚下标 (非空闲脚返回 -1) */
+static int8_t free_gpio_index(int32_t pin)
+{
+    for (int8_t i = 0; i < 3; i++) {
+        if ((int32_t)g_free_gpio_pins[i] == pin) return i;
+    }
+    return -1;
+}
+
+/** @brief 空闲脚下标 → 它的功能参数 (GPIO_FN_INPUT / GPIO_FN_OUTPUT) */
+static int32_t free_gpio_fn(int8_t idx)
+{
+    switch (idx) {
+        case 0:  return GPIO23_FN;
+        case 1:  return GPIO24_FN;
+        default: return GPIO29_FN;
+    }
+}
+
+/** @brief 空闲脚: 输入 (上拉关) 或输出 (初值 0, 电平靠 !GPO 改) */
+static void gpio_free_apply(uint8_t pin, int32_t fn)
+{
+    gpio_set_function(pin, GPIO_FUNC_SIO);
+    gpio_init(pin);
+    gpio_disable_pulls(pin);
+    if (fn == GPIO_FN_OUTPUT) {
+        /* 初值 0: 每次切到输出都从低电平起步 —— 接上继电器/灯时不会先闪一下 */
+        gpio_put(pin, 0);
+        gpio_set_dir(pin, GPIO_OUT);
+    } else {
+        gpio_set_dir(pin, GPIO_IN);
+    }
+}
+
 /* ---- UART0 收行转发 ([U0] 前缀进 USB 调试口 → 网页外设页) ---- */
 
 static char    g_u0_line[PERIPH_U0_LINE_MAX];
@@ -1431,6 +1549,9 @@ static void uart0_rx_poll(void)
 /* ==================== 状态输出 ==================== */
 
 static void pwm_status_print(void);
+/* 端口状态 (定义在 LED 段之后: 它要读足端/LED 那几个引脚宏, 那些宏在文件后半段才出现) */
+static void ports_print_gpio(void);
+static void ports_status_print(void);
 
 static void periph_print_ext(void)
 {
@@ -1490,6 +1611,9 @@ static uint8_t free_pwm_board_idx(uint8_t idx)
 
 /* ==================== 周期轮询 (主循环 20ms 调用) ==================== */
 
+/* 足端那六个脚的归属切换 (定义在足端开关段: 它要那张引脚表) */
+static void foot_sw_apply(bool en);
+
 void hal_periph_poll(void)
 {
     /* 配置快照对比: 参数可能被网页滑条 / !CFG / !CFGR 改掉, 这里让硬件跟上。
@@ -1498,6 +1622,9 @@ void hal_periph_poll(void)
     static bool    s_uart_en   = false;
     static int32_t s_uart_baud = 0;
     static int32_t s_ext_mode  = -1;
+    static int32_t s_dc_motor  = -1;
+    static int32_t s_foot_sw   = -1;
+    static int32_t s_gp_fn[3]  = {-1, -1, -1};
 
     bool    uart_en = UART0_ENABLED ? true : false;
     int32_t baud    = g_params.uart0_baud;
@@ -1511,6 +1638,26 @@ void hal_periph_poll(void)
     if (EXT_PIN_MODE != s_ext_mode) {
         ext_i2c_adc_apply(EXT_PIN_MODE);
         s_ext_mode = EXT_PIN_MODE;
+    }
+
+    /* 端口功能 (port 组): 快照从 -1 起, 所以上电第一拍就会按参数把这三组
+     * 引脚的归属定下来 —— 也是足端开关那六个脚的初始化时机 (参数默认开)。 */
+    if ((int32_t)DC_MOTOR_ENABLED != s_dc_motor) {
+        dc_motor_apply(DC_MOTOR_ENABLED);
+        s_dc_motor = DC_MOTOR_ENABLED;
+    }
+
+    if ((int32_t)FOOT_SW_ENABLED != s_foot_sw) {
+        foot_sw_apply(FOOT_SW_ENABLED);
+        s_foot_sw = FOOT_SW_ENABLED;
+    }
+
+    for (int8_t i = 0; i < 3; i++) {
+        int32_t fn = free_gpio_fn(i);
+        if (fn != s_gp_fn[i]) {
+            gpio_free_apply(g_free_gpio_pins[i], fn);
+            s_gp_fn[i] = fn;
+        }
     }
 
     if (s_uart_en) uart0_rx_poll();
@@ -1558,6 +1705,14 @@ static uint8_t next_int(const uint8_t *buf, uint8_t len, uint8_t pos,
 /** @brief !MOTOR <1|2> <0-1000> | !MOTOR (双停) — 无方向引脚, 只能调速 */
 static void cmd_motor(const uint8_t *buf, uint8_t len)
 {
+    /* 端口页把 GP2/GP3 收回去当 GPIO 用的时候 (dc_motor_en=0), 这里必须明说:
+     * hal_dc_motor_set 是静默返回的, 而下面照样会更新 g_motor_duty 并回显 ——
+     * 不拦的话 [PER] 会报出一个根本没发生的占空比。 */
+    if (!DC_MOTOR_ENABLED) {
+        hal_debug_printf("[PORTS] motors: disabled (dc_motor_en=0)\r\n");
+        return;
+    }
+
     int32_t n = 0, duty = 0;
     bool ok_n = false, ok_d = false;
     uint8_t pos = next_int(buf, len, 6, &n, &ok_n);   /* 跳过 "!MOTOR" */
@@ -1579,6 +1734,36 @@ static void cmd_motor(const uint8_t *buf, uint8_t len)
     }
     hal_debug_printf("[PER] motors: m1=%u m2=%u\r\n",
                      (unsigned)g_motor_duty[0], (unsigned)g_motor_duty[1]);
+}
+
+/**
+ * @brief !GPO <23|24|29> <0|1> — 写空闲脚输出电平 (端口页的复选框走这条)
+ *
+ * 白名单是那三个空闲脚, 且该脚必须已被设成输出 (gpXX_fn=1) —— 输入态强驱动
+ * 等于和外部信号打架。电平只在 RAM, 不落 flash (与 !PWM 同一语义: 工具值)。
+ */
+static void cmd_gpo(const uint8_t *buf, uint8_t len)
+{
+    int32_t pin = 0, level = 0;
+    bool ok_p = false, ok_l = false;
+    uint8_t pos = next_int(buf, len, 4, &pin, &ok_p);   /* 跳过 "!GPO" */
+    if (ok_p) next_int(buf, len, pos, &level, &ok_l);
+
+    int8_t idx = ok_p ? free_gpio_index(pin) : -1;
+    if (idx < 0 || !ok_l) {
+        hal_debug_printf("[PORTS] Usage: !GPO <23|24|29> <0|1>\r\n");
+        return;
+    }
+
+    int32_t fn = free_gpio_fn(idx);
+    if (fn != GPIO_FN_OUTPUT) {
+        hal_debug_printf("[PORTS] GPO Refuse: gp%ld fn=%ld (need 1=output)\r\n",
+                         (long)pin, (long)fn);
+        return;
+    }
+
+    gpio_put(g_free_gpio_pins[idx], level ? 1 : 0);
+    ports_print_gpio();   /* 立刻回打 gpio 行: 网页端不用等下一次轮询 */
 }
 
 /** @brief !LED <g|r> <0|1> — 手动 LED (所有权归参数, 见 config.h) */
@@ -2013,6 +2198,24 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
     if (buf[1] == 'P' && len >= 7 &&
         buf[2] == 'E' && buf[3] == 'R' && buf[4] == 'I' && buf[5] == 'P' && buf[6] == 'H') {
         periph_status_print();
+        return true;
+    }
+
+    /* !PORTS — 端口总状态 (网页「端口」页轮询用)。
+     * ⚠️ 同样必须拦在 switch 之前, 而且理由比 !PERIPH 更狠: case 'P' 会把
+     *    "!PORTS" 读成 "!P<id> <angle>" —— parse_int 跳过非数字得 id=0, 找不到
+     *    空格得 angle=0, 于是舵机 0 真的会转到中位, 全程没有一句报错。 */
+    if (buf[1] == 'P' && len >= 6 &&
+        buf[2] == 'O' && buf[3] == 'R' && buf[4] == 'T' && buf[5] == 'S') {
+        ports_status_print();
+        return true;
+    }
+
+    /* !GPO <23|24|29> <0|1> — 写空闲脚电平 (方案同上)。
+     * case 'G' 是"选步态", buf[2]='P' 不是数字 → 静默什么都不做。 */
+    if (buf[1] == 'G' && len >= 4 &&
+        buf[2] == 'P' && buf[3] == 'O') {
+        cmd_gpo(buf, len);
         return true;
     }
 
@@ -2553,6 +2756,12 @@ void hal_foot_switch_init(void)
 
 bool hal_foot_switch_read(leg_index_t leg, bool *contact)
 {
+    /* 足端检测被端口页关掉 (foot_sw_en=0): 引脚已归属普通 GPIO, 拿它当开关
+     * 读只会把上拉电平当成触地 —— 一律报"读不到 (未触地)"。 */
+    if (!FOOT_SW_ENABLED) {
+        if (contact) *contact = false;
+        return false;
+    }
     if (!g_foot_sw_initialized || !contact) return false;
     if (leg >= CNT_LEGS) return false;
 
@@ -2563,6 +2772,13 @@ bool hal_foot_switch_read(leg_index_t leg, bool *contact)
 
 uint8_t hal_foot_switch_read_all(bool contacts[6])
 {
+    /* 同上: 关掉时"零足着地", 而不是把六个上拉读成六足着地 */
+    if (!FOOT_SW_ENABLED) {
+        if (contacts) {
+            for (uint8_t i = 0; i < 6; i++) contacts[i] = false;
+        }
+        return 0;
+    }
     if (!g_foot_sw_initialized || !contacts) return 0;
 
     uint8_t count = 0;
@@ -2571,6 +2787,22 @@ uint8_t hal_foot_switch_read_all(bool contacts[6])
         if (contacts[i]) count++;
     }
     return count;  /* 返回着地足数 */
+}
+
+/** @brief 端口功能: GP16-21 跑足端检测 (en=1) 还是普通 GPIO 输入 (en=0) */
+static void foot_sw_apply(bool en)
+{
+    if (en) {
+        hal_foot_switch_init();   /* 幂等 */
+        return;
+    }
+    /* 释放成普通 GPIO 输入: 上拉保留 —— 足端开关是"闭合→GND 读低",
+     * 上拉让端口页读到的电平有意义 (高=未触地), 也顺手省掉外部上拉 */
+    for (uint8_t i = 0; i < 6; i++) {
+        gpio_init(g_foot_sw_pins[i]);
+        gpio_set_dir(g_foot_sw_pins[i], GPIO_IN);
+        gpio_pull_up(g_foot_sw_pins[i]);
+    }
 }
 
 /* ==================== LED实现（本地GPIO，不走I2C） ==================== */
@@ -2631,6 +2863,71 @@ void hal_led_blink(uint8_t led_id, uint8_t times)
         hal_led_set(led_id, false);
         sleep_ms(100);
     }
+}
+
+/** @brief 空闲脚那一行 (GP23/24/29: 功能 + 实测电平) —— !GPO 写完也重打它 */
+static void ports_print_gpio(void)
+{
+    hal_debug_printf("[PORTS] gpio:");
+    for (uint8_t i = 0; i < 3; i++) {
+        uint8_t pin = g_free_gpio_pins[i];
+        hal_debug_printf(" g%ufn=%ld g%ulv=%u", (unsigned)pin,
+                         (long)free_gpio_fn((int8_t)i), (unsigned)pin,
+                         (unsigned)(gpio_get(pin) ? 1 : 0));
+    }
+    hal_debug_printf("\r\n");
+}
+
+/**
+ * @brief 端口总状态 (7 行) —— 网页「端口」页的轮询数据源
+ *
+ * 每行形如 "[PORTS] <节>: <k=v ...>", 节名固定为
+ * uart0/input/motors/foot/ext/gpio/fixed。server.py 按节名白名单匹配
+ * (与 [PER] 同一套路); 加节/改节名要同时改那边的正则。
+ *
+ * 报的是"引脚现在归属谁 + 实测电平", 而不是参数值 —— 参数与硬件对不上
+ * 的时候 (例如板上根本没接电机) 这一页要能看出来。
+ */
+void ports_status_print(void)
+{
+    hal_debug_printf("[PORTS] uart0: en=%ld baud=%ld\r\n",
+                     (long)UART0_ENABLED, (long)g_params.uart0_baud);
+    /* 波特率报"装配时实际生效"的那个 (uart_init 的返回值), 不是参数值 ——
+     * 串口模式下改 input_baud_serial 后, 这里要能看出硬件到底跑在多少。
+     * USB-CDC 构建下 UART1 根本没装配, 直接报 0。 */
+#if INPUT_CONTROL_MODE != 2
+    hal_debug_printf("[PORTS] input: mode=%ld baud=%lu\r\n",
+                     (long)g_params.input_mode,
+                     (unsigned long)s_input_baud_actual);
+#else
+    hal_debug_printf("[PORTS] input: mode=%ld baud=0\r\n",
+                     (long)g_params.input_mode);
+#endif
+    hal_debug_printf("[PORTS] motors: en=%ld lv1=%u lv2=%u\r\n",
+                     (long)DC_MOTOR_ENABLED,
+                     (unsigned)(gpio_get(DC_MOTOR1_PIN) ? 1 : 0),
+                     (unsigned)(gpio_get(DC_MOTOR2_PIN) ? 1 : 0));
+    /* 足端开关: 闭合→GND 读低, 所以报的是引脚原始电平 (低=触地) */
+    hal_debug_printf("[PORTS] foot: en=%ld s0=%u s1=%u s2=%u s3=%u s4=%u s5=%u\r\n",
+                     (long)FOOT_SW_ENABLED,
+                     (unsigned)(gpio_get(FOOT_SW_PIN_RR) ? 1 : 0),
+                     (unsigned)(gpio_get(FOOT_SW_PIN_RM) ? 1 : 0),
+                     (unsigned)(gpio_get(FOOT_SW_PIN_RF) ? 1 : 0),
+                     (unsigned)(gpio_get(FOOT_SW_PIN_LR) ? 1 : 0),
+                     (unsigned)(gpio_get(FOOT_SW_PIN_LM) ? 1 : 0),
+                     (unsigned)(gpio_get(FOOT_SW_PIN_LF) ? 1 : 0));
+    hal_debug_printf("[PORTS] ext: mode=%ld a0=%u a1=%u\r\n",
+                     (long)EXT_PIN_MODE,
+                     (unsigned)g_ext_adc_mv[0], (unsigned)g_ext_adc_mv[1]);
+    ports_print_gpio();
+    /* 固定功能脚: 只报数字电平有意义的几个 (I2C 的 GP14/15 与电池 ADC 的
+     * GP28 没有"电平"可言, 它们的归属写在端口页的静态表里)。 */
+    hal_debug_printf("[PORTS] fixed: spwl=%u spwr=%u ledr=%u ledg=%u boot=%u\r\n",
+                     (unsigned)(gpio_get(SERVO_PWR_LEFT_PIN) ? 1 : 0),
+                     (unsigned)(gpio_get(SERVO_PWR_RIGHT_PIN) ? 1 : 0),
+                     (unsigned)(gpio_get(LED_RED_PIN) ? 1 : 0),
+                     (unsigned)(gpio_get(LED_GREEN_PIN) ? 1 : 0),
+                     (unsigned)(gpio_get(IMU_BOOT_PIN) ? 1 : 0));
 }
 
 /* ==================== 调试辅助接口实现 ==================== */
