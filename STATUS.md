@@ -872,7 +872,7 @@ PWM 值只在 RAM 里, 断电即 0 (无持久化)。**去扭矩 / 急停 (`!S`�
   (`python3 tools/tcp_monitor.py [--host H] [--port 7100]`); 可多实例同时连接
 - **tools/fake_robot.py**: 无硬件测试用假机器人 (配 socat pty 对), 附
   `!BURST <n>` 测试钩子
-- `tools/test_bridge.py`: TCP 桥接端到端回归测试 (socat pty 模拟串口, 18 项断言 —
+- `tools/test_bridge.py`: TCP 桥接端到端回归测试 (socat pty 模拟串口, 21 项断言 —
   双向转发 / 多客户端广播 / 慢客户端断开 / 串口重连恢复)
 
 ### ⚠️ 手工测串口输出时的两个陷阱 (会得出完全错误的结论)
@@ -888,13 +888,17 @@ PWM 值只在 RAM 里, 断电即 0 (无持久化)。**去扭矩 / 急停 (`!S`�
 ### TCP 桥接的数据流与线程安全 ★2026-09
 
 ```
-串口 fd ──读──> 主线程 ──bridge_publish()──> tcp_tx 队列 ──> TCP 线程 ──> 各客户端
+串口 fd ──读──> 主线程 ──bridge_publish()──> tcp_tx 队列 ──自唤醒管道──> TCP 线程 ──> 各客户端
 客户端  ──> TCP 线程 ──> tcp_rx 队列 ──自唤醒管道──> 主线程 ──send_line()──> 串口 fd
 ```
 
 - ★ **串口 fd 只由主线程读写**; TCP 线程只碰套接字; 两者仅经线程安全队列通信
-- `_wake_r/_wake_w` 非阻塞自唤醒管道: TCP 线程收到命令后立即唤醒主 select
-  (否则命令要等最长 0.5s 的 select 超时才被处理)
+- **两个方向各一根非阻塞自唤醒管道** —— TCP 线程的 select 空闲时要睡满 0.5s 超时,
+  没人叫醒它就得等超时才动:
+  - `_wake_r/_wake_w`: TCP 线程收到命令 → 立即唤醒主 select (否则命令等超时才被处理)
+  - `_tx_wake_r/_tx_wake_w`: 主线程入队遥测 → TCP 线程立即转发给客户端。缺这根时
+    空闲链路上的遥测与命令应答被按 500ms 一批押后 (端到端往返中位实测 502ms;
+    补上后 20ms, 真机 7ms)
 - `_clients_lock` 是**非递归**锁 → 发送与断开必须在锁外做:
   持锁 `send()` 会挡住主线程的 `bridge_publish()`; 持锁调 `_drop_client()`
   会自死锁 (它要重入取同一把锁)
@@ -937,7 +941,7 @@ Pico ──USB CDC──> serial_console.py ──TCP:7100──> webconfig/serv
 - `tools/webconfig/server.py` — 桥接客户端 + SSE 广播 + 静态服务 + 轮询调度
 - `tools/webconfig/flasher.py` — 设备检测 (扫 /sys) + picotool 烧录; 只此一处碰 USB
 - `tools/webconfig/index.html` — 单页应用 (零依赖, 无构建步骤)
-- `tools/webconfig/test_webconfig.py` — 239 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端)
+- `tools/webconfig/test_webconfig.py` — 251 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延)
 
 ```bash
 python3 tools/serial_console.py       # 终端 1: 串口守护 (headless 运行即可)
