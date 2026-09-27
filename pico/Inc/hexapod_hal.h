@@ -157,6 +157,20 @@ typedef enum {
 bool hal_input_init(input_type_t type);
 
 /**
+ * @brief 当前输入源是否为 PS2
+ * @note 输入源可在运行期用 !MODE 切换, 所以调用方要按当前值判断,
+ *       不能拿编译期的 INPUT_CONTROL_MODE 当答案。
+ * @return true 表示 PS2, false 表示 CRSF (或 USB CDC 构建)
+ */
+bool hal_input_is_ps2(void);
+
+/**
+ * @brief 让实际输入源跟随 input_mode 参数 (参数是唯一真源)
+ * @note 每轮控制循环调用: 相等时只是一次比较, 变化时才重配 UART。
+ */
+void hal_input_sync_mode(void);
+
+/**
  * @brief 读取输入数据并更新控制状态
  * @param ctrl_state 控制状态
  * @return true表示有新数据

@@ -83,9 +83,12 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
 
     hal_debug_init();
 #if INPUT_CONTROL_MODE == 0
-    hal_input_init(INPUT_TYPE_CRSF);   /* CRSF 接收器 (ELRS) — 默认输入 */
+    hal_input_init(INPUT_TYPE_CRSF);   /* CRSF 接收器 (ELRS) */
 #elif INPUT_CONTROL_MODE == 1
-    hal_input_init(INPUT_TYPE_PS2);    /* PS2 手柄 — 默认输入 */
+    /* 双模构建: 默认源由运行时参数决定 (INPUT_CONTROL_MODE 只是构建默认值,
+     * params_load() 已在本函数之前跑过, 所以 flash 里的选择在这里生效)。
+     * !MODE 切换会回写该参数, !CFGW 后重启即跟随上次选择。 */
+    hal_input_init((INPUT_MODE_RUNTIME == 1) ? INPUT_TYPE_PS2 : INPUT_TYPE_CRSF);
 #else
     hal_input_init(INPUT_TYPE_SERIAL); /* USB CDC 串口命令 */
 #endif

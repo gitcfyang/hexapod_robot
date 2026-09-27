@@ -346,6 +346,7 @@ int main(void)
 
         /* ---- 每20ms控制循环 ---- */
         if (now - last_update >= CONTROL_LOOP_PERIOD_MS) {
+            hal_input_sync_mode();   /* 输入源跟随 input_mode 参数 (网页滑条也即时生效) */
             hexapod_update(&g_robot);
             last_update = now;
 
@@ -407,12 +408,15 @@ int main(void)
                             state->leg_lift_height);
                 hal_led_set(0, true);
             } else {
-#if INPUT_CONTROL_MODE == 0
-                hal_debug_printf("[IDLE] Waiting for Arm signal (CH5)...\r\n");
-#elif INPUT_CONTROL_MODE == 1
-                hal_debug_printf("[IDLE] Waiting for START (PS2 arm)...\r\n");
-#else
+#if INPUT_CONTROL_MODE == 2
                 hal_debug_printf("[IDLE] Send !O to arm, !F/!B/!L/!R to move\r\n");
+#else
+                /* 输入源是运行期选择 (!MODE), 文案要跟着当前源走 */
+                if (hal_input_is_ps2()) {
+                    hal_debug_printf("[IDLE] Waiting for START (PS2 arm)...\r\n");
+                } else {
+                    hal_debug_printf("[IDLE] Waiting for Arm signal (CH5)...\r\n");
+                }
 #endif
                 hal_led_set(0, false);
 

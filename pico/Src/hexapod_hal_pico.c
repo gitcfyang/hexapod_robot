@@ -710,6 +710,26 @@ static void crsf_uart_irq_handler(void)
     }
 }
 
+bool hal_input_is_ps2(void)
+{
+    return g_input_mode == INPUT_MODE_PS2;
+}
+
+void hal_input_sync_mode(void)
+{
+#if INPUT_CONTROL_MODE == 2
+    /* USB CDC 构建: 输入源固定, input_mode 参数不生效 */
+#else
+    /* 参数是唯一真源: 网页滑条 / !MODE / !CFGR 都只写 g_params, 由这里让实际
+     * 输入源跟上 —— 否则直接写参数要重启才生效, 和 !MODE 的即时语义对不上。
+     * 两边相等时 (含 !MODE 刚切完) 只做一次比较, 没有任何 I/O。 */
+    bool want_ps2 = (g_params.input_mode == INPUT_MODE_PS2);
+    if (want_ps2 != (g_input_mode == INPUT_MODE_PS2)) {
+        hal_input_init(want_ps2 ? INPUT_TYPE_PS2 : INPUT_TYPE_CRSF);
+    }
+#endif
+}
+
 bool hal_input_init(input_type_t type)
 {
     static bool init_done = false;
@@ -1225,7 +1245,9 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
 #if PS2_ENABLED
             /* ---- !MODE: 输入源运行时切换 (PS2_ENABLED) ----
              * !MODE crsf → 切换到 CRSF 模式
-             * !MODE ps2  → 切换到 PS2 模式 */
+             * !MODE ps2  → 切换到 PS2 模式
+             * 同时回写 input_mode 参数 —— !CFGW 后重启即跟随这次选择。
+             * 只切不加 !CFGW 的话重启回到 flash 里的旧值 (与改动前行为一致)。 */
             if (len >= 3 && buf[2] == 'O') {
                 uint8_t p = 5;
                 while (p < len && buf[p] == ' ') p++;
@@ -1233,11 +1255,13 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
                     && buf[p+2] == 's' && buf[p+3] == 'f') {
                     g_input_mode = INPUT_MODE_CRSF;
                     g_mode_switch_time_ms = hal_get_tick_ms();
+                    params_set("input_mode", INPUT_MODE_CRSF, NULL);
                     hal_debug_printf("[MODE] Switched to CRSF\r\n");
                 } else if (p + 2 < len && buf[p] == 'p' && buf[p+1] == 's'
                            && buf[p+2] == '2') {
                     g_input_mode = INPUT_MODE_PS2;
                     g_mode_switch_time_ms = hal_get_tick_ms();
+                    params_set("input_mode", INPUT_MODE_PS2, NULL);
                     hal_debug_printf("[MODE] Switched to PS2\r\n");
                 } else {
                     hal_debug_printf("Usage: !MODE crsf|ps2\r\n");

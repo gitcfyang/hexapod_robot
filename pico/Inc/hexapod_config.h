@@ -243,6 +243,8 @@
 #else
 #define INPUT_MODE_DEFAULT      0   /* CRSF/USB 构建 */
 #endif
+#define INPUT_MODE_RUNTIME      (g_params.input_mode)
+
 /* 无舵机调试模式：PRODUCTION=0 要求舵机硬件就绪才启动 */
 #define HEADLESS_MODE           0   /* ★ PS2 测试: 舵机/I2C 已死仍进入主循环 (测完改回 0) */
 
