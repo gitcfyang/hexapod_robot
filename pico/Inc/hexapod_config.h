@@ -86,9 +86,10 @@
  *   3. 核心循环检查 (hexapod_core.c) — 紧急停止
  * 设为 0 时: 跳过 ADC 读取, 舵机供电无条件开启, 无任何电压报警。
  * ⚠️ 新 PCB (2026-08) 已将 ADC 改至 GP28 (绕开旧板损坏的 GP26) +
- *   VBAT 入口 TVS + ADC 输入齐纳钳位, 分压电路待新板实测正常后改回 1 */
-#define BATTERY_CHECK_ENABLED   0   /* ★ 待新 PCB 实测分压电路后启用 */
+ *   VBAT 入口 TVS + ADC 输入齐纳钳位。
+ * ★ 运行时可改: !CFG batt_check 1 /  网页「参数 → 功能开关」 */
 #define BATTERY_CHECK_ENABLED_DEFAULT   0   /* ★ 待新 PCB 实测分压电路后启用 */
+#define BATTERY_CHECK_ENABLED           (g_params.batt_check)
 
 /* ==================== 电池检测配置 (GP28 ADC2, 2S 18650) ==================== */
 
@@ -104,8 +105,18 @@
 #define BATTERY_ADC_INPUT       2
 #define ADC_REF_VOLTAGE         3300
 #define ADC_RESOLUTION          4095
-#define BATTERY_DIVIDER_RATIO   8.021f    /* 377/47, 2S 18650 */
+
+/* 分压比: 理论值 377/47 = 8.021, 实测标定为 8.134
+ *   单点标定 (2026-09-27, !BATT): 万用表 8.37V vs 引脚 1029mV
+ *   → 理论引脚应为 1043mV, 实测低 -1.4%。误差源: 330k||47k ≈ 41k 的
+ *   源阻抗令 ADC 采样保持电容充电不足 (RP2040 ADC 建议源阻抗 10k 量级)
+ *   + 电阻容差 + 3.3V 参考(即 3.3V 轨)自身容差。
+ *   标定把这个固定比例误差折算进比值 —— 注意它同时把 3.3V 轨的偏差
+ *   一并折进来了, 换板/换稳压方案后需重新标定。
+ *   标定后读取偏低的方向对应"截止偏早", 属安全侧。
+ * ★ 运行时可改: !CFG batt_ratio_milli 8134 (×1000, 现场二次标定用) */
 #define BATTERY_DIVIDER_RATIO_DEFAULT   8.134f    /* 标定值 (理论 377/47 = 8.021) */
+#define BATTERY_DIVIDER_RATIO           (0.001f * (float)g_params.batt_ratio_milli)
 
 /* 2S 18650 电压阈值 (mV)
  *   8.4V = 充满 (4.2V/节)
@@ -113,20 +124,47 @@
  *          (高于满电 8.4V; 可捕获误接 3S 电池 9V+ 或电源故障)
  *   7.4V = 标称
  *   7.0V = 低电压警告 (3.5V/节) — 红灯闪烁 + 蜂鸣提示, 建议尽快回充
- *   6.6V = 保护截止 (3.3V/节) — 断开舵机供电, 防止过放损坏电池 */
-#define BATTERY_OVERVOLTAGE_MV  8800
-#define BATTERY_WARNING_MV      7000
-#define BATTERY_CUTOFF_MV       6600
-#define BATTERY_RECOVERY_MV     7300    /* 电压回升到此值以上才重新接通舵机供电 */
-
-/* 电压监测间隔 (ms) */
-#define BATTERY_CHECK_INTERVAL_MS   1000
+ *   6.6V = 保护截止 (3.3V/节) — 断开舵机供电, 防止过放损坏电池
+ *
+ * ★ 四个阈值运行时可改 (!CFG batt_ov_mv / batt_warn_mv / batt_cutoff_mv /
+ *   batt_recov_mv), 网页「参数 → 电池」页也有滑块。 */
 #define BATTERY_OVERVOLTAGE_MV_DEFAULT  8800
 #define BATTERY_WARNING_MV_DEFAULT      7000
 #define BATTERY_CUTOFF_MV_DEFAULT       6600
 #define BATTERY_RECOVERY_MV_DEFAULT     7300    /* 回升到此值以上才重新接通舵机供电 */
+#define BATTERY_OVERVOLTAGE_MV          (g_params.batt_ov_mv)
+#define BATTERY_WARNING_MV              (g_params.batt_warn_mv)
+#define BATTERY_CUTOFF_MV               (g_params.batt_cutoff_mv)
+#define BATTERY_RECOVERY_MV             (g_params.batt_recov_mv)
+
+/* 电压监测间隔 (ms) — 运行时 !CFG batt_interval_ms */
 #define BATTERY_CHECK_INTERVAL_MS_DEFAULT   1000
+#define BATTERY_CHECK_INTERVAL_MS           (g_params.batt_interval_ms)
+
+/* 未接电池判定门限 (mV) —— 低于此值视为"分压抽头悬空", 即 USB 供电, 非故障。
+ *
+ * 为什么不能用截止电压代替: 未接电池时抽头被 R2 (47k) 拉到 ~0mV, 会被
+ * `v < cutoff` 判成过放 → 假报警 + 停机。而 USB 供电调试是最常用的台面场景。
+ * 2S 18650 即使过放到保护板切断也不会低于 ~5V, 所以 3V 这条线两边都很宽裕。
+ *
+ * ★ 运行时可改: !CFG batt_absent_mv 3000 (现场按实测调整)
+ *   若新板 USB 供电时读数偏高 (分压前级漏电流), 调高此值即可。 */
 #define BATTERY_ABSENT_MV_DEFAULT           3000
+#define BATTERY_ABSENT_MV                   (g_params.batt_absent_mv)
+
+/* 判定"电压已落定"的门限 (mV) —— 趋势窗口内净跌幅超过它, 说明电压还在往下走,
+ * 此时不判故障, 再看一轮。
+ *
+ * 为什么需要: 拔电池/拔电源后, 电池+ 节点上的储能电容经分压电阻缓慢放电,
+ * 电压从 8.4V 一路衰减到 0 —— 中途必然穿过 6.6V 截止区。若只看"是否低于截止"
+ * 就会在衰减途中误触发停机。而真过放的电池在负载下会"掉到某个值然后停住",
+ * 所以判据是**是否还在下降**而不是降得多快: 快衰减/慢衰减一视同仁。
+ *
+ * 窗口取 4 次采样 (见 hal_battery_state 的 BATT_TREND_LEN), 所以这里 100mV 意为
+ * "约 25mV/s 以上的净衰减"。分压 377kΩ 下储能电容要大到 700µF (τ≈264s) 才会
+ * 慢到判不出来, 而到那时电压在截止区里能赖上几分钟, 早已不构成"拔了电池还在跑"
+ * 的场景。采样离散度实测 ~12mV, 远在门限之下, 停住的电池不会被误判成"还在下降"。 */
+#define BATTERY_SETTLE_MV                   100
 
 /* ==================== IMU 姿态传感器配置 ==================== */
 

@@ -344,14 +344,14 @@ void hexapod_update(hexapod_t *robot)
         return;
     }
 
-    /* 检查电池电压 */
-#if BATTERY_CHECK_ENABLED
-    if (!hal_check_battery()) {
-        hal_debug_printf("Low battery!\r\n");
+    /* 检查电池电压 (batt_check 为运行时参数)
+     * 只有 FAULT 才停机; ABSENT (未接电池/USB 供电) 是正常的台面调试状态,
+     * 假报过放会让机器人一插 USB 就趴窝。状态迁移提示由 hal_battery_state()
+     * 内部打印一次, 这里不再逐次循环重复打印。 */
+    if (BATTERY_CHECK_ENABLED && hal_battery_state() == BATT_STATE_FAULT) {
         hexapod_emergency_stop(robot);
         return;
     }
-#endif
 
     /* 读取输入 (直接覆写 travel_length) */
     hal_input_update(&robot->state);

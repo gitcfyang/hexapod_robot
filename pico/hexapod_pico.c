@@ -155,72 +155,85 @@ int main(void)
      */
     hal_servo_power_init();  /* 初始化供电引脚, 保持断电状态 */
 
-#if BATTERY_CHECK_ENABLED
-    uint16_t boot_voltage = hal_get_battery_voltage();
-    hal_debug_printf("Battery: %u mV\r\n", boot_voltage);
+    /* batt_check 是运行时参数, 故这里用运行时分支而非 #if。
+     * 两个等待循环里都能用 !CFG 改阈值, 或直接 !CFG batt_check 0 放弃检测
+     * 继续启动 —— 分压电路还没验证时这是唯一的逃生口。 */
+    if (BATTERY_CHECK_ENABLED) {
+        uint16_t boot_voltage = hal_get_battery_voltage();
+        hal_debug_printf("Battery: %u mV\r\n", boot_voltage);
 
-    if (boot_voltage > BATTERY_OVERVOLTAGE_MV) {
-        /* 电压过高: 拒绝启动, 红色 LED 常亮 + 蜂鸣报警
-         * 可能原因: 误接 3S 电池 / 电源故障 / 分压电阻焊接错误 */
-        hal_debug_printf("BATTERY OVERVOLTAGE (%u mV > %u mV)! Servo power DISABLED.\r\n",
-                         boot_voltage, BATTERY_OVERVOLTAGE_MV);
-        store_log_event(STORE_EVT_BATT_OV, boot_voltage);
-        hal_led_set(1, true);  /* 红色 LED 常亮 */
-        uint16_t ov_alarm_notes[] = {1200, 0, 1200, 0, 1200};
-        uint16_t ov_alarm_dur[]   = {200, 100, 200, 100, 400};
-        hal_play_sound(5, ov_alarm_notes, ov_alarm_dur);
-
-        while (1) {
-            /* 每 5s 复查电压, 降到阈值以下后自动继续启动
-             * 分 50 次轮询, 保持 !I2C 等 USB 诊断命令可用 */
-            for (int i = 0; i < 50; i++) {
-                hal_poll_usb_commands(NULL);
-                sleep_ms(100);
-            }
-            boot_voltage = hal_get_battery_voltage();
-            if (boot_voltage <= BATTERY_OVERVOLTAGE_MV) {
-                hal_led_set(1, false);
-                hal_debug_printf("Battery recovered: %u mV, continuing boot...\r\n",
-                                 boot_voltage);
-                break;
-            }
-            /* 仍在过压: 周期性蜂鸣提醒 */
+        if (boot_voltage > BATTERY_OVERVOLTAGE_MV) {
+            /* 电压过高: 拒绝启动, 红色 LED 常亮 + 蜂鸣报警
+             * 可能原因: 误接 3S 电池 / 电源故障 / 分压电阻焊接错误 */
+            hal_debug_printf("BATTERY OVERVOLTAGE (%u mV > %u mV)! Servo power DISABLED.\r\n",
+                             boot_voltage, BATTERY_OVERVOLTAGE_MV);
+            store_log_event(STORE_EVT_BATT_OV, boot_voltage);
+            hal_led_set(1, true);  /* 红色 LED 常亮 */
+            uint16_t ov_alarm_notes[] = {1200, 0, 1200, 0, 1200};
+            uint16_t ov_alarm_dur[]   = {200, 100, 200, 100, 400};
             hal_play_sound(5, ov_alarm_notes, ov_alarm_dur);
-        }
-    } else if (boot_voltage < BATTERY_CUTOFF_MV) {
-        /* 电压过低: 拒绝启动, 红色 LED 常亮 + 蜂鸣报警 */
-        hal_debug_printf("BATTERY TOO LOW (%u mV < %u mV)! Servo power DISABLED.\r\n",
-                         boot_voltage, BATTERY_CUTOFF_MV);
-        store_log_event(STORE_EVT_BATT_CUTOFF, boot_voltage);
-        hal_led_set(1, true);  /* 红色 LED 常亮 */
-        uint16_t alarm_notes[] = {200, 0, 200, 0, 200};
-        uint16_t alarm_dur[]   = {200, 100, 200, 100, 400};
-        hal_play_sound(5, alarm_notes, alarm_dur);
 
-        while (1) {
-            /* 等待换电池/充电, 每 5s 复查一次电压, 恢复后自动继续
-             * 分 50 次轮询, 保持 !I2C 等 USB 诊断命令可用 */
-            for (int i = 0; i < 50; i++) {
-                hal_poll_usb_commands(NULL);
-                sleep_ms(100);
+            while (1) {
+                /* 每 5s 复查电压, 降到阈值以下后自动继续启动
+                 * 分 50 次轮询, 保持 !I2C 等 USB 诊断命令可用 */
+                for (int i = 0; i < 50; i++) {
+                    hal_poll_usb_commands(NULL);
+                    sleep_ms(100);
+                }
+                boot_voltage = hal_get_battery_voltage();
+                if (!BATTERY_CHECK_ENABLED) {
+                    hal_led_set(1, false);
+                    hal_debug_printf("Battery check disabled at runtime, continuing boot...\r\n");
+                    break;
+                }
+                if (boot_voltage <= BATTERY_OVERVOLTAGE_MV) {
+                    hal_led_set(1, false);
+                    hal_debug_printf("Battery recovered: %u mV, continuing boot...\r\n",
+                                     boot_voltage);
+                    break;
+                }
+                /* 仍在过压: 周期性蜂鸣提醒 */
+                hal_play_sound(5, ov_alarm_notes, ov_alarm_dur);
             }
-            boot_voltage = hal_get_battery_voltage();
-            if (boot_voltage >= BATTERY_RECOVERY_MV) {
-                hal_led_set(1, false);
-                hal_debug_printf("Battery recovered: %u mV, continuing boot...\r\n",
-                                 boot_voltage);
-                break;
+        } else if (boot_voltage < BATTERY_CUTOFF_MV) {
+            /* 电压过低: 拒绝启动, 红色 LED 常亮 + 蜂鸣报警 */
+            hal_debug_printf("BATTERY TOO LOW (%u mV < %u mV)! Servo power DISABLED.\r\n",
+                             boot_voltage, BATTERY_CUTOFF_MV);
+            store_log_event(STORE_EVT_BATT_CUTOFF, boot_voltage);
+            hal_led_set(1, true);  /* 红色 LED 常亮 */
+            uint16_t alarm_notes[] = {200, 0, 200, 0, 200};
+            uint16_t alarm_dur[]   = {200, 100, 200, 100, 400};
+            hal_play_sound(5, alarm_notes, alarm_dur);
+
+            while (1) {
+                /* 等待换电池/充电, 每 5s 复查一次电压, 恢复后自动继续
+                 * 分 50 次轮询, 保持 !I2C 等 USB 诊断命令可用 */
+                for (int i = 0; i < 50; i++) {
+                    hal_poll_usb_commands(NULL);
+                    sleep_ms(100);
+                }
+                boot_voltage = hal_get_battery_voltage();
+                if (!BATTERY_CHECK_ENABLED) {
+                    hal_led_set(1, false);
+                    hal_debug_printf("Battery check disabled at runtime, continuing boot...\r\n");
+                    break;
+                }
+                if (boot_voltage >= BATTERY_RECOVERY_MV) {
+                    hal_led_set(1, false);
+                    hal_debug_printf("Battery recovered: %u mV, continuing boot...\r\n",
+                                     boot_voltage);
+                    break;
+                }
             }
+        } else if (boot_voltage < BATTERY_WARNING_MV) {
+            /* 低压警告: 允许启动但红灯闪烁提醒 */
+            hal_debug_printf("BATTERY LOW (%u mV)! Charge soon.\r\n", boot_voltage);
+            store_log_event(STORE_EVT_BATT_WARN, boot_voltage);
         }
-    } else if (boot_voltage < BATTERY_WARNING_MV) {
-        /* 低压警告: 允许启动但红灯闪烁提醒 */
-        hal_debug_printf("BATTERY LOW (%u mV)! Charge soon.\r\n", boot_voltage);
-        store_log_event(STORE_EVT_BATT_WARN, boot_voltage);
+    } else {
+        /* 电池检测已禁用: 跳过 ADC 读取 */
+        hal_debug_printf("Battery check DISABLED (batt_check=0)\r\n");
     }
-#else
-    /* 电池检测已禁用 (BATTERY_CHECK_ENABLED=0): 跳过 ADC 读取 */
-    hal_debug_printf("Battery check DISABLED (BATTERY_CHECK_ENABLED=0)\r\n");
-#endif
 
     /* 电池检测通过 → 正式开机。
      * 注意: 舵机供电 (GP10/GP11) 保持断电, 由 ARM 解锁开关控制 —
@@ -324,10 +337,8 @@ int main(void)
     uint32_t last_debug_time  = 0;
     uint32_t last_update      = 0;
     uint32_t frame_delta_total = 0;
-#if BATTERY_CHECK_ENABLED
     uint32_t last_battery_check = 0;
     bool     servo_power_cut    = false;   /* 舵机供电是否已被过放/过压保护切断 */
-#endif
 
     while (1) {
         watchdog_update();
@@ -412,15 +423,28 @@ int main(void)
             }
         }
 
-#if BATTERY_CHECK_ENABLED
         /* ---- 运行电压监测 (每 1s) ----
          * 分级保护:
          *   > OV (8.8V): 过压保护 (红灯常亮 + 蜂鸣, 断开两路舵机供电)
          *   ≥ RECOVERY: 正常 (红灯灭, 舵机供电保持)
          *   WARNING ~ RECOVERY: 低压警告 (红灯闪, 舵机供电保持, 提示尽快回充)
          *   CUTOFF ~ WARNING: 严重低压 (红灯快闪 + 蜂鸣, 舵机供电保持到最后)
-         *   < CUTOFF: 过放保护 (红灯常亮 + 蜂鸣, 断开两路舵机供电) */
-        if (now - last_battery_check >= BATTERY_CHECK_INTERVAL_MS) {
+         *   < CUTOFF: 过放保护 (红灯常亮 + 蜂鸣, 断开两路舵机供电)
+         *
+         * batt_check 是运行时参数, 故用运行时分支。 */
+        if (!BATTERY_CHECK_ENABLED) {
+            /* 运行中关掉 batt_check: 若供电正被保护切断, 立刻恢复 ——
+             * 否则舵机会一直断电到下次重启 (现场调试时很致命) */
+            if (servo_power_cut) {
+                servo_power_cut = false;
+                if (LED_ALARM_ENABLED) hal_led_set(1, false);
+                const control_state_t *bstate = hexapod_get_state(&g_robot);
+                if (bstate && bstate->robot_on) {
+                    hal_servo_power_set_all(true);
+                }
+                hal_debug_printf("[BATT] Check disabled at runtime. Servo power restored.\r\n");
+            }
+        } else if (now - last_battery_check >= BATTERY_CHECK_INTERVAL_MS) {
             last_battery_check = now;
             uint16_t voltage = hal_get_battery_voltage();
 
@@ -491,7 +515,6 @@ int main(void)
                 hal_led_set(1, false);
             }
         }
-#endif /* BATTERY_CHECK_ENABLED */
 
         tight_loop_contents();
     }

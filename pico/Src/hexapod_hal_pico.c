@@ -256,11 +256,169 @@ uint16_t hal_get_battery_voltage(void)
     return (uint16_t)voltage_mv;
 }
 
-bool hal_check_battery(void)
+/* 电池三态判定 (见 hexapod_hal.h: batt_state_t)
+ *
+ * 分支的先后有讲究: 未接电池时读数就是 0mV, 一旦先落进"低于截止电压"的分支
+ * 就会假报过放, 所以判定"是否算低于截止"之前必须先认 ABSENT。
+ *
+ *   v > overvolt                        → FAULT   过压 (无歧义, 立即)
+ *   v <= batt_absent_mv                 → ABSENT  未接电池 (USB 供电)
+ *   v < cutoff 且窗口内仍在下降          → 维持上次状态, 等它落定
+ *   v < cutoff 且已落定                  → FAULT   过放
+ *   其余                                 → OK
+ *
+ * "仍在下降就不判故障"是拔电池/拔电源的识别依据: 储能电容经分压电阻放电会把
+ * 电压从 8.4V 一路拖到 0, 中途穿过截止区; 而真过放的电池会掉到某值后停住。
+ * 判据取"是否还在下降"而不是"降得多快" —— 衰减慢下来后单次跌幅会小于任何固定
+ * 阈值, 而那时电压仍在截止区里, 快慢两种衰减要一视同仁。
+ *
+ * 趋势看一个 BATT_TREND_LEN 次采样的滑动窗口, 而不是只跟上一次采样比:
+ * 相邻两次的差值里既有真实衰减也有负载纹波, 分不开; 看整个窗口的净跌幅,
+ * 真实衰减每来一次采样就多欠一截, 纹波则只让当前值在均值附近上下摆 ——
+ * 摆到波谷时会被当成"还在下降", 但下一次采样就回到波峰侧, 至多推迟一两次。
+ * 窗口为空 (首次采样) 时不算趋势 —— 开机就低于截止说明电池确实是死的。
+ *
+ * 采样按 BATTERY_CHECK_INTERVAL_MS 节流 (默认 1s): 原来的实现每 20ms 控制循环
+ * 就跑一次 8 次 ADC 采样, 既浪费又让该参数形同虚设。 */
+#define BATT_ABSENT_DEBOUNCE    3       /* 连续 N 次采样确认才切到 ABSENT */
+#define BATT_TREND_LEN          4       /* 趋势窗口长度 (采样次数 = 秒) */
+
+batt_state_t hal_battery_state(void)
 {
-    uint16_t voltage = hal_get_battery_voltage();
-    /* 电压必须在安全窗口内: 低压截止 ~ 过压保护 */
-    return (voltage >= BATTERY_CUTOFF_MV && voltage <= BATTERY_OVERVOLTAGE_MV);
+    static batt_state_t s_state       = BATT_STATE_OK;
+    static uint32_t     last_check_ms = 0;
+    static uint8_t      absent_count  = 0;
+    static uint16_t     s_hist[BATT_TREND_LEN];   /* 最近几次采样 */
+    static uint8_t      s_hist_n      = 0;        /* 已填样本数 (兼作"采样过"标志) */
+    static uint8_t      s_hist_i      = 0;        /* 下一个写入位置 */
+
+    uint32_t now = hal_get_tick_ms();
+
+    /* 首次调用立即采样, 之后按间隔节流 */
+    if (s_hist_n && (now - last_check_ms) < (uint32_t)BATTERY_CHECK_INTERVAL_MS) {
+        return s_state;
+    }
+    last_check_ms = now;
+
+    uint16_t v = hal_get_battery_voltage();
+
+    /* 窗口最高值 → 与当前值之差即窗口内净跌幅 (窗口为空时不算趋势)
+     * 取最高值而不是最低值: 电压单调下降时窗口最低值就是上一次采样, 那样等于只跟
+     * 上一次比, 窗口白留了 —— 慢衰减单次跌幅小, 会被漏判成过放。 */
+    bool falling = false;
+    if (s_hist_n) {
+        uint16_t hi = s_hist[0];
+        for (uint8_t i = 1; i < s_hist_n; i++) {
+            if (s_hist[i] > hi) hi = s_hist[i];
+        }
+        falling = (hi > v) && ((int32_t)(hi - v) > BATTERY_SETTLE_MV);
+    }
+    s_hist[s_hist_i] = v;
+    s_hist_i = (uint8_t)((s_hist_i + 1) % BATT_TREND_LEN);
+    if (s_hist_n < BATT_TREND_LEN) s_hist_n++;
+
+    batt_state_t next;
+    if (v > BATTERY_OVERVOLTAGE_MV) {
+        next = BATT_STATE_FAULT;        /* 过压无歧义, 不看趋势 */
+    } else if (v <= BATTERY_ABSENT_MV) {
+        next = BATT_STATE_ABSENT;
+    } else if (v < BATTERY_CUTOFF_MV) {
+        /* 低于截止: 还在往下掉就先不下结论 (可能是在拔电池的衰减过程),
+         * 落定了才是真过放。多等一轮的代价远小于误停机的代价。 */
+        next = falling ? s_state : BATT_STATE_FAULT;
+    } else {
+        next = BATT_STATE_OK;
+    }
+
+    /* ABSENT 去抖: 抑制舵机 EMI / 上电瞬态造成的单次假读数。
+     * FAULT 不去抖 —— 过压要立刻响应。 */
+    if (next == BATT_STATE_ABSENT && s_state != BATT_STATE_ABSENT) {
+        if (++absent_count < BATT_ABSENT_DEBOUNCE) {
+            return s_state;             /* 还没确认, 维持上次状态 */
+        }
+    } else {
+        absent_count = 0;
+    }
+
+    if (next != s_state) {
+        /* 只在状态迁移时打印: 原来每次循环都打 "Low battery!" 会淹没日志 */
+        if (next == BATT_STATE_ABSENT) {
+            hal_debug_printf("[BATT] 未检测到电池 (%u mV, USB 供电), 跳过电池保护\r\n",
+                             (unsigned)v);
+        } else if (next == BATT_STATE_FAULT) {
+            hal_debug_printf("[BATT] 电压异常: %u mV (窗口 %d~%d mV), 停机\r\n",
+                             (unsigned)v, BATTERY_CUTOFF_MV, BATTERY_OVERVOLTAGE_MV);
+        } else if (s_state != BATT_STATE_OK) {
+            hal_debug_printf("[BATT] 供电已恢复: %u mV\r\n", (unsigned)v);
+        }
+        s_state = next;
+    }
+
+    return s_state;
+}
+
+/* 电池 ADC 诊断 (!BATT)
+ *
+ * 独立于 BATTERY_CHECK_ENABLED: 该开关为 0 时 hal_get_battery_voltage()
+ * 没有任何调用者, 新板分压电路就无从实测 —— 本命令是启用保护前的验证手段。
+ *
+ * 同时打印采样离散度 (max-min): 旧板 GP26 即因电压尖峰损坏, 而 330k 高串阻
+ * 分压的读数对地弹/舵机 EMI 极其敏感, 离散度是分压电路健康度的关键指标
+ * (见 STATUS.md「电路保护建议」事件 3)。 */
+static void battery_status_print(void)
+{
+    if (!adc_initialized) {
+        adc_init();
+        adc_gpio_init(BATTERY_ADC_PIN);
+        adc_select_input(BATTERY_ADC_INPUT);
+        adc_initialized = true;
+    }
+
+    /* 32 次采样: 记录 min/max 以暴露尖峰 */
+    uint32_t sum = 0, vmin = 0xFFFFFFFF, vmax = 0;
+    for (int i = 0; i < 32; i++) {
+        uint16_t v = adc_read();
+        sum += v;
+        if (v < vmin) vmin = v;
+        if (v > vmax) vmax = v;
+        sleep_us(10);
+    }
+    uint32_t avg = sum / 32;
+
+    /* 引脚电压与整串电压: 前者判分压电路, 后者是保护逻辑实际用的值 */
+    uint32_t pin_mv  = (uint32_t)((float)avg / ADC_RESOLUTION * ADC_REF_VOLTAGE);
+    uint32_t batt_mv = hal_get_battery_voltage();
+
+    /* 1 count ≈ 3300/4095 ≈ 0.81 mV (引脚侧) */
+    uint32_t spread_mv = (uint32_t)((vmax - vmin) * ADC_REF_VOLTAGE / ADC_RESOLUTION);
+
+    hal_debug_printf("=== Battery ADC (GP%d/ADC%d, divider 47/377) ===\r\n",
+                     BATTERY_ADC_PIN, BATTERY_ADC_INPUT);
+    hal_debug_printf("Raw: avg=%lu min=%lu max=%lu (spread %lu counts = %lu mV)\r\n",
+                     (unsigned long)avg, (unsigned long)vmin, (unsigned long)vmax,
+                     (unsigned long)(vmax - vmin), (unsigned long)spread_mv);
+    hal_debug_printf("Pin: %lu mV  →  Battery: %lu mV\r\n",
+                     (unsigned long)pin_mv, (unsigned long)batt_mv);
+    hal_debug_printf("Limits: %d ~ %d mV → %s\r\n",
+                     BATTERY_CUTOFF_MV, BATTERY_OVERVOLTAGE_MV,
+                     (batt_mv >= BATTERY_CUTOFF_MV && batt_mv <= BATTERY_OVERVOLTAGE_MV)
+                         ? "IN RANGE" : "OUT OF RANGE");
+    hal_debug_printf("Protection: BATTERY_CHECK_ENABLED=%d\r\n",
+                     BATTERY_CHECK_ENABLED);
+    /* 三态判定结果: USB 供电 (未接电池) 与真故障在这里就能区分开。
+     * 注意本行走的是 hal_battery_state(), 会被 1s 节流 —— 看到的是上一次
+     * 采样判定的状态, 连续按 !BATT 不会立刻刷新。 */
+    switch (hal_battery_state()) {
+    case BATT_STATE_ABSENT:
+        hal_debug_printf("State: ABSENT (未接电池, USB 供电 — 不算故障)\r\n");
+        break;
+    case BATT_STATE_FAULT:
+        hal_debug_printf("State: FAULT (过放或过压, 会停机)\r\n");
+        break;
+    default:
+        hal_debug_printf("State: OK\r\n");
+        break;
+    }
 }
 
 /* ==================== 舵机供电控制实现 (GP10/GP11) ==================== */
@@ -936,6 +1094,15 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
     /* ---- !IMU: IMU 状态 (欧拉角/中断/校准) ---- */
     if (buf[1] == 'I' && len >= 3 && buf[2] == 'M') {
         imu_status_print();
+        return true;
+    }
+
+    /* ---- !BATT: 电池 ADC 诊断 (无需控制状态, 上电失败时也可用) ----
+     * ⚠️ 必须拦截在 switch 之前: !B 单独是"后退", 靠长度区分
+     *    (与 !S 停止 / !SAVE 存盘 同理) */
+    if (buf[1] == 'B' && len >= 5 &&
+        buf[2] == 'A' && buf[3] == 'T' && buf[4] == 'T') {
+        battery_status_print();
         return true;
     }
 

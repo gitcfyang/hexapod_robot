@@ -81,10 +81,23 @@ void hal_delay_ms(uint32_t ms);
 uint16_t hal_get_battery_voltage(void);
 
 /**
- * @brief 检查电压是否正常
- * @return true表示电压正常
+ * 电池状态 (三态, 取代原来的 bool 窗口判断)
+ *
+ * ABSENT 与 FAULT 必须分开: 未接电池时 (USB 供电) 分压抽头被 R2 拉到 ~0mV,
+ * 若按"低于截止电压"处理就会假报过放并停机 —— 而 USB 供电调试恰恰是最常用的
+ * 台面场景。只有 FAULT 才该触发保护动作。
  */
-bool hal_check_battery(void);
+typedef enum {
+    BATT_STATE_OK = 0,      /* 电压在安全窗口内 */
+    BATT_STATE_ABSENT,      /* 未接电池 (USB 供电) — 非故障 */
+    BATT_STATE_FAULT,       /* 过放 / 过压 — 真故障, 需停机 */
+} batt_state_t;
+
+/**
+ * @brief 查询电池状态 (内部按 BATTERY_CHECK_INTERVAL_MS 节流采样)
+ * @return 三态电池状态
+ */
+batt_state_t hal_battery_state(void);
 
 /* ==================== 舵机供电控制接口 ==================== */
 
