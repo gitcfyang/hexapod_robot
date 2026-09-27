@@ -996,8 +996,16 @@ static bool calib_handle_command(uint8_t *buf, uint8_t len)
 /**
  * @brief 检测 I2C 总线上的 PCA9685 和 BNO055
  * @note 独立于机器人初始化, 启动失败/等待状态也可执行
+ *
+ * @param full_scan true = 额外做 128 地址全总线扫描 (!I2C, 手动调试用)。
+ *        false = 只做定向检测 (!I2C q, 供网页仪表盘轮询)。
+ *
+ * 命令处理跑在 20ms 控制循环内 (hal_input_update ← hexapod_update),
+ * 所以本函数耗时 = 舵机停更时长。健康总线上两者都是 ~20ms; 但总线被
+ * 拉死时每次 I2C 事务都会吃满 PCA9685_I2C_TIMEOUT_US, 128 个地址最坏
+ * 累计 640ms —— 故轮询走 !I2C q, 全扫描留给手动。
  */
-static void i2c_bus_check(void)
+static void i2c_bus_check(bool full_scan)
 {
     /* 确保 I2C 硬件已初始化 (机器人初始化失败时也可检测) */
     i2c_init(PCA9685_I2C_INSTANCE, PCA9685_I2C_BAUD);
@@ -1006,7 +1014,8 @@ static void i2c_bus_check(void)
     gpio_pull_up(PCA9685_I2C_SDA_PIN);
     gpio_pull_up(PCA9685_I2C_SCL_PIN);
 
-    hal_debug_printf("=== I2C Bus Check (SDA=GP14, SCL=GP15) ===\r\n");
+    hal_debug_printf("=== I2C Bus Check (SDA=GP14, SCL=GP15)%s ===\r\n",
+                     full_scan ? "" : " quick");
 
     /* 舵机供电引脚状态 (诊断 PCA9685 供电极性是否正确) */
     hal_debug_printf("Servo power: GP10(left)=%d  GP11(right)=%d\r\n",
@@ -1046,8 +1055,10 @@ static void i2c_bus_check(void)
         }
     }
 
-    /* 全总线扫描 (列出所有 ACK 的设备) */
-    pca9685_scan_bus();
+    /* 全总线扫描 (列出所有 ACK 的设备) —— 仅手动 !I2C 执行, 见函数注释 */
+    if (full_scan) {
+        pca9685_scan_bus();
+    }
 
     /* 总线空闲电平诊断: 临时切为 GPIO 输入上拉读取, 再恢复 I2C 功能。
      * 0 = 被器件拉低 (器件损坏把总线拖死) 或 GPIO 引脚本身损坏;
@@ -1706,7 +1717,6 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
 {
     if (len < 2 || buf[0] != '!') return false;
 
-    /* ---- !I2C: I2C 总线设备检测 (无需控制状态, 启动失败时也可用) ---- */
     /* ---- !I2C2: 外部软件 I2C (GP26/27) 总线扫描 ----
      * ⚠️ 必须在 !I2C 之前: 下面那条只看到 buf[2]=='2' 就认了, 会把
      *    "!I2C2" 当成内部总线的 !I2C 命令吃掉。 */
@@ -1715,8 +1725,12 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
         return true;
     }
 
+    /* ---- !I2C: I2C 总线设备检测 (无需控制状态, 启动失败时也可用) ----
+     *   !I2C      定向检测 + 128 地址全总线扫描 (手动调试用, 见函数注释)
+     *   !I2C q    仅定向检测 (网页仪表盘轮询用) */
     if (buf[1] == 'I' && len >= 3 && buf[2] == '2') {
-        i2c_bus_check();
+        bool quick = (len >= 6 && buf[4] == ' ' && (buf[5] == 'q' || buf[5] == 'Q'));
+        i2c_bus_check(!quick);
         return true;
     }
 
