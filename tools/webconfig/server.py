@@ -738,6 +738,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(body)))
+        # 页面每次现读现发 (改 index.html 不用重启服务), 但必须禁掉缓存:
+        # 浏览器缓存住的旧页面与"服务在跑旧代码"现象完全一样, 没法区分。
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(body)
 
