@@ -1454,8 +1454,10 @@ UART/I2C 的引脚归属被当作硬约束, 端口页对它们只提供开关。
 |---|---|---|
 | 舵机 I2C 总线 | `i2c1` @400kHz, GP14 SDA / GP15 SCL | hexapod_i2c_protocol.h:19-22 |
 | PCA9685 地址与板数 | 0x40 左 / 0x41 右, `PCA9685_BOARD_COUNT 2` | hexapod_i2c_protocol.h:27-28, hexapod_config.h:303 |
-| 舵机 id → 板 / 通道 | id 0-8 → 0x41, 9-17 → 0x40 (PCB 定版) | hexapod_hal_pico.c:2391 一带 |
+| 舵机 id → 板 / 通道 | id = 腿×3+关节; id 0-8 → 0x41, 9-17 → 0x40 (PCB 定版) | hexapod_hal_pico.c:267-276, 2391; hexapod_i2c_protocol.c:248-257 |
 | 空闲 PWM 14 路编号 | 0-6 左板 / 7-13 右板, 物理通道基址 0 / 9 | hexapod_config.h:995-1001 |
+| IMU 地址 | BNO055 @0x29 (bno055.c 里有地址变量, 但只被宏赋值) | hexapod_config.h:209 |
+| 时序 / 频率常量 | CRSF 420000、I2C 400kHz/5ms 超时、电机 PWM 10kHz、PS2 8µs 半周期、PCA9685 周期默认 9500µs | hexapod_hal_pico.c:555-556, 632; hexapod_i2c_protocol.h:20, 23, 63-64; hexapod_ps2.h:38 |
 | 舵机电源 | GP10 左 / GP11 右 | hexapod_hal_pico.c:508-509 |
 | 直流电机 | GP2 / GP3 | hexapod_hal_pico.c:553-554 |
 | 输入 UART1 (CRSF/PS2) | GP4 TX / GP5 RX | hexapod_hal_pico.c:627-628 |
@@ -1490,6 +1492,11 @@ UART/I2C 的引脚归属被当作硬约束, 端口页对它们只提供开关。
 - **功能 → 参数**: 波特率、I2C 速率、PCA9685 地址/通道映射这类"带数量"的东西
   留在参数表 (已有 `uart0_baud` / `input_baud_serial` 先例), 资源表只管"哪根线
   接什么"。
+- **这套机制不是新发明, 是推广两条现成先例** —— ① PWM 周期已经走"编译期默认
+  (hexapod_i2c_protocol.h:63-64) + flash 覆盖 (hexapod_store.c:277) + 运行期设置
+  (hexapod_i2c_protocol.c:273-290)"三级结构; ② PCA9685 的板地址本来就是上电扫
+  候选表探出来的 (hexapod_i2c_protocol.c:27, 109-136), 板数运行期可变。资源表把
+  同样的"默认在代码、真值在 flash、启动时应用 + 探测降级"搬到引脚上。
 
 第一版功能枚举 (草案): `NONE` / `FREE` (普通 GPIO, 收编现有 `gpXX_fn`) /
 `UART0_TX|RX` / `UART1_TX|RX` / `I2C0_SDA|SCL` / `I2C1_SDA|SCL` /
@@ -1541,8 +1548,9 @@ UART/I2C 的引脚归属被当作硬约束, 端口页对它们只提供开关。
 
 - 新增**种类**的设备或协议 (新传感器、新外设) —— 永远要代码;
 - 换 MCU / 换板型 (RP2040 → RP2350; Pico W 的 GP25/GP29 被无线占用, 与板载脚表冲突);
-- 构建变体 (`INPUT_CONTROL_MODE` 的 USB/PS2/CRSF、`PS2_ENABLED`、`HEADLESS_MODE`)
-  —— 这些是"编不编这段功能", 与引脚无关, 保持编译期;
+- 构建变体 (`INPUT_CONTROL_MODE` 的 USB/PS2/CRSF、`PS2_ENABLED`、`HEADLESS_MODE`、
+  `USB_DEBUG_ENABLED`、`IMU_BOOT_GPIO_ENABLED`) —— 这些是"编不编这段功能",
+  与引脚无关, 保持编译期;
 - flash 扇区布局与三种记录的格式改版。
 
 ### 风险与容错
