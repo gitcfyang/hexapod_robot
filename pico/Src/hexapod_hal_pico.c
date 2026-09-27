@@ -1941,10 +1941,7 @@ bool hal_is_period_calib_active(void)
 /* ==================== IMU 姿态传感器接口 ==================== */
 
 static bool g_imu_available = false;
-
-#if IMU_ENABLED
 static imu_data_t g_imu_last;           /* 最近一次有效读数 (调试用) */
-#endif
 
 /** @brief 查询 IMU 是否已初始化成功 (供 !CFG imu_enabled 即时重试) */
 bool hal_imu_is_available(void)
@@ -1961,7 +1958,11 @@ bool hal_imu_is_available(void)
  */
 bool hal_imu_init(void)
 {
-#if IMU_ENABLED
+    if (!IMU_ENABLED) {
+        g_imu_available = false;
+        return false;
+    }
+
     g_imu_available = false;
     memset(&g_imu_last, 0, sizeof(g_imu_last));
 
@@ -1997,18 +1998,14 @@ bool hal_imu_init(void)
                          BNO055_I2C_ADDR, IMU_INIT_RETRY_MAX);
     }
     return g_imu_available;
-#else
-    g_imu_available = false;
-    return false;
-#endif
 }
 
 bool hal_imu_read(imu_data_t *data)
 {
     if (!data) return false;
 
-#if IMU_ENABLED
-    if (!g_imu_available) {
+    /* IMU_ENABLED 是运行时参数: 关掉后立刻停止姿态补偿, 无需重启 */
+    if (!IMU_ENABLED || !g_imu_available) {
         data->valid = false;
         return false;
     }
@@ -2052,10 +2049,6 @@ bool hal_imu_read(imu_data_t *data)
 
     g_imu_last = *data;   /* 缓存最近读数, 供 !IMU 调试 */
     return true;
-#else
-    data->valid = false;
-    return false;
-#endif
 }
 
 /* ==================== IMU 调试状态 (!IMU) ==================== */
@@ -2065,7 +2058,15 @@ bool hal_imu_read(imu_data_t *data)
  */
 static void imu_status_print(void)
 {
-#if IMU_ENABLED
+    if (!IMU_ENABLED) {
+        hal_debug_printf("[IMU] 功能未启用 (imu_enabled=0)\r\n");
+        hal_debug_printf("[IMU] 开启: !CFG imu_enabled 1  (立即生效, 无需重启)\r\n");
+        if (g_imu_available) {
+            hal_debug_printf("[IMU] 注意: 芯片仍在线于 0x%02X\r\n", BNO055_I2C_ADDR);
+        }
+        return;
+    }
+
     hal_debug_printf("=== IMU Status ===\r\n");
     hal_debug_printf("available: %s  addr: 0x%02X\r\n",
                      g_imu_available ? "YES" : "NO", BNO055_I2C_ADDR);
@@ -2100,7 +2101,4 @@ static void imu_status_print(void)
         hal_debug_printf("IMU not available (check !I2C and BOOT wiring)\r\n");
     }
     hal_debug_printf("===================\r\n");
-#else
-    hal_debug_printf("[IMU] IMU disabled (IMU_ENABLED=0)\r\n");
-#endif
 }

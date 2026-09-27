@@ -90,10 +90,9 @@ bool hexapod_init(hexapod_t *robot, const leg_config_t *configs)
     hal_input_init(INPUT_TYPE_SERIAL); /* USB CDC 串口命令 */
 #endif
 
-    /* IMU 姿态传感器 — 失败不阻塞启动，仅禁用姿态补偿 */
-#if IMU_ENABLED
+    /* IMU 姿态传感器 — 失败不阻塞启动，仅禁用姿态补偿
+     * (imu_enabled 为运行时参数, 关闭时 hal_imu_init 内部直接返回 false) */
     hal_imu_init();
-#endif
 
     robot->initialized = true;
     robot->servos_enabled = false;
@@ -362,15 +361,22 @@ void hexapod_update(hexapod_t *robot)
     /* ---- IMU 姿态补偿 ----
      * 读取 BNO055 实际姿态，取反后写入 body_rot_offset。
      * IK 解算时叠加 body_rot + body_rot_offset → 自动抵消机身倾斜。
-     * Yaw 不补偿，避免与操作员转向指令冲突。 */
-#if IMU_ENABLED
-    imu_data_t imu;
-    if (hal_imu_read(&imu) && imu.valid) {
-        robot->state.body_rot_offset.x = -(imu.roll  * IMU_COMPENSATION_GAIN) / 10;
-        robot->state.body_rot_offset.z = -(imu.pitch * IMU_COMPENSATION_GAIN) / 10;
-        robot->state.body_rot_offset.y = 0;  /* Yaw 不补偿 */
+     * Yaw 不补偿，避免与操作员转向指令冲突。
+     * imu_enabled 为运行时参数 (关闭时 hal_imu_read 直接返回 false)。 */
+    if (IMU_ENABLED) {
+        imu_data_t imu;
+        if (hal_imu_read(&imu) && imu.valid) {
+            robot->state.body_rot_offset.x = -(imu.roll  * IMU_COMPENSATION_GAIN) / 10;
+            robot->state.body_rot_offset.z = -(imu.pitch * IMU_COMPENSATION_GAIN) / 10;
+            robot->state.body_rot_offset.y = 0;  /* Yaw 不补偿 */
+        }
+    } else {
+        /* 运行中关掉补偿: 清零, 否则会残留关机前最后一次的倾角补偿量,
+         * 表现为"已关补偿但机身仍歪着" */
+        robot->state.body_rot_offset.x = 0;
+        robot->state.body_rot_offset.y = 0;
+        robot->state.body_rot_offset.z = 0;
     }
-#endif
 
     /* 机器人开关状态变化处理 (ARM 解锁/锁定):
      *   解锁: 开启两路舵机供电 → 等待电源轨稳定 → 使能舵机输出

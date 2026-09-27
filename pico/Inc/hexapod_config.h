@@ -168,11 +168,13 @@
 
 /* ==================== IMU 姿态传感器配置 ==================== */
 
-/* IMU 启用：设为 1 启用 BNO055 姿态补偿，设为 0 禁用 (零开销)
+/* IMU 启用：1 = 启用 BNO055 姿态补偿，0 = 禁用
  * 启用后 I2C 总线上必须有 BNO055。
- * 若传感器未检测到，固件会打印警告并继续运行 (无补偿)。 */
-#define IMU_ENABLED             0   
+ * 若传感器未检测到，固件会打印警告并继续运行 (无补偿)。
+ * ★ 运行时可改: !CFG imu_enabled 1 / 网页「参数 → 功能开关」。
+ *   置 0 后不再读 IMU, 但 I2C 上仍会初始化一次 (失败不阻塞启动)。 */
 #define IMU_ENABLED_DEFAULT     0
+#define IMU_ENABLED             (g_params.imu_enabled)
 
 /* BNO055 I2C 地址 (7-bit)
  *   COM3 接 GND → 0x28 (默认)
@@ -189,11 +191,13 @@
  *     robot_pitch = IMU_PITCH_SIGN × chip_roll
  *   轴对应关系与旧板相同 (Xc=rX, Yc=rZ 未变), 仅去掉翻转偏移
  *   实测验证: 机器人平放 → !IMU 的 roll/pitch 应 ≈0;
- *   若补偿加剧倾斜 (正反馈) → 取反对应符号 */
-#define IMU_ROLL_SIGN           -1
-#define IMU_PITCH_SIGN          +1
+ *   若补偿加剧倾斜 (正反馈) → 取反对应符号
+ * ★ 两个符号运行时也能改 (!CFG imu_roll_sign / imu_pitch_sign),
+ *   方便在真机上一次性试出正确极性, 不用反复烧录。 */
 #define IMU_ROLL_SIGN_DEFAULT   -1
 #define IMU_PITCH_SIGN_DEFAULT  +1
+#define IMU_ROLL_SIGN           (g_params.imu_roll_sign)
+#define IMU_PITCH_SIGN          (g_params.imu_pitch_sign)
 
 /* ==================== IMU BOOT/INT 引脚 ==================== */
 
@@ -207,9 +211,10 @@
 
 /* IMU 补偿增益 (×10, 10 = 1:1 直接补偿)
  * 增益 < 10 → 欠补偿 (响应平缓, 适合高速运动)
- * 增益 > 10 → 过补偿 (可能振荡, 需要调参) */
-#define IMU_COMPENSATION_GAIN   10
+ * 增益 > 10 → 过补偿 (可能振荡, 需要调参)
+ * ★ 运行时可改: !CFG imu_gain 8 */
 #define IMU_COMPENSATION_GAIN_DEFAULT   10
+#define IMU_COMPENSATION_GAIN           (g_params.imu_gain)
 
 /* ==================== 调试配置 ==================== */
 
