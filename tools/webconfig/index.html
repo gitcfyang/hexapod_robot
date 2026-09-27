@@ -225,6 +225,18 @@
   }
   .perrow .plabel { font-size: 12px; color: var(--surface-800); }
   .perrow .punit { font-size: 11px; color: var(--surface-800); }
+
+  /* ---------- 模式页 ---------- */
+  /* 一行一个模式: 名字 | 通道 | 低/中/高。宽度按最长的通道名 (CH16 · R1) 留的 */
+  .mdrow {
+    display: grid; grid-template-columns: 150px 190px 150px;
+    align-items: center; gap: .5rem; padding: .2rem 0; max-width: 820px;
+  }
+  .mdrow .plabel { font-size: 12px; color: var(--surface-800); }
+  .mdrow select { font-size: 12px; padding: .1rem .2rem; }
+  .mdrow .lv { display: flex; gap: .6rem; font-size: 12px; align-items: center; }
+  .mdrow .lv label { display: flex; gap: .2rem; align-items: center; cursor: pointer; }
+  .mdrow.is-unassigned .plabel { color: var(--surface-600); }
   #per-rx { max-height: 130px; }
   #per-tx { flex: 1; min-width: 8rem; }
   .perdot { font-size: 11px; }
@@ -423,6 +435,7 @@
       <button class="tab" data-tab="gait">步态</button>
       <button class="tab" data-tab="stance">姿态</button>
       <button class="tab" data-tab="radio">遥控</button>
+      <button class="tab" data-tab="modes">模式</button>
       <button class="tab" data-tab="power">电源</button>
       <button class="tab" data-tab="balance">平衡</button>
       <button class="tab" data-tab="ctrl">控制</button>
@@ -829,22 +842,20 @@ function renderServo(d) {
 /* ---------------- 遥控通道实时显示 (遥控页) ----------------
  * 固件 5Hz 推 [CH] 行 → server.py 解析成 ch 事件。两种输入源报的东西不同,
  * 所以格子是重建而不是复用 (切换输入源时整块换掉)。 */
-const CH = { last: 0, fc: 0, fcT: 0, fps: 0 };
+const CH = { last: 0, fc: 0, fcT: 0, fps: 0, mode: null };
 
-/* 与固件 config.h 的 CRSF_CHANNEL_*_DEFAULT 一致 (参数读取前的显示兜底) */
-const CRSF_CH_DEFAULT = {
-  crsf_ch_fwd: 1, crsf_ch_str: 0, crsf_ch_turn: 3, crsf_ch_hgt: 2,
-  crsf_ch_arm: 4, crsf_ch_gait: 5, crsf_ch_stance: 6, crsf_ch_bal: 7,
-};
+/* 与固件 config.h 的 INPUT_CH_*_DEFAULT 一致 (参数读取前的显示兜底) */
+const CH_DEFAULT = { ch_fwd: 1, ch_str: 0, ch_turn: 3, ch_hgt: 2 };
 
 /* 通道号 → 功能名。参数没读回来时用固件默认值兜底, 否则一进页面全是"未使用"。
- * 重复映射用 / 拼接 (改滑条时可能两个功能撞到同一通道, 得看得见)。 */
+ * 重复映射用 / 拼接 (改滑条时可能两个功能撞到同一通道, 得看得见)。
+ * 通道号 16~19 是手柄独有的按键, 遥控器面板上没有对应格子。 */
 function chFuncNames() {
   const names = {};
   for (const [pname, label] of CH_FN) {
     const p = curParams[pname];
-    const idx = p ? p.val : CRSF_CH_DEFAULT[pname];
-    if (idx === undefined || idx < 0 || idx > 15) continue;
+    const idx = p ? p.val : CH_DEFAULT[pname];
+    if (idx === undefined || idx < 0 || idx > 19) continue;
     names[idx] = names[idx] ? names[idx] + "/" + label : label;
   }
   return names;
@@ -871,6 +882,7 @@ function renderCh(d) {
   if (!el) return;
 
   if (d.mode !== undefined) {
+    CH.mode = d.mode;                        /* 模式页的「输入源」徽标跟着走 */
     $("ch-mode").textContent = d.mode === "crsf" ? "CRSF (ELRS)" : "PS2 手柄";
     $("ch-mode").className = "";
     /* 点亮当前生效的输入源按钮 —— 按固件回报的实际模式, 所以没存盘的切换
@@ -956,6 +968,8 @@ function renderCh(d) {
       }
     }
   }
+
+  renderModes();          /* 模式页的「输入源」徽标, 与这里同源 */
 }
 
 /* 3 秒没收到 ch 帧就当数据过期 (固件 5Hz 推, 断流说明桥接或固件停了) */
@@ -966,6 +980,8 @@ setInterval(() => {
     $("ch-mode").textContent = "无数据";
     $("ch-mode").className = "dim";
     $("ch-link").textContent = "—";
+    CH.mode = null;
+    renderModes();
   }
 }, 1000);
 
@@ -1080,6 +1096,8 @@ function renderRun(d) {
   if (RUN.lift !== undefined) parts.push(`抬腿 ${RUN.lift}mm`);
   mv.textContent = parts.length ? parts.join(" · ") : "站着不动 (行程已清)";
   mv.className = parts.length ? "" : "dim";
+
+  renderModes();          /* 解锁/步态/平衡/站姿/高度开关的实时徽标 */
 }
 
 function renderRc(d) {
@@ -1184,7 +1202,7 @@ setInterval(() => {
 const GROUP_NAME = {
   batt: "电池", motion: "运动", stance: "站立姿态",
   tune: "手感 / 死区", dir: "方向取反", imu: "IMU", chan: "通道映射",
-  per: "外设开关", sys: "系统",
+  modes: "模式", per: "外设开关", sys: "系统",
 };
 
 /* 难懂参数的解释 (参数名后面的「?」, 悬停显示)。
@@ -1202,26 +1220,39 @@ const HELP = {
                   "那个 —— 它是防骤跳的上限。100Hz 下 2mm/周期 = 200mm/s。",
   batt_ratio_milli: "电池分压比 (千分比): 板上分压电阻的实际比值。填错会让所有电压阈值" +
                     "整体偏移 —— 用 !BATT 回的 raw 值和万用表实测电压算比值再填。",
-  crsf_deadband: "摇杆死区: 离中位这么近的动作当作没动 (通道单位)。抖舵或中立点不准时" +
-                 "调大; 调太大则小幅操作会失灵。",
-  ps2_expo: "摇杆指数 (PS2): 0 = 线性; 越大中心附近越柔和、行程末端越猛 —— 兼顾" +
-            "小动作的精细与大动作的速度。",
+  ch_deadband: "摇杆死区: 离中位这么近的动作当作没动 (通道单位, 量程 172~1811)。" +
+               "抖舵或中立点不准时调大; 调太大则小幅操作会失灵。遥控器与手柄共用这一个值。",
+  expo: "摇杆指数曲线: 0 = 线性; 越大中心附近越柔和、行程末端越猛 —— 兼顾小动作的" +
+        "精细与大动作的速度。手柄的电位器摇杆分辨率低, 调大一点更好控。",
+  height_integrate: "机身高度用哪种输入: 开 = 高度通道是<b>升降速率</b> (推住才动, 回中" +
+                    "保持当前高度) —— 手柄的弹簧摇杆只能这么用; 关 = <b>绝对位置</b> " +
+                    "(摇杆位置直接等于高度偏移, 中位即原高度) —— 遥控器旋钮的经典用法。" +
+                    "运行中切换不会跳变, 积分器会用当前值接续。",
+  h_deadzone: "高度轴死区 (只在「高度积分」开着时生效): 比运动死区大, 因为积分会把中心" +
+              "抖动累积成缓慢漂移。松手后机身还在慢慢升降就调大这个值。",
   ext_i2c_mode: "GP26/27 两个脚干什么用: 0=关 1=软件 I2C 2=ADC。它们在 RP2040 上" +
                 "走不了硬件 I2C1 (已给两块 PCA9685), 所以 I2C 是位翻转出来的约 50kHz。",
 };
 
-/* 不生成通用滑条的参数 —— 遥控页给了更清楚的输入源按钮 (CRSF / PS2),
- * 再摆一个 0/1 滑条是同一个变量的第二种说法, 只会让人以为改了没反应。
+/* 不生成通用滑条的参数 —— 页面给了更合适的控件, 再摆一个滑条是同一个变量的
+ * 第二种说法, 只会让人以为改了没反应:
+ *   input_mode — 遥控页的输入源按钮 (CRSF / PS2);
+ *   mode_* / combo_* — 模式页的矩阵与组合键控件 (打包值, 滑条没法用)。
  * 值本身仍在参数表里: 照常参与保存 / 恢复默认 / 未保存计数。 */
-const PARAM_HIDE = new Set(["input_mode"]);
+const PARAM_HIDE = new Set([
+  "input_mode",
+  "mode_arm", "mode_bal", "mode_g0", "mode_g1", "mode_g2", "mode_g3", "mode_g4",
+  "mode_sn", "mode_sp", "mode_sw",
+  "combo_arm", "combo_bal", "combo_gnext", "combo_gprev",
+  "combo_snext", "combo_sprev", "combo_lup", "combo_ldn", "combo_estop",
+]);
 
-/* 八个功能 ↔ 参数名的对应 (CRSF 通道映射)。页面上的格子按通道号反查这张表,
- * 标出「这个通道现在是干什么的」—— 改滑条后下一次 ch 帧就会重新标。 */
+/* 四个摇杆功能 ↔ 参数名的对应 (两协议共用)。页面上的格子按通道号反查这张表,
+ * 标出「这个通道现在是干什么的」—— 改滑条后下一次 ch 帧就会重新标。
+ * 解锁/步态/站姿/平衡在「模式」页, 不在这张表里 (它们是模式矩阵, 不是摇杆)。 */
 const CH_FN = [
-  ["crsf_ch_fwd", "前进"], ["crsf_ch_str", "平移"],
-  ["crsf_ch_turn", "旋转"], ["crsf_ch_hgt", "高度"],
-  ["crsf_ch_arm", "解锁"], ["crsf_ch_gait", "步态"],
-  ["crsf_ch_stance", "姿态"], ["crsf_ch_bal", "平衡"],
+  ["ch_fwd", "前进"], ["ch_str", "平移"],
+  ["ch_turn", "旋转"], ["ch_hgt", "高度"],
 ];
 
 /* 外设页的手动控制卡片 (参数滑条由 per 组自动生成在它们下面)。
@@ -1422,6 +1453,205 @@ const ctrlCustomHTML = `
       </div>
     </div>`;
 
+/* ---------------- 模式页 (矩阵 + PS2 组合键) ----------------
+ * 每个模式 = 一个通道 + 激活区间 (低/中/高可多选), 打包成一个参数
+ * (ch<<3 | bits) 存进 flash —— 所以整份模式表都能掉电保持。
+ *
+ * 通道 id 是两协议统一的 (固件 hexapod_input.h): 0~15 = CRSF 的 CH1~CH16,
+ * PS2 上 0~3 是摇杆、4~19 是按键 (按下 = 高)。于是同一个模式既能挂遥控
+ * 开关, 也能挂手柄按键。
+ *
+ * 这些参数不生成通用滑条 (PARAM_HIDE), 由下面两张表自己渲染与回写;
+ * 值仍在参数表里, 照常参与保存 / 恢复默认 / 未保存计数。 */
+const MODE_NONE = 31;               /* 参数里 ch 字段的"未分配"值 */
+const COMBO_NONE = 16;              /* 组合键参数里的"无按键"值 */
+
+/* 统一通道 id → 人看的名字。0~3 两种协议的叫法都写出来 */
+const CH_OPTIONS = [
+  "CH1 · 右X 平移", "CH2 · 右Y 前进", "CH3 · 左Y 高度", "CH4 · 左X 转向",
+  "CH5 · SELECT", "CH6 · L3", "CH7 · R3", "CH8 · START",
+  "CH9 · ↑", "CH10 · →", "CH11 · ↓", "CH12 · ←",
+  "CH13 · L2", "CH14 · R2", "CH15 · L1", "CH16 · R1",
+  "△ (手柄)", "○ (手柄)", "× (手柄)", "□ (手柄)",
+];
+
+/* [参数名, 页面上的名字]。参数名后缀 = 控件 id 后缀 (mode_arm → md-arm) */
+const MODES = [
+  ["mode_arm", "解锁"],
+  ["mode_bal", "平衡模式"],
+  ["mode_g0", "步态 · 波纹 12"],
+  ["mode_g1", "步态 · 三足 6"],
+  ["mode_g2", "步态 · 三足 8"],
+  ["mode_g3", "步态 · 波浪 24"],
+  ["mode_g4", "步态 · 快三足 4"],
+  ["mode_sn", "站姿 · 窄"],
+  ["mode_sp", "站姿 · 正常"],
+  ["mode_sw", "站姿 · 宽"],
+];
+
+const COMBOS = [
+  ["combo_arm", "解锁 / 上锁"],
+  ["combo_bal", "平衡模式开关"],
+  ["combo_gnext", "步态: 下一个"],
+  ["combo_gprev", "步态: 上一个"],
+  ["combo_snext", "站姿: 下一档"],
+  ["combo_sprev", "站姿: 上一档"],
+  ["combo_lup", "抬腿高度 +5"],
+  ["combo_ldn", "抬腿高度 -5"],
+  ["combo_estop", "急停"],
+];
+
+const modesCustomHTML = `
+    <div class="box wide">
+      <h2>模式矩阵</h2>
+      <div id="md-rows"></div>
+      <div class="note" style="margin-top:.4rem">
+        <b>勾上哪几档, 通道落在那几档时这个模式生效</b> —— 遥控器两段开关勾「高」,
+        三段开关给三个模式各勾一档。通道 0~15 是遥控器的 CH1~CH16; 手柄上前四个
+        是摇杆、后面是按键 (按住 = 高)。解锁是<b>电平</b>语义: 开关停在激活区间里
+        才解锁, 拨走即上锁。「未分配」= 该模式不由矩阵控制 (手柄想用按键切换,
+        配下面的组合键)。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>PS2 按键组合键</h2>
+      <div id="cb-rows"></div>
+      <div class="note" style="margin-top:.4rem">
+        手柄没有开关通道, 一次性动作用按键表达: 左列<b>单击</b>触发一次;
+        右列选了键就是<b>按住左键、再点右键</b> (如 × + ↑ 抬腿)。
+        右列「无」= 该动的归上面的矩阵管 (手柄上按住对应键就生效)。
+        组合键只对手柄生效, 遥控器永远走矩阵, 两边互不干扰。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>实时状态</h2>
+      <div class="row"><span>解锁</span><span id="mds-arm" class="dim">—</span></div>
+      <div class="row"><span>步态</span><span id="mds-gait" class="dim">—</span></div>
+      <div class="row"><span>平衡模式</span><span id="mds-bal" class="dim">—</span></div>
+      <div class="row"><span>站立姿态</span><span id="mds-st" class="dim">—</span></div>
+      <div class="row"><span>机身高度</span><span id="mds-hi" class="dim">—</span></div>
+      <div class="row"><span>输入源</span><span id="mds-in" class="dim">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        固件每 2 秒报一行状态, 所以这里最多滞后 2 秒。解锁状态与「控制」页的
+        供电徽标同源: 遥控器拨走解锁开关, 这里立刻跟着变。
+      </div>
+    </div>`;
+
+/* 建控件 + 接线。控件的读写都直接落到参数上 (与滑条同一个 postParam 通道),
+ * 所以「保存到 Flash」「未保存计数」对它们一视同仁。 */
+function initModesPage() {
+  const host = $("md-rows");
+  const cbHost = $("cb-rows");
+  if (!host || !cbHost) return;
+
+  let chOpts = `<option value="${MODE_NONE}">未分配</option>`;
+  CH_OPTIONS.forEach((t, i) => { chOpts += `<option value="${i}">${t}</option>`; });
+
+  for (const [pname, label] of MODES) {
+    const key = pname.slice(5);                    /* mode_arm → arm */
+    const row = document.createElement("div");
+    row.className = "mdrow";
+    row.id = "md-" + key;
+    row.innerHTML =
+      `<div class="plabel">${label}</div>` +
+      `<select id="md-sel-${key}">${chOpts}</select>` +
+      `<div class="lv">` +
+        `<label><input type="checkbox" id="md-lo-${key}">低</label>` +
+        `<label><input type="checkbox" id="md-md-${key}">中</label>` +
+        `<label><input type="checkbox" id="md-hi-${key}">高</label>` +
+      `</div>`;
+    host.appendChild(row);
+
+    const push = () => {
+      const ch = parseInt($("md-sel-" + key).value, 10);
+      const bits = ($("md-lo-" + key).checked ? 1 : 0) |
+                   ($("md-md-" + key).checked ? 2 : 0) |
+                   ($("md-hi-" + key).checked ? 4 : 0);
+      /* 未分配: ch=31 且 bits=0 (固件把 bits=0 也当未分配, 保持一致) */
+      sendSet(pname, ch === MODE_NONE ? (MODE_NONE << 3) : ((ch << 3) | bits));
+    };
+    $("md-sel-" + key).onchange = push;
+    for (const pre of ["md-lo-", "md-md-", "md-hi-"]) $(pre + key).onchange = push;
+  }
+
+  let keyOpts = `<option value="${COMBO_NONE}">无</option>`;
+  for (const [bit, klabel] of PSB) keyOpts += `<option value="${bit}">${klabel}</option>`;
+
+  for (const [pname, label] of COMBOS) {
+    const key = pname.slice(6);                    /* combo_arm → arm */
+    const row = document.createElement("div");
+    row.className = "mdrow";
+    row.id = "cb-" + key;
+    row.innerHTML =
+      `<div class="plabel">${label}</div>` +
+      `<select id="cb-a-${key}">${keyOpts}</select>` +
+      `<select id="cb-b-${key}">${keyOpts}</select>`;
+    cbHost.appendChild(row);
+
+    const push = () => {
+      const a = parseInt($("cb-a-" + key).value, 10);
+      const b = parseInt($("cb-b-" + key).value, 10);
+      sendSet(pname, a | (b << 5));
+    };
+    $("cb-a-" + key).onchange = push;
+    $("cb-b-" + key).onchange = push;
+  }
+}
+
+/* 参数回显 (在 renderParams 末尾调)。正在操作控件时跳过, 否则固件回显会把
+ * 用户手上的选择拽回去 —— 与滑条同一个道理 */
+function renderModesConfig() {
+  for (const [pname] of MODES) {
+    const p = curParams[pname];
+    if (!p) continue;
+    const key = pname.slice(5);
+    const ch = (p.val >> 3) & 0x1F;
+    const bits = p.val & 7;
+    const sel = $("md-sel-" + key);
+    if (!sel) continue;
+    if (document.activeElement !== sel) sel.value = ch >= CH_OPTIONS.length ? MODE_NONE : ch;
+    for (const [pre, mask] of [["md-lo-", 1], ["md-md-", 2], ["md-hi-", 4]]) {
+      const box = $(pre + key);
+      if (box && document.activeElement !== box) box.checked = (bits & mask) !== 0;
+    }
+    /* 通道选了但一档都没勾 = 固件当未分配处理, 这里也灰掉免得误会 */
+    $("md-" + key).classList.toggle("is-unassigned",
+      ch >= CH_OPTIONS.length || bits === 0);
+  }
+
+  for (const [pname] of COMBOS) {
+    const p = curParams[pname];
+    if (!p) continue;
+    const key = pname.slice(6);
+    const a = p.val & 0x1F, b = (p.val >> 5) & 0x1F;
+    for (const [id, v] of [["cb-a-" + key, a], ["cb-b-" + key, b]]) {
+      const sel = $(id);
+      if (sel && document.activeElement !== sel) sel.value = v > 15 ? COMBO_NONE : v;
+    }
+  }
+}
+
+/* 实时状态徽标: run 帧给解锁/步态/平衡/站姿/高度开关, ch 帧给输入源 */
+const STANCE_NAME = { "-1": "窄", "0": "正常", "1": "宽" };
+
+function renderModes() {
+  const arm = $("mds-arm");
+  if (!arm) return;
+
+  if (RUN.on !== undefined) {
+    arm.textContent = RUN.on ? "解锁中" : "已上锁";
+    arm.className = RUN.on ? "chg" : "dim";
+  }
+  if (GAIT_NAME[RUN.gait] !== undefined) $("mds-gait").textContent = GAIT_NAME[RUN.gait];
+  if (RUN.bal !== undefined) $("mds-bal").textContent = RUN.bal ? "开" : "关";
+  if (STANCE_NAME[String(RUN.st)] !== undefined) $("mds-st").textContent = STANCE_NAME[String(RUN.st)];
+  if (RUN.hi !== undefined)
+    $("mds-hi").textContent = RUN.hi ? "积分 (摇杆 = 升降速率, 回中保持)" : "线性 (摇杆位置 = 高度)";
+  if (CH.mode) $("mds-in").textContent = CH.mode === "crsf" ? "CRSF (ELRS)" : "PS2 手柄";
+}
+
 /* 参数页定义: id 同时是 tab 名和 DOM id 后缀。组顺序 = 页面内卡片顺序。 */
 const PAGES = [
   { id: "gait", title: "步态", groups: ["motion"],
@@ -1448,14 +1678,22 @@ const PAGES = [
       <h2>通道实时值</h2>
       <div class="servos" id="ch-panel"></div>
       <div class="note" style="margin-top:.4rem">
-        CRSF 显示 16 个通道的原始值（中位 992，范围 172~1811），格子上方标出该通道
-        当前映射到的功能 —— 改本页「通道映射」的滑条后即刻跟着变。
+        按<b>协议原值</b>显示，不含任何换算：遥控器是 16 个通道（中位 992，范围
+        172~1811），格子上方标出该通道当前映射到的功能；手柄是四个摇杆（0~255）
+        与 16 个按键的按下状态。改本页「通道映射」的滑条后即刻跟着变 ——
+        两边共用一套通道号，手柄的摇杆/按键在固件里先换算到同一套 id。
       </div>
     </div>`,
-    note: "摇杆死区/指数、四个通道的方向取反，以及 CRSF 通道号映射。CRSF 与 PS2 两套独立。" +
-          "通道映射填 <b>0~15</b>（对应遥控器 CH1~CH16）：换了遥控器或改了 ELRS 通道顺序，" +
-          "在这里改就行，不用重烧固件。取反是按功能的，不随通道号走 —— 换通道后若方向反了，" +
-          "翻转「方向取反」里对应那项，而不是调通道号。" },
+    note: "摇杆死区/指数、四个通道的方向取反，以及摇杆通道号映射。<b>遥控器与手柄共用这一套</b>：" +
+          "手柄的摇杆与按键先换算成同一套通道号，再走同一段映射，所以没有「两套参数」。" +
+          "通道映射填 <b>0~19</b>（0~15 = 遥控器 CH1~CH16；手柄上 0~3 是摇杆、4~19 是按键）：" +
+          "换了遥控器或改了 ELRS 通道顺序，在这里改就行，不用重烧固件。取反是按功能的，" +
+          "不随通道号走 —— 换通道后若方向反了，翻转「方向取反」里对应那项，而不是调通道号。" +
+          "解锁/步态/站姿这些开关不在这里，在「模式」页。" },
+  { id: "modes", title: "模式", groups: ["modes"], custom: modesCustomHTML,
+    note: "解锁、平衡、步态、站立姿态这几个开关<b>挂到哪个通道、落在哪几档</b>，" +
+          "以及手柄的一次性动作用哪组按键 —— 遥控器与手柄共用一份表。" +
+          "所有改动都是普通参数：改完即时生效，按「保存到 Flash」掉电保持。" },
   { id: "power", title: "电源", groups: ["batt"],
     note: "电池保护阈值与分压比。<b>分压比必须按实际电阻实测标定</b>，" +
           "填错会让所有阈值整体偏移 —— 先用 !BATT 看 raw 与万用表实测的比值。" },
@@ -1529,6 +1767,7 @@ function buildParamPages() {
 buildParamPages();
 initPerPage();                // 外设页的滑条/按钮 (DOM 已由上一步建好)
 initCtrlPage();               // 控制页的 PWM 周期滑条 (同上)
+initModesPage();              // 模式页的矩阵行/组合键行 (同上)
 const pRows = {};             // name → {row, range, num} 或 {row, box, state}
 
 /* ---------------- 「有改动未保存」判定 ----------------
@@ -1725,6 +1964,8 @@ function renderParams(d) {
   }
   /* 统计与按钮状态都按页算 (d.changed 是全局的, 直接用会让每页显示同一个数字) */
   refreshPageState();
+  /* 模式页的控件不是通用滑条, 得自己把参数值回填进下拉框/勾选框 */
+  renderModesConfig();
 }
 
 /* ---------------- 开始页 ↔ 调试页 ----------------

@@ -13,6 +13,7 @@
 #include "hexapod_core.h"
 #include "hexapod_gait.h"
 #include "hexapod_crsf.h"
+#include "hexapod_input.h"
 #include "hexapod_store.h"
 #if PS2_ENABLED
 #include "hexapod_ps2.h"
@@ -894,6 +895,10 @@ bool hal_input_init(input_type_t type)
         g_input_mode = INPUT_MODE_CRSF;
     }
 #endif
+
+    /* 输入源切换: 清掉跨帧残留 (高度积分器 / 按键沿状态), 否则切回来
+     * 第一次按键会被当成"上电前就按着"而误触发一次。 */
+    hexapod_input_reset();
 
     init_done = true;
     return true;

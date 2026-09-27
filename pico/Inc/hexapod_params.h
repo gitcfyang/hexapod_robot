@@ -38,7 +38,8 @@
  * @brief 全部运行时参数 (RAM 实体, 定义在 hexapod_params.c)
  *
  * 字段名 = 参数表里的名字, 与 hexapod_config.h 的宏一一对应。
- * 八组 (见 param_t.group), 网页每页显示一到多组。
+ * 十组 (见 param_t.group), 网页每页显示一到多组 (modes 组在「模式」页,
+ * 不是滑条而是矩阵界面)。
  */
 typedef struct {
     /* ---- 电池 (batt) ---- */
@@ -57,6 +58,7 @@ typedef struct {
     int32_t travel_turn_mm;      /* 满杆旋转步长 mm */
     int32_t body_rot_max;        /* 机身姿态最大角 0.1° */
     int32_t body_h_range_mm;     /* 机身高度调节范围 mm */
+    int32_t height_integrate;    /* 高度通道: 1=积分(速率) 0=线性(绝对) */
     int32_t lift_min_mm;         /* 最低抬腿高度 mm */
     int32_t lift_max_mm;         /* 最高抬腿高度 mm */
     int32_t gait_min_ms;         /* 满杆步态周期 ms (最快) */
@@ -69,21 +71,17 @@ typedef struct {
     int32_t stance_speed;        /* 姿态过渡速度 ×100/周期 */
     int32_t stance_step_mm;      /* 单腿每周期最大位移 mm */
 
-    /* ---- 手感 / 死区 (tune) ---- */
+    /* ---- 手感 / 死区 (tune, 两协议共用) ---- */
     int32_t deadband;            /* 控制量死区 (-500~+500 域) */
-    int32_t crsf_deadband;       /* CRSF 原始通道死区 */
-    int32_t ps2_expo;            /* PS2 摇杆 expo 0~100 */
-    int32_t ps2_h_deadzone;      /* PS2 高度轴死区 */
+    int32_t ch_deadband;         /* 原始通道死区 (raw 172~1811 域) */
+    int32_t expo;                /* 摇杆指数曲线 0~100 (%) */
+    int32_t h_deadzone;          /* 高度轴死区 (仅积分模式生效) */
 
-    /* ---- 方向取反 (dir) ---- */
-    int32_t inv_fwd;             /* CRSF 前进取反 */
-    int32_t inv_str;             /* CRSF 平移取反 */
-    int32_t inv_h;               /* CRSF 高度取反 */
-    int32_t inv_turn;            /* CRSF 旋转取反 */
-    int32_t ps2_inv_fwd;         /* PS2 前进取反 */
-    int32_t ps2_inv_str;         /* PS2 平移取反 */
-    int32_t ps2_inv_h;           /* PS2 高度取反 */
-    int32_t ps2_inv_turn;        /* PS2 旋转取反 */
+    /* ---- 方向取反 (dir, 两协议共用) ---- */
+    int32_t inv_fwd;             /* 前进取反 */
+    int32_t inv_str;             /* 平移取反 */
+    int32_t inv_h;               /* 高度取反 */
+    int32_t inv_turn;            /* 旋转取反 */
 
     /* ---- IMU (imu) ---- */
     int32_t imu_enabled;         /* IMU 姿态补偿开关, 0/1 */
@@ -92,16 +90,39 @@ typedef struct {
     int32_t imu_pitch_sign;      /* Pitch 轴符号 ±1 */
 
     /* ---- 通道映射 (chan) ----
-     * 值为 CRSF 通道下标 0~15 (网页显示为 CH1~CH16)。 */
-    int32_t crsf_ch_fwd;         /* 前进/俯仰 */
-    int32_t crsf_ch_str;         /* 平移/横滚 */
-    int32_t crsf_ch_turn;        /* 旋转/偏航 */
-    int32_t crsf_ch_hgt;         /* 机身高度 */
-    int32_t crsf_ch_arm;         /* 解锁 */
-    int32_t crsf_ch_gait;        /* 步态 */
-    int32_t crsf_ch_stance;      /* 站立姿态 */
-    int32_t crsf_ch_bal;         /* 平衡模式 */
+     * 值为统一通道 id 0~19 (见 hexapod_input.h): CRSF 上 = CH1~CH16,
+     * PS2 上 0~3 = 摇杆、4~19 = 按键。 */
+    int32_t ch_fwd;              /* 前进/俯仰 */
+    int32_t ch_str;              /* 平移/横滚 */
+    int32_t ch_turn;             /* 旋转/偏航 */
+    int32_t ch_hgt;              /* 机身高度 */
     int32_t input_mode;          /* 默认输入源 0=CRSF 1=PS2 */
+
+    /* ---- 模式矩阵 (modes) ----
+     * 值 = ch<<3 | bits (ch: 统一通道 id, 31=未分配; bits: 低1/中2/高4),
+     * 打包/解码见 hexapod_input.c, 界面在网页「模式」页。 */
+    int32_t mode_arm;            /* 解锁 (电平语义) */
+    int32_t mode_bal;            /* 平衡模式 */
+    int32_t mode_g0;             /* 步态: 波纹12步 */
+    int32_t mode_g1;             /* 步态: 三角6步 */
+    int32_t mode_g2;             /* 步态: 三角8步 */
+    int32_t mode_g3;             /* 步态: 波浪24步 */
+    int32_t mode_g4;             /* 步态: 快速三角4步 */
+    int32_t mode_sn;             /* 站立姿态: 窄 */
+    int32_t mode_sp;             /* 站立姿态: 正常 */
+    int32_t mode_sw;             /* 站立姿态: 宽 */
+
+    /* ---- PS2 组合键 (modes 组) ----
+     * 值 = btn_a | btn_b<<5 (16 = 无); 只对 PS2 帧生效, 详见 config.h。 */
+    int32_t combo_arm;           /* 解锁/上锁 */
+    int32_t combo_bal;           /* 平衡模式 */
+    int32_t combo_gnext;         /* 步态: 下一个 */
+    int32_t combo_gprev;         /* 步态: 上一个 */
+    int32_t combo_snext;         /* 站立姿态: 下一档 */
+    int32_t combo_sprev;         /* 站立姿态: 上一档 */
+    int32_t combo_lup;           /* 抬腿高度 +5 */
+    int32_t combo_ldn;           /* 抬腿高度 -5 */
+    int32_t combo_estop;         /* 急停 */
 
     /* ---- 系统 (sys) ---- */
     int32_t loop_ms;             /* 控制循环周期 (ms); 见 config.h 的缩放说明 */
@@ -128,7 +149,7 @@ typedef struct {
     int32_t     max;         /* 上限 (含) */
     int32_t     def;         /* 出厂默认 (= config.h 的 *_DEFAULT) */
     const char *unit;        /* 显示单位, 可为空串 */
-    const char *group;       /* 分组: batt/motion/stance/tune/dir/imu/chan/per */
+    const char *group;       /* 分组: batt/motion/stance/tune/dir/imu/chan/modes/sys/per */
 } param_t;
 
 /** @brief 参数表首地址与项数 (只读, 供遍历/网页生成表单用) */

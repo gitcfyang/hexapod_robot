@@ -129,11 +129,14 @@ S_RC = [
 
 # 供电/运行状态 (hexapod_core.c 跳变行 + hexapod_pico.c 每 2s 摘要) ——
 # 控制页「供电」徽标的数据源, 两条路都写同一个状态键
+# 尾缀 Bal/St/Hi = 平衡模式 / 站立姿态 (-1 窄, 0 正常, 1 宽) / 高度积分开关 ——
+# 模式页的实时徽标全靠它, 三种 [IDLE] 变体都带 (待机时切姿态也看得见)
 S_RUN = [
     "Robot ON (servo power enabled)",
     "Robot OFF (servo power cut)",
-    "[RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40",
-    "[IDLE] Send !O to arm, !F/!B/!L/!R to move",
+    "[RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40 Bal:0 St:0 Hi:1",
+    "[IDLE] Send !O to arm, !F/!B/!L/!R to move Bal:0 St:0 Hi:1",
+    "[IDLE] Waiting for START (PS2 arm)... Bal:0 St:-1 Hi:1",
 ]
 
 # 外设状态 (hexapod_hal_pico.c: periph_status_print / !PERIPH) —— 一行一节,
@@ -220,7 +223,8 @@ RE_SAVE_ACK = re.compile(r"if \(/\\\[STORE\\\] ([^/]+)/\.test\(ev\.line\)\)")
 
 # 网页的分页表 (index.html 的 PAGES) 必须覆盖固件里出现的每一个分组,
 # 否则那组参数在网页上无处可去 —— 加参数时忘了配页面就会静默丢一个组。
-WEB_GROUPS = {"batt", "motion", "stance", "tune", "dir", "imu", "chan", "per", "sys"}
+WEB_GROUPS = {"batt", "motion", "stance", "tune", "dir", "imu", "chan", "per", "sys",
+              "modes"}
 
 
 def test_firmware_contract():
@@ -281,10 +285,16 @@ def test_firmware_contract():
           '"Robot ON (servo power enabled)\\r\\n"' in core
           and wc.RE_ROBOT_PWR.match("Robot ON (servo power enabled)") is not None)
     check("固件每 2s 状态摘要 [RUN]/[IDLE] 与样本一致",
-          "[RUN] Travel X:%d Y:%d Z:%d Gait:%d Lift:%d" in pico
+          "[RUN] Travel X:%d Y:%d Z:%d Gait:%d Lift:%d Bal:%d St:%d Hi:%d" in pico
           and "[IDLE] " in pico
           and wc.RE_RUN_STATE.match(S_RUN[2]) is not None
           and wc.RE_RUN_STATE.match(S_RUN[3]) is not None)
+    # 模式尾缀 (Bal/St/Hi): 网页「模式」页的实时徽标就靠它。三种 [IDLE] 变体都得
+    # 带上, 否则待机时那几行会把徽标留在上一次的值上 —— 固件漏一处, 页面无报错
+    check("三条 [IDLE] 变体都带模式尾缀",
+          pico.count("Hi:%d\\r\\n") >= 4
+          and wc.RE_RUN_MODE.search(S_RUN[3]) is not None
+          and wc.RE_RUN_MODE.search(S_RUN[4]) is not None)
     # 外设行: 节名是 server 的白名单, 对不上就整行丢掉 (外设页少一行, 无报错)
     check("固件 !PERIPH 的 pwmperiod 行节名在 server 白名单里",
           "[PER] pwmperiod: l=%u r=%u" in hal
@@ -309,6 +319,10 @@ FAKE_PARAMS = {
     "batt_ov_mv":    [8800, 8000, 9500, 8800, "mV", "batt"],
     "travel_fwd_mm": [150,  20,   250,  150,  "mm", "motion"],
     "imu_roll_sign": [-1,   -1,   1,    -1,   "",   "imu"],
+    # 模式页的两个打包参数 (mode_arm = CH5 高, combo_arm = START 单击):
+    # 它们在页面上是下拉框 + 勾选框, 但走的仍是同一套 参数帧 / set 通道
+    "mode_arm":      [36,   0,    255,  36,   "",   "modes"],
+    "combo_arm":     [515,  0,    528,  515,  "",   "modes"],
 }
 
 
@@ -561,13 +575,20 @@ def test_parser():
         r = wc.parse_line(t, line)
         check(f"供电状态: {line[:26]}… → on={want}",
               r is not None and r[0] == "run" and r[1].get("on") == want, str(r))
-    # [RUN] 行还带行程/步态/抬腿 (控制页的「固件回报」), 别把 X/Y/Z 解析成别的
+    # [RUN] 行还带行程/步态/抬腿 (控制页的「固件回报」) 与模式尾缀
+    # (模式页的实时徽标), 别把 X/Y/Z 解析成别的
     r = wc.parse_line(t, S_RUN[2])
     check("[RUN] 行带出行程/步态/抬腿",
           r is not None and {k: r[1].get(k) for k in ("x", "y", "z", "gait", "lift")}
           == {"x": 60, "y": 0, "z": 0, "gait": 0, "lift": 40}, str(r))
-    check("[IDLE] 行只有供电状态 (不去猜行程)",
-          wc.parse_line(wc.Telemetry(), S_RUN[3])[1] == {"on": False}, str(r))
+    check("[RUN] 行带出模式尾缀 Bal/St/Hi",
+          r is not None and {k: r[1].get(k) for k in ("bal", "st", "hi")}
+          == {"bal": 0, "st": 0, "hi": 1}, str(r))
+    check("[IDLE] 行只有供电状态 + 模式尾缀 (不去猜行程)",
+          wc.parse_line(wc.Telemetry(), S_RUN[3])[1]
+          == {"on": False, "bal": 0, "st": 0, "hi": 1}, str(r))
+    check("[IDLE] 站姿的 -1 (窄) 能解析成负数",
+          wc.parse_line(wc.Telemetry(), S_RUN[4])[1].get("st") == -1, str(r))
     # 快照是合并的: 行程字段进了 run 之后不会被后面的 Robot ON/OFF 行冲掉 ——
     # 前端靠这一点常显"机器现在在怎么走"
     check("行程字段在后续状态行里保留",
@@ -725,8 +746,7 @@ def replay_robot(pty):
         # 除了 !O 的回声之外还有这条独立来源, 两条路都得能解析出来
         if now - last_run_push >= 1.0:
             last_run_push = now
-            line = ("[RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40" if FAKE_ROBOT["on"]
-                    else "[IDLE] Send !O to arm, !F/!B/!L/!R to move")
+            line = S_RUN[2] if FAKE_ROBOT["on"] else S_RUN[3]
             try:
                 os.write(fd, line.encode() + b"\r\n")
             except OSError:
@@ -1169,7 +1189,7 @@ def main():
 
     # 参数分页: 每页一个 tab 按钮 + 一个卡片宿主。页面本身由 JS 按 PAGES 生成,
     # 所以断言生成器的输入 (PAGES 里的 id) 与 HTML 里的 tab 按钮两边都在。
-    for pid in ("gait", "stance", "radio", "power", "balance", "per", "ctrl"):
+    for pid in ("gait", "stance", "radio", "modes", "power", "balance", "per", "ctrl"):
         check(f"页面含参数分页 tab: {pid}",
               f'data-tab="{pid}"' in raw_page and f'id: "{pid}"' in raw_page)
     check("分页的组覆盖固件全部分组",
@@ -1194,20 +1214,53 @@ def main():
           'data-cmd="!MODE crsf"' in raw_page and 'data-cmd="!MODE ps2"' in raw_page)
     check("遥控页有通道实时面板", 'id="ch-panel"' in raw_page and 'id="ch-mode"' in raw_page)
     check("通道格子按功能名反查 (改滑条后跟着变)",
-          "crsf_ch_fwd" in raw_page and "renderCh" in raw_page)
+          "ch_fwd" in raw_page and "renderCh" in raw_page)
 
     # 输入源有两个入口 (按钮 / input_mode 滑条), 必须只剩一个说法:
-    # 滑条被 PARAM_HIDE 挡掉, 按钮点亮当前生效的模式
+    # 滑条被 PARAM_HIDE 挡掉, 按钮点亮当前生效的模式。
+    # 模式页的 19 个 mode_*/combo_* 同样走自定义控件, 也一并挡掉通用滑条
     import re as _re
     m_hide = _re.search(r"const PARAM_HIDE = new Set\(\[(.*?)\]\)", raw_page, _re.S)
     hidden = _re.findall(r'"(\w+)"', m_hide.group(1)) if m_hide else []
-    check("input_mode 不生成通用滑条 (按钮才是它的控件)",
-          hidden == ["input_mode"], f"PARAM_HIDE={hidden}")
     firm = {n for n, _, _ in
             RE_TABLE_ROW.findall(open(PARAMS_C, encoding="utf-8").read())}
+    want_hide = {"input_mode"} | {n for n in firm if n.startswith(("mode_", "combo_"))}
+    check("input_mode 与 19 个 mode_*/combo_* 不生成通用滑条 (自定义控件接管)",
+          set(hidden) == want_hide and len(hidden) == len(want_hide)
+          and len(hidden) == 20, f"PARAM_HIDE={hidden}")
     check("PARAM_HIDE 里的名字都是真参数 (防拼错导致参数凭空消失)",
           set(hidden) <= firm,
           "不存在: " + ", ".join(sorted(set(hidden) - firm)))
+
+    # 模式页 (Betaflight 式矩阵 + PS2 组合键): 控件由 JS 按 MODES/COMBOS 表建,
+    # 所以断言生成器的输入在页面里 —— 与分页断言同一套路。参数名后缀 = 控件 id
+    # 后缀 (mode_arm → md-arm), 两边拼错一个字母就是"改了没反应且无报错"。
+    check("模式页有矩阵与组合键两张表的宿主",
+          'id="md-rows"' in raw_page and 'id="cb-rows"' in raw_page
+          and "const MODES = [" in raw_page and "const COMBOS = [" in raw_page)
+    check("模式矩阵 10 行 (解锁/平衡/5 步态/3 站姿) 控件齐全",
+          all(f'["{p}", ' in raw_page for p in
+              ("mode_arm", "mode_bal", "mode_g0", "mode_g1", "mode_g2", "mode_g3",
+               "mode_g4", "mode_sn", "mode_sp", "mode_sw"))
+          and 'id="md-sel-${key}"' in raw_page
+          and all(f'id="md-{lv}-${{key}}"' in raw_page for lv in ("lo", "md", "hi")))
+    check("组合键 9 行 (解锁/平衡/步态±/站姿±/抬腿±/急停) 控件齐全",
+          all(f'["{p}", ' in raw_page for p in
+              ("combo_arm", "combo_bal", "combo_gnext", "combo_gprev", "combo_snext",
+               "combo_sprev", "combo_lup", "combo_ldn", "combo_estop"))
+          and 'id="cb-a-${key}"' in raw_page and 'id="cb-b-${key}"' in raw_page)
+    # 打包格式必须与固件 hexapod_input.h 一致: ch<<3|bits 与 btn_a|btn_b<<5
+    check("矩阵值按 ch<<3|bits 打包 (ch=31 未分配)",
+          "MODE_NONE << 3" in raw_page and "(ch << 3) | bits" in raw_page
+          and "const MODE_NONE = 31" in raw_page)
+    check("组合键按 btn_a|btn_b<<5 打包 (16 = 无)",
+          "a | (b << 5)" in raw_page and "const COMBO_NONE = 16" in raw_page)
+    check("模式页实时徽标 (解锁/步态/平衡/站姿/高度/输入源)",
+          all(f'id="mds-{i}"' in raw_page
+              for i in ("arm", "gait", "bal", "st", "hi", "in"))
+          and "function renderModes()" in raw_page)
+    check("高度积分开关有专门的解释 (与线性模式的区别)",
+          "height_integrate:" in raw_page and "回中保持" in raw_page)
     check("输入源按钮按固件回报的模式点亮 (不是按点击)",
           'id="ch-btn-crsf"' in raw_page and 'classList.toggle("on"' in raw_page)
 

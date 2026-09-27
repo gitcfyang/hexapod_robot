@@ -153,8 +153,11 @@ RE_DEV = re.compile(r"^\[TCP\] dev (on|off|busy)(?: (\S+))?$")
 RE_ROBOT_PWR = re.compile(r"^Robot (ON|OFF)\b")
 RE_RUN_STATE = re.compile(r"^\[(RUN|IDLE)\]")
 # [RUN] 那行还带行程/步态/抬腿 —— 控制页「固件回报」就靠它回读:
-#   [RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40
+#   [RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40 Bal:0 St:0 Hi:1
 RE_RUN_TRAVEL = re.compile(r"X:(-?\d+) Y:(-?\d+) Z:(-?\d+) Gait:(\d+) Lift:(\d+)")
+# [RUN] 与三条 [IDLE] 行尾部相同的模式摘要 —— 「模式」页的实时状态徽标:
+#   Bal=平衡模式(0/1) St=站立姿态(-1/0/+1) Hi=高度积分开关(0/1)
+RE_RUN_MODE = re.compile(r"Bal:(-?\d+) St:(-?\d+) Hi:(\d+)")
 
 # 遥控门 (调试页锁定遥控输入):
 #   [RC] locked / [RC] unlocked —— 固件 !RC 的回执, 也是 6s 超时自解锁的通知。
@@ -244,7 +247,8 @@ def parse_line(telem, line):
 
     # [RUN]/[IDLE] 只是"在跑/待机"的另一种说法, 供电状态以 Robot ON/OFF 为准 ——
     # 但超时自解锁/重启后可能只收到摘要行, 所以两条都写同一个键。
-    # [RUN] 行里还有行程/步态/抬腿 (前端合并显示, 缺字段 = 保留上次的值)
+    # [RUN] 行里还有行程/步态/抬腿 (前端合并显示, 缺字段 = 保留上次的值),
+    # Bal/St/Hi 三种行都有 (「模式」页的状态徽标)。
     m = RE_RUN_STATE.match(line)
     if m:
         snap = {"on": m.group(1) == "RUN"}
@@ -252,6 +256,9 @@ def parse_line(telem, line):
         if t:
             snap.update(x=int(t.group(1)), y=int(t.group(2)), z=int(t.group(3)),
                         gait=int(t.group(4)), lift=int(t.group(5)))
+        d = RE_RUN_MODE.search(line)
+        if d:
+            snap.update(bal=int(d.group(1)), st=int(d.group(2)), hi=int(d.group(3)))
         return "run", telem.update("run", snap)
 
     m = RE_BATT_RAW.match(line)

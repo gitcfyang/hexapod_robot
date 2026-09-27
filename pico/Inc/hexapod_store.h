@@ -45,9 +45,12 @@
 /* 版本沿革:
  *   1: 原始布局
  *   2: 名字长度 12 → 20 (记录变大)
- *   3: STORE_PARAMS_MAX 48 → 64 (entries 变大, crc32 偏移随之改变) */
-#define STORE_PARAMS_VERSION       3u
-#define STORE_PARAMS_MAX           64u         /* 单次可存参数条数上限 */
+ *   3: STORE_PARAMS_MAX 48 → 64 (entries 变大, crc32 偏移随之改变)
+ *   4: STORE_PARAMS_MAX 64 → 96 (输入参数统一 + 模式矩阵/组合键表)
+ * 版本号一跳, 旧记录整体作废 (回落默认值) —— 本版默认值本就重定义过,
+ * 与其把旧值套到新名字上, 不如让用户重存一次。 */
+#define STORE_PARAMS_VERSION       4u
+#define STORE_PARAMS_MAX           96u         /* 单次可存参数条数上限 */
 /* 含结尾 NUL。必须 > 参数表里最长的名字 (当前 16: batt_interval_ms),
  * 否则名字被截断后既查不到 (!CFG 失效) 也读不回 (存了等于没存)。
  * params_init() 会在启动时校验, 服务器侧 PARAM_NAME_OK 也要同步。 */
@@ -78,7 +81,7 @@ typedef struct __attribute__((packed)) {
     int32_t value;
 } store_param_entry_t;
 
-/** 参数记录: 8 + 64×24 + 4 = 1548 字节 (按 7 个编程页 1792B 写入) */
+/** 参数记录: 8 + 96×24 + 4 = 2316 字节 (按 10 个编程页 2560B 写入) */
 typedef struct __attribute__((packed)) {
     uint32_t magic;                            /* STORE_PARAMS_MAGIC */
     uint16_t version;                          /* STORE_PARAMS_VERSION */

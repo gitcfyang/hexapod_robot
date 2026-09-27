@@ -19,6 +19,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include "hexapod_types.h"
+#include "hexapod_input.h"   /* 统一量程 CRSF_CH_VALUE_MIN/MID/MAX */
 
 /* ==================== CRSF 协议常量 ==================== */
 
@@ -31,54 +32,12 @@
 #define CRSF_FRAMETYPE_LINK_STATISTICS       0x14
 #define CRSF_FRAMETYPE_DEVICE_INFO           0x29
 
-/* RC 通道映射 — 默认值（可被 hexapod_config.h 覆盖） */
-#ifndef CRSF_CHANNEL_FORWARD
-#define CRSF_CHANNEL_FORWARD      0   // 前后
-#endif
-#ifndef CRSF_CHANNEL_STRAFE
-#define CRSF_CHANNEL_STRAFE       1   // 左右平移
-#endif
-#ifndef CRSF_CHANNEL_TURN
-#define CRSF_CHANNEL_TURN         3   // 旋转
-#endif
-#ifndef CRSF_CHANNEL_HEIGHT
-#define CRSF_CHANNEL_HEIGHT       2   // 升降
-#endif
-#ifndef CRSF_CHANNEL_ARM
-#define CRSF_CHANNEL_ARM          4   // 解锁/上电
-#endif
-#ifndef CRSF_CHANNEL_GAIT
-#define CRSF_CHANNEL_GAIT         5   // 步态切换
-#endif
-#ifndef CRSF_CHANNEL_SPEED
-#define CRSF_CHANNEL_SPEED        6   // 速度控制
-#endif
-#ifndef CRSF_CHANNEL_BALANCE
-#define CRSF_CHANNEL_BALANCE      7   // 平衡模式
-#endif
-
-/* CRSF 通道值范围（标准 11-bit 编码，对应 ELRS 输出）
- * 摇杆: 172(Min) ~ 992(Mid) ~ 1811(Max)，跨度 ~819 每侧 */
-#define CRSF_CH_VALUE_MIN         172
-#define CRSF_CH_VALUE_MID         992
-#define CRSF_CH_VALUE_MAX         1811
-
-/* 死区参数：优先使用 hexapod_config.h 中的配置，否则使用默认值 */
-#ifndef CRSF_CH_VALUE_DEADBAND
-#define CRSF_CH_VALUE_DEADBAND    40   // 原始通道死区（CRSF units）
-#endif
-#ifndef CONTROL_DEADBAND
-#define CONTROL_DEADBAND          15   // 控制量死区（-500~+500 范围）
-#endif
-#ifndef HEIGHT_CONTROL_THRESHOLD
-#define HEIGHT_CONTROL_THRESHOLD  (CONTROL_DEADBAND * 2)  // 高度积分控制阈值
-#endif
-#ifndef BODY_HEIGHT_RANGE_MM
-#define BODY_HEIGHT_RANGE_MM      40   // 机身高度线性控制范围 (mm)
-#endif
-#ifndef BODY_ROTATION_MAX
-#define BODY_ROTATION_MAX         200  // 机身姿态旋转范围 (0.1°, 200=20°)
-#endif
+/* 通道量程 (CRSF_CH_VALUE_MIN/MID/MAX) 现由统一输入层定义, 见 hexapod_input.h
+ * —— 它是全固件的公共标度 (PS2 也换算到这套值), 不再是 CRSF 私有常量。
+ *
+ * 通道映射、死区、机身范围同理都在 hexapod_config.h: 那些量早已是运行期
+ * 参数 (g_params), 这里不再放 #ifndef 兜底 —— 留一份编译期默认值只会让人
+ * 以为"改了这里就生效"。 */
 
 /* ==================== CRSF 状态结构体 ==================== */
 

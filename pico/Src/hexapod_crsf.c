@@ -4,29 +4,31 @@
  *
  * 将 ELRS 接收器的摇杆信号转换为六足机器人的运动控制命令
  *
- * 摇杆映射 (ELRS 标准通道顺序):
+ * 本文件只负责「字节流 → 通道数组」的解析; 「通道 → 机器人动作」在
+ * hexapod_input.c (统一输入层), 与 PS2 共用同一套参数与模式矩阵。
  *
- *   正常模式 (CH8=低位):
+ * 默认映射 (ELRS 标准通道顺序, 全部可在网页改):
+ *
+ *   正常模式:
  *     CH1 (Ail/Roll)  → 左右平移 (Strafe)
  *     CH2 (Ele/Pitch) → 前进/后退 (Forward)
- *     CH3 (Throttle)  → 机身高度 (线性直接映射)
+ *     CH3 (Throttle)  → 机身高度 (默认积分=速率输入, 见 height_integrate)
  *     CH4 (Rud/Yaw)   → 原地旋转 (Turn)
- *     CH5 (SWA)       → 解锁/上电 (ARM)
- *     CH6 (SWB)       → 步态选择 (三段: 低位=三角6, 中位=三角8, 高位=波浪24)
- *     CH7 (SWC)       → 站立姿态 (三段: 低位=窄, 中位=正常, 高位=宽)
- *     CH8 (SWD)       → 平衡模式 (二段开关)
  *
- *   平衡模式 (CH8=高位):
+ *   平衡模式:
  *     CH1 (Ail/Roll)  → 机身横滚 Roll
  *     CH2 (Ele/Pitch) → 机身俯仰 Pitch
- *     CH3 (Throttle)  → 机身高度 (线性直接映射)
+ *     CH3 (Throttle)  → 机身高度
  *     CH4 (Rud/Yaw)   → 机身偏航 Yaw
  *     机器人原地不动
+ *
+ *   CH5~CH8 开关走模式矩阵 (mode_*): 默认 CH5 高位=解锁 (电平),
+ *   CH6 三段=步态, CH7 三段=站立姿态, CH8 高位=平衡模式。
  */
 
 #include "hexapod_config.h"
 #include "hexapod_crsf.h"
-#include "hexapod_gait.h"
+#include "hexapod_input.h"
 #include <string.h>
 
 /**
@@ -201,234 +203,25 @@ bool crsf_parse_byte(crsf_parser_t *parser, uint8_t byte, uint32_t timestamp_ms,
     return frame_complete;
 }
 
-/* ==================== 通道值映射 ==================== */
-
-/**
- * @brief 将 CRSF 通道值 (172~1811) 映射到 -500~+500 范围
- * @param ch_value 通道原始值
- * @return 映射后的控制值 (-500 ~ +500)
- */
-static int16_t map_channel_to_control(uint16_t ch_value)
-{
-    int16_t result;
-    
-    if (ch_value < CRSF_CH_VALUE_MID - CRSF_CH_VALUE_DEADBAND) {
-        /* 负方向 */
-        int16_t diff = CRSF_CH_VALUE_MID - CRSF_CH_VALUE_DEADBAND - ch_value;
-        int32_t range = CRSF_CH_VALUE_MID - CRSF_CH_VALUE_DEADBAND - CRSF_CH_VALUE_MIN;
-        if (range > 0) {
-            result = (int16_t)(-500 * (int32_t)diff / range);
-        } else {
-            result = 0;
-        }
-        if (result < -500) result = -500;
-    } else if (ch_value > CRSF_CH_VALUE_MID + CRSF_CH_VALUE_DEADBAND) {
-        /* 正方向 */
-        int16_t diff = ch_value - CRSF_CH_VALUE_MID - CRSF_CH_VALUE_DEADBAND;
-        int32_t range = CRSF_CH_VALUE_MAX - (CRSF_CH_VALUE_MID + CRSF_CH_VALUE_DEADBAND);
-        if (range > 0) {
-            result = (int16_t)(500 * (int32_t)diff / range);
-        } else {
-            result = 0;
-        }
-        if (result > 500) result = 500;
-    } else {
-        /* 死区内，输出 0 */
-        result = 0;
-    }
-    
-    return result;
-}
-
-/**
- * @brief 第 2 级死区：将映射后的控制量中小于阈值的值归零
- * @param value 映射后的控制值 (-500 ~ +500)
- * @return 死区处理后的值
- *
- * 与第 1 级死区 (map_channel_to_control 中的 CRSF_CH_VALUE_DEADBAND) 串联，
- * 确保摇杆偏离中位足够远时才产生运动。
- */
-static int16_t apply_control_deadband(int16_t value)
-{
-    if (value > -CONTROL_DEADBAND && value < CONTROL_DEADBAND) {
-        return 0;
-    }
-    return value;
-}
-
-/**
- * @brief 将 CRSF 通道值映射到三档开关 (-500, 0, +500)
- * 用于步态选择
- */
-static int8_t map_to_3pos(uint16_t ch_value)
-{
-    if (ch_value < CRSF_CH_VALUE_MID - 200) return -1;   // 低档
-    if (ch_value > CRSF_CH_VALUE_MID + 200) return 1;    // 高档
-    return 0;                                              // 中档
-}
-
-/**
- * @brief 将 CRSF 通道值映射到二档开关 (0/1)
- * 用于解锁和平衡模式
- */
-static bool map_to_2pos(uint16_t ch_value)
-{
-    return (ch_value > CRSF_CH_VALUE_MID + 200);
-}
-
 /* ==================== CRSF 到机器人控制 ==================== */
 
+/**
+ * @brief 把一帧 CRSF 通道值交给统一输入层
+ *
+ * 本函数只做"翻译": CH1~CH16 原值填进统一通道 0~15, 其余伪通道
+ * (16~19, 只有 PS2 才有对应物) 填中位。真正的映射、死区、模式矩阵、
+ * 组合键都在 hexapod_input.c —— 于是 CRSF 与 PS2 共享同一套参数。
+ */
 void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
 {
     if (!state || !ctrl_state) return;
 
-    /* ---- 开关通道解析（正常/平衡模式共用） ---- */
-    bool  arm       = map_to_2pos(state->channels[CRSF_CHANNEL_ARM]);
-    int8_t gait_pos = map_to_3pos(state->channels[CRSF_CHANNEL_GAIT]);
-    bool  balance   = map_to_2pos(state->channels[CRSF_CHANNEL_BALANCE]);
+    uint16_t ch[HEXINP_CH_COUNT];
+    for (int i = 0; i < 16; i++) ch[i] = state->channels[i];
+    for (int i = 16; i < HEXINP_CH_COUNT; i++) ch[i] = CRSF_CH_VALUE_MID;
 
-    /* ---- 解锁/上电 : 边沿触发 ---- */
-    {
-        static bool prev_arm = false;
-        if (arm && !prev_arm) {
-            ctrl_state->robot_on = true;
-        } else if (!arm && prev_arm) {
-            ctrl_state->robot_on = false;
-        }
-        prev_arm = arm;
-    }
-
-    /* ---- 步态选择 ----
-     * CH6 三段: 低位=三角6步, 中位=三角8步, 高位=波浪24步 */
-    if (gait_pos == -1) {
-        if (ctrl_state->gait_type != GAIT_TRIPOD_6) {
-            ctrl_state->gait_type = GAIT_TRIPOD_6;
-            hexapod_gait_select(GAIT_TRIPOD_6, ctrl_state);
-        }
-    } else if (gait_pos == 0) {
-        if (ctrl_state->gait_type != GAIT_TRIPOD_8) {
-            ctrl_state->gait_type = GAIT_TRIPOD_8;
-            hexapod_gait_select(GAIT_TRIPOD_8, ctrl_state);
-        }
-    } else {
-        if (ctrl_state->gait_type != GAIT_WAVE_24) {
-            ctrl_state->gait_type = GAIT_WAVE_24;
-            hexapod_gait_select(GAIT_WAVE_24, ctrl_state);
-        }
-    }
-
-    /* ---- 站立姿态调整 (CH7 三段) ----
-     * 低位=窄(80%), 中位=正常(100%), 高位=宽(120%) */
-    {
-        int8_t stance_pos = map_to_3pos(state->channels[CRSF_CHANNEL_SPEED]);
-        if (stance_pos != ctrl_state->stance_mode) {
-            ctrl_state->stance_mode = stance_pos;
-            /* hexapod_apply_stance() 由主循环在 hal_input_update 返回后调用 */
-        }
-    }
-
-    /* ---- 平衡模式开关 ---- */
-    ctrl_state->balance_mode = balance;
-
-    if (balance) {
-        /* ====== 平衡模式 ======
-         *
-         * 摇杆映射:
-         *   CH1 (Ail/Roll)  → body_rot.x  机身横滚 Roll (绕X轴=前进轴)
-         *   CH2 (Ele/Pitch) → body_rot.z  机身俯仰 Pitch (绕Z轴=左右轴)
-         *   CH3 (Throttle)  → body_pos.y  机身高度 (线性)
-         *   CH4 (Rud/Yaw)   → body_rot.y  机身偏航 Yaw (绕Y轴=垂直轴)
-         *
-         * 机器人原地不动 (travel_length 全部置零) */
-
-        int16_t roll_stick  = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_STRAFE]));
-        int16_t pitch_stick = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_FORWARD]));
-        int16_t height_stick = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
-        int16_t yaw_stick   = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
-
-        /* 方向取反: 运行时可改 (!CFG inv_* / 网页参数页), 故用运行时 if */
-        if (STRAFE_DIRECTION_INVERT)  roll_stick   = -roll_stick;
-        if (FORWARD_DIRECTION_INVERT) pitch_stick  = -pitch_stick;
-        if (HEIGHT_DIRECTION_INVERT)  height_stick = -height_stick;
-        if (TURN_DIRECTION_INVERT)    yaw_stick    = -yaw_stick;
-
-        /* 机身姿态旋转 (0.1° 单位)
-         * body_rot.x = Roll  (绕 X 前进轴, Rx 旋转 YZ 面)
-         * body_rot.z = Pitch (绕 Z 左右轴, Rz 旋转 XY 面) */
-        /* 平衡模式下 Roll/Pitch 方向取反，使摇杆方向与机身倾斜方向直觉一致 */
-        ctrl_state->body_rot.x = -(roll_stick  * BODY_ROTATION_MAX) / 500;  /* 横滚 Roll */
-        ctrl_state->body_rot.y = -(yaw_stick   * BODY_ROTATION_MAX) / 500;  /* 偏航 Yaw */
-        ctrl_state->body_rot.z = -(pitch_stick * BODY_ROTATION_MAX) / 500;  /* 俯仰 Pitch */
-
-        /* 机身高度 (线性): 摇杆推高→机身抬升, 摇杆拉低→机身下降 */
-        ctrl_state->body_pos.y = (height_stick * BODY_HEIGHT_RANGE_MM) / 500;
-
-        /* 停止行走 */
-        ctrl_state->travel_length.x = 0;
-        ctrl_state->travel_length.y = 0;
-        ctrl_state->travel_length.z = 0;
-    } else {
-        /* ====== 正常模式 ======
-         *
-         * 摇杆映射:
-         *   CH1 (Ail/Roll)  → travel_length.z  左右平移
-         *   CH2 (Ele/Pitch) → travel_length.x  前进/后退
-         *   CH3 (Throttle)  → body_pos.y       机身高度 (线性)
-         *   CH4 (Rud/Yaw)   → travel_length.y  原地旋转 */
-
-        int16_t strafe  = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_STRAFE]));
-        int16_t forward = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_FORWARD]));
-        int16_t height_ctrl = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
-        int16_t turn    = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
-
-        if (STRAFE_DIRECTION_INVERT)  strafe      = -strafe;
-        if (FORWARD_DIRECTION_INVERT) forward     = -forward;
-        if (HEIGHT_DIRECTION_INVERT)  height_ctrl = -height_ctrl;
-        if (TURN_DIRECTION_INVERT)    turn        = -turn;
-
-        /* 步长映射: 摇杆 -500~+500 → 步长 mm */
-        ctrl_state->travel_length.x =  (forward * TRAVEL_MAX_FORWARD_MM) / 500;
-        ctrl_state->travel_length.z = -(strafe  * TRAVEL_MAX_STRAFE_MM)  / 500;  /* 取反使摇杆右推→右平移 */
-        ctrl_state->travel_length.y =  (turn    * TRAVEL_MAX_TURN_MM)    / 500;
-
-        /* 机身高度 (线性): 摇杆偏离中位直接映射到 body_pos.y
-         * 替代了原来的积分器, 响应更直接, 中位→高度不变 */
-        ctrl_state->body_pos.y = (height_ctrl * BODY_HEIGHT_RANGE_MM) / 500;
-
-        /* 正常模式下无姿态旋转（转向由步态引擎处理 travel_length.y）*/
-        ctrl_state->body_rot.x = 0;
-        ctrl_state->body_rot.y = 0;
-        ctrl_state->body_rot.z = 0;
-
-        /* ---- 仿生连续变速：摇杆幅度 → 步态频率 ----
-         *
-         * 取三轴摇杆的最大绝对值作为“运动意图强度”(0-500)。
-         * 强度越大 → 步态周期越短 (频率越高)。
-         * 低摇杆 = 短步长 + 低频率 → 精细缓动
-         * 高摇杆 = 大步长 + 高频率 → 快速行进 */
-        const int16_t period_max = GAIT_PERIOD_MAX_MS;
-        const int16_t period_min = GAIT_PERIOD_MIN_MS;
-        const int32_t range = (int32_t)period_max - (int32_t)period_min;
-
-        int16_t stick_mag = (forward >= 0) ? forward : -forward;
-        int16_t tmp = (strafe >= 0) ? strafe : -strafe;
-        if (tmp > stick_mag) stick_mag = tmp;
-        tmp = (turn >= 0) ? turn : -turn;
-        if (tmp > stick_mag) stick_mag = tmp;
-
-        if (stick_mag <= CONTROL_DEADBAND) {
-            ctrl_state->speed_control = period_max;
-        } else {
-            ctrl_state->speed_control = period_max
-                - (int16_t)(range * (int32_t)stick_mag / 500);
-        }
-    }
-
-    /* 抬腿高度边界钳位 (由 DEFAULT_LEG_LIFT_HEIGHT 初始化, 用户可通过串口 !U/!D 微调) */
-    if (ctrl_state->leg_lift_height > LIFT_HEIGHT_MAX_MM)
-        ctrl_state->leg_lift_height = LIFT_HEIGHT_MAX_MM;
-    if (ctrl_state->leg_lift_height < LIFT_HEIGHT_MIN_MM)
-        ctrl_state->leg_lift_height = LIFT_HEIGHT_MIN_MM;
+    /* 按键掩码恒 0: CRSF 帧只有通道, 组合键只在 PS2 路径上求值 */
+    hexapod_input_apply(HEXINP_PROTO_CRSF, ch, 0, ctrl_state);
 }
 
 bool crsf_check_link(const crsf_state_t *state, uint32_t timeout_ms, uint32_t current_ms)

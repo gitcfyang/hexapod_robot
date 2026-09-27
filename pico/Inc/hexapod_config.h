@@ -308,50 +308,39 @@
 #define USB_DEBUG_ENABLED       1
 #endif
 
-/* ==================== CRSF 通道映射 ====================
+/* ==================== 输入通道映射 (CRSF 与 PS2 共用) ====================
  *
- * 默认映射基于 ELRS 标准通道顺序。
- * 查看调试输出 [DBG1] 行的原始值来确定每个通道对应什么功能。
+ * 两条输入路径都先翻译成「统一通道 id 0~19 的 CRSF 量程值」(见
+ * hexapod_input.h), 所以这里只有一套通道参数, 没有 CRSF/PS2 之分:
  *
- * CH1~CH4 在正常模式和平衡模式下功能不同：
+ *   通道 id 0~15 = CRSF 的 CH1~CH16 (PS2 上只有 0~3 是摇杆);
+ *   通道 id 4~19 在 PS2 上是 16 个按键 (按下 = 高位)。
  *
- *   正常模式 (CH8=低位):
- *     CH1 (Aileron/Roll):    左右平移 (Strafe)
- *     CH2 (Elevator/Pitch):  前进/后退 (Forward)
- *     CH3 (Throttle):        机身高度 (线性直接映射，无弹簧)
- *     CH4 (Rudder/Yaw):      原地旋转 (Turn)
+ * 四个摇杆功能的通道号运行时可改 (!CFG ch_fwd / ch_str / ch_turn / ch_hgt),
+ * 默认值 = PS2 插槽顺序 (0=平移 1=前进 2=高度 3=转向), 恰好也是 ELRS 的
+ * 常用顺序 (CH1 副翼 / CH2 升降 / CH3 油门 / CH4 方向)。
  *
- *   平衡模式 (CH8=高位):
- *     CH1 (Aileron/Roll):    机身横滚 Roll
- *     CH2 (Elevator/Pitch):  机身俯仰 Pitch
- *     CH3 (Throttle):        机身高度 (线性直接映射)
- *     CH4 (Rudder/Yaw):      机身偏航 Yaw
- *     机器人原地不动，不做平移/旋转行走
+ * 正常模式 (mode_bal 未激活):
+ *   平移通道 → 左右平移   前进通道 → 前进/后退
+ *   高度通道 → 机身高度   转向通道 → 原地旋转
  *
- *   CH5~CH8 开关在两种模式下功能相同:
+ * 平衡模式 (mode_bal 激活):
+ *   平移 → 横滚   前进 → 俯仰   高度 → 机身高度   转向 → 偏航
+ *   机器人原地不动, 不做平移/旋转行走
  *
- * ★ 八个通道号运行时可改 (!CFG crsf_ch_fwd / crsf_ch_str / ...),
- *   网页「遥控 → 通道映射」填 0~15 (对应遥控器 CH1~CH16)。
- *   换遥控器/改 ELRS 通道顺序后不用重烧, 改完 !CFGW 即可掉电保持。
- *   取反仍是按功能的 (dir 组), 不随通道号走 —— 换通道后若方向反了,
- *   翻转对应的 inv_* 而不是调这里的通道号。 */
-#define CRSF_CHANNEL_FORWARD_DEFAULT      1   // CH2: 正常=前进/后退, 平衡=俯仰
-#define CRSF_CHANNEL_STRAFE_DEFAULT       0   // CH1: 正常=左右平移, 平衡=横滚
-#define CRSF_CHANNEL_TURN_DEFAULT         3   // CH4: 正常=原地旋转, 平衡=偏航
-#define CRSF_CHANNEL_HEIGHT_DEFAULT       2   // CH3: 正常=机身高度, 平衡=机身高度
-#define CRSF_CHANNEL_ARM_DEFAULT          4   // CH5: 解锁 (二段开关)
-#define CRSF_CHANNEL_GAIT_DEFAULT         5   // CH6: 步态 (三段开关)
-#define CRSF_CHANNEL_SPEED_DEFAULT        6   // CH7: 站立姿态 (三段: -1=窄80%, 0=正常100%, +1=宽120%)
-#define CRSF_CHANNEL_BALANCE_DEFAULT      7   // CH8: 平衡模式 (二段开关)
+ * 解锁 / 步态 / 站立姿态 / 平衡模式这些开关**不在这里**, 而是模式矩阵
+ * (mode_* 参数, 见下方「模式矩阵」段) —— 那是运行时可改配的表, 网页
+ * 「模式」页有界面。取反按功能走 (dir 组), 不随通道号走: 换通道后方向
+ * 反了就翻 inv_*, 别去改通道号。 */
+#define INPUT_CH_FWD_DEFAULT      1   /* 前进/俯仰 */
+#define INPUT_CH_STR_DEFAULT      0   /* 平移/横滚 */
+#define INPUT_CH_TURN_DEFAULT     3   /* 旋转/偏航 */
+#define INPUT_CH_HGT_DEFAULT      2   /* 机身高度 */
 
-#define CRSF_CHANNEL_FORWARD      (g_params.crsf_ch_fwd)
-#define CRSF_CHANNEL_STRAFE       (g_params.crsf_ch_str)
-#define CRSF_CHANNEL_TURN         (g_params.crsf_ch_turn)
-#define CRSF_CHANNEL_HEIGHT       (g_params.crsf_ch_hgt)
-#define CRSF_CHANNEL_ARM          (g_params.crsf_ch_arm)
-#define CRSF_CHANNEL_GAIT         (g_params.crsf_ch_gait)
-#define CRSF_CHANNEL_SPEED        (g_params.crsf_ch_stance)
-#define CRSF_CHANNEL_BALANCE      (g_params.crsf_ch_bal)
+#define INPUT_CH_FWD      (g_params.ch_fwd)
+#define INPUT_CH_STR      (g_params.ch_str)
+#define INPUT_CH_TURN     (g_params.ch_turn)
+#define INPUT_CH_HGT      (g_params.ch_hgt)
 
 /* ---- 站立姿态缩放 (CH7) ----
  * ★ 三个缩放比 + 过渡速度/步长均运行时可改
@@ -377,33 +366,57 @@
 #define STANCE_MAX_STEP_MM_DEFAULT        2
 #define STANCE_MAX_STEP_MM                (g_params.stance_step_mm)
 
-/* ---- CRSF 死区参数 ----
+/* ---- 死区与手感 (CRSF 与 PS2 共用) ----
  *
  * 两级死区设计：
  *
- *   第 1 级：原始通道死区 (CRSF raw units)
- *     CRSF_CH_VALUE_DEADBAND 定义了摇杆中位附近的死区宽度。
+ *   第 1 级：原始通道死区 (raw units)
+ *     CH_VALUE_DEADBAND 定义了摇杆中位附近的死区宽度。
  *     channel ∈ [MID-DEADBAND, MID+DEADBAND] → 输出强制为 0。
- *     CRSF 通道范围 172~1811 (跨度 ~1639)，默认死区 ±40 ≈ ±2.4%。
+ *     通道量程 172~1811 (跨度 ~1639)，默认死区 ±40 ≈ ±2.4%。
+ *     PS2 摇杆也是先换算到这个量程再判死区, 所以一套值管两种手柄。
  *
  *   第 2 级：控制量死区 (映射后的 -500~+500 范围)
  *     CONTROL_DEADBAND 定义了摇杆映射后的死区阈值。
  *     mapped ∈ [-DEADBAND, +DEADBAND] → 输出强制为 0。
- *     默认 ±15/500 = ±3%，过滤映射后的微小残余。
+ *     默认 ±5/500 = ±1%，过滤映射后的微小残余。
  *
  *   两级串联效果：摇杆需偏离中位足够远才会产生运动，
  *   消除摇杆抖动、中位漂移和机械虚位引起的误动作。
  *
- * ★ 两个死区运行时可改 (!CFG crsf_deadband / deadband) */
-#define CRSF_CH_VALUE_DEADBAND_DEFAULT    40   /* 原始通道死区 (CRSF units)，±40 约 ±2.4% */
-#define CONTROL_DEADBAND_DEFAULT          5    /* 控制量死区 (-500~+500)，±15 约 ±3% */
-#define CRSF_CH_VALUE_DEADBAND    (g_params.crsf_deadband)
+ * 指数曲线 (STICK_EXPO) 另外把中位附近压钝: 0 = 纯线性, 100 = 纯三次方。
+ * PS2 电位器摇杆只有 8 位分辨率且带旷量, 调大这个值手感更细;
+ * 默认 0 (两协议都不加曲线)。
+ *
+ * ★ 三个手感参数运行时可改 (!CFG ch_deadband / deadband / expo),
+ *   网页「参数 → 手感」页有滑块。 */
+#define CH_VALUE_DEADBAND_DEFAULT         40   /* 原始通道死区 (raw units)，±40 约 ±2.4% */
+#define CONTROL_DEADBAND_DEFAULT          5    /* 控制量死区 (-500~+500)，±5 约 ±1% */
+#define STICK_EXPO_DEFAULT                0    /* 指数曲线混合比例 0~100 (%) */
+#define CH_VALUE_DEADBAND         (g_params.ch_deadband)
 #define CONTROL_DEADBAND          (g_params.deadband)
+#define STICK_EXPO                (g_params.expo)
 
-/* 高度控制阈值：油门杆须偏离中位超过此值才开始改变抬腿高度。
- * 因为高度是积分控制（每周期累积），阈值需比运动通道的死区更大。
- * 默认 = CONTROL_DEADBAND × 2 ≈ 30，即摇杆偏离约 6% 才响应。 */
-#define HEIGHT_CONTROL_THRESHOLD  (CONTROL_DEADBAND * 2)
+/* ---- 机身高度: 积分 / 线性 二选一 ----
+ *
+ *   HEIGHT_INTEGRATE = 1 (默认): 高度通道是**速率**输入 ——
+ *     回中 = 高度保持, 推住 = 持续升降 (每秒约 500/64 × 帧率 的斜率)。
+ *     PS2 的 LY 是弹簧摇杆, 只有这一种用法说得通; CRSF 拿旋钮当速率
+ *     输入也能用 (松手即停)。
+ *   HEIGHT_INTEGRATE = 0: 高度通道是**绝对位置** ——
+ *     摇杆位置直接映射到机身高度偏移, 中位 = 原高度。
+ *     CRSF 旋钮的经典用法, 换成弹簧摇杆会"松手回到中位高度"。
+ *
+ * 运行中切换不会跳变: 由线性切到积分时, 积分器用当前线性值接续。
+ * 高度轴专用死区 (HEIGHT_DEADZONE, 仅积分模式生效) 比运动死区大,
+ * 因为积分会累积 —— 中心附近的一点抖动会被持续放大成漂移。
+ *
+ * ★ 运行时可改 (!CFG height_integrate / h_deadzone), 网页「步态」页与
+ *   「参数 → 手感」页。 */
+#define HEIGHT_INTEGRATE_DEFAULT          1    /* 1 = 积分 (速率输入), 0 = 线性 (绝对位置) */
+#define HEIGHT_DEADZONE_DEFAULT           25   /* 高度轴死区 (-500~+500)，±25 = ±5% */
+#define HEIGHT_INTEGRATE          (g_params.height_integrate)
+#define HEIGHT_DEADZONE           (g_params.h_deadzone)
 
 /* 机身高度线性控制范围 (mm)
  * 摇杆满量程 (±500) 映射到的机身高度偏移。
@@ -527,61 +540,123 @@
 #define COXA_ANGLE_LM       -900    /* 左中:  -90° 正左方 */
 #define COXA_ANGLE_LF       -450    /* 左前:  -45° 前方偏左 */
 
-/* 前进方向取反开关 (CH2)
- * 如果推摇杆前进时机体后退，设为 1 翻转前进/后退方向。
- * 原因：某些遥控器的 CH2 (Pitch) 输出极性相反 (拉杆=高位, 推杆=低位)。
- * 不要通过翻转 coxa_invert 来修正方向——那会同时破坏转动方向。
- * ★ 四个取反开关运行时可改 (!CFG inv_fwd / inv_str / inv_h / inv_turn),
- *   网页「参数 → 方向取反」页做成开关, 遥控器换机/换固件后不用重烧。 */
+/* ---- 方向取反 (CRSF 与 PS2 共用一套) ----
+ *
+ * 推摇杆方向与机器人动作相反时把对应项置 1。
+ * 常见原因是遥控器的通道极性 (拉杆=高位, 推杆=低位) 或电机/舵机装反。
+ * 不要靠翻转 coxa_invert 来修 —— 那会同时破坏转动方向。
+ *
+ * 默认值全为 0 (全中性): 早期版本两协议的平移都取反 (inv_str=1),
+ * 统一后若发现左右平移反了, !CFG inv_str 1 一条命令即可恢复。
+ *
+ * ★ 四个开关运行时可改 (!CFG inv_fwd / inv_str / inv_h / inv_turn),
+ *   网页「参数 → 方向取反」页做成开关。 */
 #define FORWARD_DIRECTION_INVERT_DEFAULT   0
-#define STRAFE_DIRECTION_INVERT_DEFAULT    1
+#define STRAFE_DIRECTION_INVERT_DEFAULT    0
 #define HEIGHT_DIRECTION_INVERT_DEFAULT    0
 #define TURN_DIRECTION_INVERT_DEFAULT      0
 #define FORWARD_DIRECTION_INVERT   (g_params.inv_fwd)
-
-/* 平移方向取反开关 (CH1)
- * 摇杆左推→右平移 / 右推→左平移 时，设为 1 翻转。 */
 #define STRAFE_DIRECTION_INVERT    (g_params.inv_str)
-
-/* 高度方向取反开关 (CH3)
- * 摇杆推高→机身下降 / 拉低→机身抬升 时，设为 1 翻转。 */
 #define HEIGHT_DIRECTION_INVERT    (g_params.inv_h)
-
-/* 旋转方向取反开关 (CH4)
- * 摇杆左推→顺时针转 / 右推→逆时针转 时，设为 1 翻转。 */
 #define TURN_DIRECTION_INVERT      (g_params.inv_turn)
 
-/* ==================== PS2 手柄方向取反开关 ====================
- * 独立于 CRSF (两者摇杆极性约定不同, 校准互不影响)。
- * 默认值按 PS2 标准直觉: 推上=前进, 推左=左移, 推右=右转, 推上=机身升高。
- * 实测哪个轴方向反了就翻转对应宏 (0↔1)。
- * ★ 四个开关运行时可改 (!CFG ps2_inv_fwd / ps2_inv_str / ps2_inv_h /
- *   ps2_inv_turn), 网页「参数 → 方向取反」页做成开关。 */
-#define PS2_FORWARD_DIRECTION_INVERT_DEFAULT   1
-#define PS2_STRAFE_DIRECTION_INVERT_DEFAULT    1
-#define PS2_HEIGHT_DIRECTION_INVERT_DEFAULT    1
-#define PS2_TURN_DIRECTION_INVERT_DEFAULT      0
-#define PS2_FORWARD_DIRECTION_INVERT   (g_params.ps2_inv_fwd)
-#define PS2_STRAFE_DIRECTION_INVERT    (g_params.ps2_inv_str)
-#define PS2_HEIGHT_DIRECTION_INVERT    (g_params.ps2_inv_h)
-#define PS2_TURN_DIRECTION_INVERT      (g_params.ps2_inv_turn)
+/* ==================== 模式矩阵 (mode_*) ====================
+ *
+ * 每个模式 = 一个通道 + 允许的档位, 参数值 = ch<<3 | bits:
+ *   ch   = 统一通道 id 0~19 (hexapod_input.h), 31 = 未分配 → 该模式永不激活
+ *   bits = 档位掩码: 低=1, 中=2, 高=4 (可多选, 值 0 也算未分配)
+ * 档位判定用原始值: <792 低 / >1192 高 / 其余中。
+ *
+ * 默认值复刻改动前的开关行为 (括号里是算出来的值):
+ *   解锁     = CH5 高位   (4<<3|4 = 36)
+ *   平衡模式 = CH8 高位   (7<<3|4 = 60)
+ *   步态     = CH6 低/中/高 → 三角6 / 三角8 / 波浪24 (41 / 42 / 44)
+ *   站立姿态 = CH7 低/中/高 → 窄 / 正常 / 宽          (49 / 50 / 52)
+ *   未分配: 波纹12步 (g0) 与快速三角4步 (g4) —— 与改动前一致, CH6 三段
+ *   够不着这两个步态; 想用就在网页「模式」页给它们勾上通道与区间。
+ *
+ * 解锁是**电平**语义 (Betaflight 同款): 开关停在激活区间内才保持解锁,
+ * 拨走即上锁。改动前是边沿触发 (拨一下解锁, 再拨一下上锁)。
+ *
+ * ★ 全部运行时可改, 网页「模式」页是矩阵式界面; !CFGW 存 flash 掉电保持。
+ *   打包/解包在 hexapod_input.c (mode_unpack), 那里定义了权威常量
+ *   HEXINP_MODE_*; 这里的默认值按同一规则手写, 改动需同步。 */
+#define MODE_ARM_DEFAULT     (( 4 << 3) | 4)   /* CH5 高位 = 解锁 */
+#define MODE_BAL_DEFAULT     (( 7 << 3) | 4)   /* CH8 高位 = 平衡模式 */
+#define MODE_G0_DEFAULT      ((31 << 3) | 0)   /* 波纹步态12步: 未分配 */
+#define MODE_G1_DEFAULT      (( 5 << 3) | 1)   /* CH6 低位 = 三角6步 */
+#define MODE_G2_DEFAULT      (( 5 << 3) | 2)   /* CH6 中位 = 三角8步 */
+#define MODE_G3_DEFAULT      (( 5 << 3) | 4)   /* CH6 高位 = 波浪24步 */
+#define MODE_G4_DEFAULT      ((31 << 3) | 0)   /* 快速三角4步: 未分配 */
+#define MODE_SN_DEFAULT      (( 6 << 3) | 1)   /* CH7 低位 = 窄 (80%) */
+#define MODE_SP_DEFAULT      (( 6 << 3) | 2)   /* CH7 中位 = 正常 (100%) */
+#define MODE_SW_DEFAULT      (( 6 << 3) | 4)   /* CH7 高位 = 宽 (120%) */
 
-/* PS2 高度轴 (LY) 专用死区 (±25/500 = ±5%):
- * 高度为积分控制 (LY 弹簧摇杆 = 速率输入, 回中=高度保持),
- * 死区用于抑制中心抖动造成的积分漂移, 无需太大
- * ★ 运行时 !CFG ps2_h_deadzone */
-#define PS2_HEIGHT_DEADZONE_DEFAULT    25
-#define PS2_HEIGHT_DEADZONE            (g_params.ps2_h_deadzone)
+/* 运行时的值: 唯一真源是 g_params (参数表), 求值全在 hexapod_input.c。
+ * 与其它组一样给每个字段一个宏 —— 找"这个参数谁在读"时只认这里。 */
+#define MODE_ARM     (g_params.mode_arm)
+#define MODE_BAL     (g_params.mode_bal)
+#define MODE_G0      (g_params.mode_g0)
+#define MODE_G1      (g_params.mode_g1)
+#define MODE_G2      (g_params.mode_g2)
+#define MODE_G3      (g_params.mode_g3)
+#define MODE_G4      (g_params.mode_g4)
+#define MODE_SN      (g_params.mode_sn)
+#define MODE_SP      (g_params.mode_sp)
+#define MODE_SW      (g_params.mode_sw)
 
-/* PS2 摇杆指数曲线 (expo) 混合比例 0~100:
- * 0 = 纯线性 (禁用); 100 = 纯三次方曲线 (初段最钝)
- * PS2 电位器摇杆仅 8 位分辨率 (一格≈0.79% 指令) 且带机械旷量与噪声,
- * 中位附近难以精细控制 — expo 压缩初段灵敏度、放大末段,
- * 满杆输出恒为 ±500, 最大行程不受影响。
- * 仅作用于 PS2 路径 (ps2_expo), 与 CRSF/USB 控制解耦
- * ★ 运行时 !CFG ps2_expo, 网页「参数 → 手感」页拖滑块即时感受 */
-#define PS2_STICK_EXPO_DEFAULT        50
-#define PS2_STICK_EXPO                (g_params.ps2_expo)
+/* ==================== PS2 组合键 (combo_*) ====================
+ *
+ * PS2 有 16 个按键但没有开关通道, 所以「解锁」「平衡」「切步态」这些
+ * 一次性动作用组合键表达。参数值 = btn_a | btn_b<<5:
+ *   btn_x = 按键下标 0~15 (位序同 hexapod_ps2.h 的 PSB_*), 16 = 无
+ *   btn_b = 无  → 单键: 点 btn_a 触发一次 (边沿)
+ *   btn_b ≠ 无  → 和弦: 按住 btn_a, 再点 btn_b 触发一次
+ *
+ * 默认值复刻改动前的硬编码按键 (括号里是算出来的值):
+ *   START 解锁/上锁 (515)     SELECT 平衡模式 (512)
+ *   ↑/↓ 步态上/下一个 (516/518)   ←/→ 站立姿态 窄↔宽 (519/517)
+ *   × 按住 + ↑/↓ 抬腿高度 ±5 (142/206)     ○ 急停 (525)
+ *
+ * 和弦优先: 和弦触发后两个键的沿都被消耗, 不会再触发同键的单键动作
+ * (所以 ×+↑ 不会同时切成下一个步态)。
+ *
+ * 某目标一旦配了组合键, PS2 帧就不再求值该目标的矩阵行 —— 否则默认表下
+ * 按 SELECT 会顺带命中 CH7 (矩阵里的步态通道)。把组合键设为「无」(16)
+ * 就能把该目标交回模式矩阵 (比如用某个按键当解锁开关, 按住=解锁)。
+ *
+ * ★ 全部运行时可改, 网页「模式」页; 组合键只对 PS2 生效。
+ *   打包/解包在 hexapod_input.c (combo_unpack), 权威常量 HEXINP_COMBO_NONE。 */
+#define COMBO_NONE           16   /* 参数值里的"无按键" */
+#define COMBO_KEY_START      3
+#define COMBO_KEY_SELECT     0
+#define COMBO_KEY_UP         4
+#define COMBO_KEY_DOWN       6
+#define COMBO_KEY_LEFT       7
+#define COMBO_KEY_RIGHT      5
+#define COMBO_KEY_CROSS      14
+#define COMBO_KEY_CIRCLE     13
+
+#define COMBO_ARM_DEFAULT    (COMBO_KEY_START  | (COMBO_NONE << 5))   /* START */
+#define COMBO_BAL_DEFAULT    (COMBO_KEY_SELECT | (COMBO_NONE << 5))   /* SELECT */
+#define COMBO_GNEXT_DEFAULT  (COMBO_KEY_UP     | (COMBO_NONE << 5))   /* ↑ */
+#define COMBO_GPREV_DEFAULT  (COMBO_KEY_DOWN   | (COMBO_NONE << 5))   /* ↓ */
+#define COMBO_SNEXT_DEFAULT  (COMBO_KEY_RIGHT  | (COMBO_NONE << 5))   /* → */
+#define COMBO_SPREV_DEFAULT  (COMBO_KEY_LEFT   | (COMBO_NONE << 5))   /* ← */
+#define COMBO_LUP_DEFAULT    (COMBO_KEY_CROSS  | (COMBO_KEY_UP   << 5))  /* × + ↑ */
+#define COMBO_LDN_DEFAULT    (COMBO_KEY_CROSS  | (COMBO_KEY_DOWN << 5))  /* × + ↓ */
+#define COMBO_ESTOP_DEFAULT  (COMBO_KEY_CIRCLE | (COMBO_NONE << 5))   /* ○ */
+
+/* 运行时的值 (唯一真源 = g_params), 只在 PS2 帧上求值, 见 hexapod_input.c */
+#define COMBO_ARM     (g_params.combo_arm)
+#define COMBO_BAL     (g_params.combo_bal)
+#define COMBO_GNEXT   (g_params.combo_gnext)
+#define COMBO_GPREV   (g_params.combo_gprev)
+#define COMBO_SNEXT   (g_params.combo_snext)
+#define COMBO_SPREV   (g_params.combo_sprev)
+#define COMBO_LUP     (g_params.combo_lup)
+#define COMBO_LDN     (g_params.combo_ldn)
+#define COMBO_ESTOP   (g_params.combo_estop)
 
 /* ---- 初始足端位置 (站立时足端在腿基座坐标系中的坐标) ----
  *

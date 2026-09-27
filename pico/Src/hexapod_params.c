@@ -53,6 +53,7 @@ static const param_t s_table[] = {
     { "travel_turn_mm", &g_params.travel_turn_mm,  10, 150, TRAVEL_MAX_TURN_MM_DEFAULT,    "mm", "motion" },
     { "body_rot_max",   &g_params.body_rot_max,    50, 600, BODY_ROTATION_MAX_DEFAULT,  "0.1deg", "motion" },
     { "body_h_range_mm", &g_params.body_h_range_mm, 20, 120, BODY_HEIGHT_RANGE_MM_DEFAULT, "mm", "motion" },
+    { "height_integrate", &g_params.height_integrate, 0, 1, HEIGHT_INTEGRATE_DEFAULT, "", "motion" },
     { "lift_min_mm",    &g_params.lift_min_mm,      1,  30, LIFT_HEIGHT_MIN_MM_DEFAULT, "mm", "motion" },
     { "lift_max_mm",    &g_params.lift_max_mm,     20, 100, LIFT_HEIGHT_MAX_MM_DEFAULT, "mm", "motion" },
     { "gait_min_ms",    &g_params.gait_min_ms,     20, 200, GAIT_PERIOD_MIN_MS_DEFAULT, "ms", "motion" },
@@ -65,21 +66,17 @@ static const param_t s_table[] = {
     { "stance_speed",   &g_params.stance_speed,     5, 100, STANCE_TRANSITION_SPEED_DEFAULT, "x100/周期", "stance" },
     { "stance_step_mm", &g_params.stance_step_mm,   1,  10, STANCE_MAX_STEP_MM_DEFAULT, "mm", "stance" },
 
-    /* ---- 手感 / 死区 ---- */
-    { "deadband",       &g_params.deadband,         0,  50, CONTROL_DEADBAND_DEFAULT,      "",     "tune" },
-    { "crsf_deadband",  &g_params.crsf_deadband,    0, 200, CRSF_CH_VALUE_DEADBAND_DEFAULT, "",    "tune" },
-    { "ps2_expo",       &g_params.ps2_expo,         0, 100, PS2_STICK_EXPO_DEFAULT,        "%",    "tune" },
-    { "ps2_h_deadzone", &g_params.ps2_h_deadzone,   0, 100, PS2_HEIGHT_DEADZONE_DEFAULT,   "",     "tune" },
+    /* ---- 手感 / 死区 (两协议共用) ---- */
+    { "deadband",       &g_params.deadband,         0,  50, CONTROL_DEADBAND_DEFAULT,  "",     "tune" },
+    { "ch_deadband",    &g_params.ch_deadband,      0, 200, CH_VALUE_DEADBAND_DEFAULT, "",     "tune" },
+    { "expo",           &g_params.expo,             0, 100, STICK_EXPO_DEFAULT,        "%",    "tune" },
+    { "h_deadzone",     &g_params.h_deadzone,       0, 100, HEIGHT_DEADZONE_DEFAULT,   "",     "tune" },
 
     /* ---- 方向取反 (0/1) ---- */
     { "inv_fwd",        &g_params.inv_fwd,       0, 1, FORWARD_DIRECTION_INVERT_DEFAULT,    "", "dir" },
     { "inv_str",        &g_params.inv_str,       0, 1, STRAFE_DIRECTION_INVERT_DEFAULT,     "", "dir" },
     { "inv_h",          &g_params.inv_h,         0, 1, HEIGHT_DIRECTION_INVERT_DEFAULT,     "", "dir" },
     { "inv_turn",       &g_params.inv_turn,      0, 1, TURN_DIRECTION_INVERT_DEFAULT,       "", "dir" },
-    { "ps2_inv_fwd",    &g_params.ps2_inv_fwd,   0, 1, PS2_FORWARD_DIRECTION_INVERT_DEFAULT, "", "dir" },
-    { "ps2_inv_str",    &g_params.ps2_inv_str,   0, 1, PS2_STRAFE_DIRECTION_INVERT_DEFAULT,  "", "dir" },
-    { "ps2_inv_h",      &g_params.ps2_inv_h,     0, 1, PS2_HEIGHT_DIRECTION_INVERT_DEFAULT,  "", "dir" },
-    { "ps2_inv_turn",   &g_params.ps2_inv_turn,  0, 1, PS2_TURN_DIRECTION_INVERT_DEFAULT,    "", "dir" },
 
     /* ---- IMU ---- */
     { "imu_enabled",    &g_params.imu_enabled,     0,     1, IMU_ENABLED_DEFAULT,            "",   "imu" },
@@ -87,16 +84,37 @@ static const param_t s_table[] = {
     { "imu_roll_sign",  &g_params.imu_roll_sign, -1,   1, IMU_ROLL_SIGN_DEFAULT,        "",    "imu" },
     { "imu_pitch_sign", &g_params.imu_pitch_sign, -1,  1, IMU_PITCH_SIGN_DEFAULT,       "",    "imu" },
 
-    /* ---- 通道映射 (值 = CRSF 通道下标 0~15) ---- */
-    { "crsf_ch_fwd",    &g_params.crsf_ch_fwd,      0, 15, CRSF_CHANNEL_FORWARD_DEFAULT, "", "chan" },
-    { "crsf_ch_str",    &g_params.crsf_ch_str,      0, 15, CRSF_CHANNEL_STRAFE_DEFAULT,  "", "chan" },
-    { "crsf_ch_turn",   &g_params.crsf_ch_turn,     0, 15, CRSF_CHANNEL_TURN_DEFAULT,    "", "chan" },
-    { "crsf_ch_hgt",    &g_params.crsf_ch_hgt,      0, 15, CRSF_CHANNEL_HEIGHT_DEFAULT,  "", "chan" },
-    { "crsf_ch_arm",    &g_params.crsf_ch_arm,      0, 15, CRSF_CHANNEL_ARM_DEFAULT,     "", "chan" },
-    { "crsf_ch_gait",   &g_params.crsf_ch_gait,     0, 15, CRSF_CHANNEL_GAIT_DEFAULT,    "", "chan" },
-    { "crsf_ch_stance", &g_params.crsf_ch_stance,   0, 15, CRSF_CHANNEL_SPEED_DEFAULT,   "", "chan" },
-    { "crsf_ch_bal",    &g_params.crsf_ch_bal,      0, 15, CRSF_CHANNEL_BALANCE_DEFAULT, "", "chan" },
-    { "input_mode",     &g_params.input_mode,       0,  1, INPUT_MODE_DEFAULT,           "", "chan" },
+    /* ---- 通道映射 (值 = 统一通道 id 0~19) ---- */
+    { "ch_fwd",         &g_params.ch_fwd,           0, 19, INPUT_CH_FWD_DEFAULT,  "", "chan" },
+    { "ch_str",         &g_params.ch_str,           0, 19, INPUT_CH_STR_DEFAULT,  "", "chan" },
+    { "ch_turn",        &g_params.ch_turn,          0, 19, INPUT_CH_TURN_DEFAULT, "", "chan" },
+    { "ch_hgt",         &g_params.ch_hgt,           0, 19, INPUT_CH_HGT_DEFAULT,  "", "chan" },
+    { "input_mode",     &g_params.input_mode,       0,  1, INPUT_MODE_DEFAULT,    "", "chan" },
+
+    /* ---- 模式矩阵 (值 = ch<<3 | bits, 见 config.h) ----
+     * 参数名比 STORE_PARAM_NAME_LEN 短, 网页「模式」页自己渲染界面,
+     * 所以这些项不进滑条页 (前端 PARAM_HIDE)。 */
+    { "mode_arm",       &g_params.mode_arm,       0, 255, MODE_ARM_DEFAULT, "", "modes" },
+    { "mode_bal",       &g_params.mode_bal,       0, 255, MODE_BAL_DEFAULT, "", "modes" },
+    { "mode_g0",        &g_params.mode_g0,        0, 255, MODE_G0_DEFAULT,  "", "modes" },
+    { "mode_g1",        &g_params.mode_g1,        0, 255, MODE_G1_DEFAULT,  "", "modes" },
+    { "mode_g2",        &g_params.mode_g2,        0, 255, MODE_G2_DEFAULT,  "", "modes" },
+    { "mode_g3",        &g_params.mode_g3,        0, 255, MODE_G3_DEFAULT,  "", "modes" },
+    { "mode_g4",        &g_params.mode_g4,        0, 255, MODE_G4_DEFAULT,  "", "modes" },
+    { "mode_sn",        &g_params.mode_sn,        0, 255, MODE_SN_DEFAULT,  "", "modes" },
+    { "mode_sp",        &g_params.mode_sp,        0, 255, MODE_SP_DEFAULT,  "", "modes" },
+    { "mode_sw",        &g_params.mode_sw,        0, 255, MODE_SW_DEFAULT,  "", "modes" },
+
+    /* ---- PS2 组合键 (值 = btn_a | btn_b<<5, 16 = 无) ---- */
+    { "combo_arm",      &g_params.combo_arm,      0, 528, COMBO_ARM_DEFAULT,   "", "modes" },
+    { "combo_bal",      &g_params.combo_bal,      0, 528, COMBO_BAL_DEFAULT,   "", "modes" },
+    { "combo_gnext",    &g_params.combo_gnext,    0, 528, COMBO_GNEXT_DEFAULT, "", "modes" },
+    { "combo_gprev",    &g_params.combo_gprev,    0, 528, COMBO_GPREV_DEFAULT, "", "modes" },
+    { "combo_snext",    &g_params.combo_snext,    0, 528, COMBO_SNEXT_DEFAULT, "", "modes" },
+    { "combo_sprev",    &g_params.combo_sprev,    0, 528, COMBO_SPREV_DEFAULT, "", "modes" },
+    { "combo_lup",      &g_params.combo_lup,      0, 528, COMBO_LUP_DEFAULT,   "", "modes" },
+    { "combo_ldn",      &g_params.combo_ldn,      0, 528, COMBO_LDN_DEFAULT,   "", "modes" },
+    { "combo_estop",    &g_params.combo_estop,    0, 528, COMBO_ESTOP_DEFAULT, "", "modes" },
 
     /* ---- 系统 ---- */
     { "loop_ms",        &g_params.loop_ms,          5,     20, CONTROL_LOOP_PERIOD_MS_DEFAULT, "ms", "sys" },

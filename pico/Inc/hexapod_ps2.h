@@ -47,42 +47,38 @@
 #define PS2_ID_WIRELESS     0x79  /* 2.4G 无线接收器 (模拟模式) */
 #define PS2_DATA_READY      0x5A  /* 数据就绪标志 */
 
-/* ==================== 按键位掩码与功能分层 ====================
-
- * PS2 有 16 个按键 + 4 个模拟轴，远多于 CRSF 的 8 通道。
- * 功能分为两层:
+/* ==================== 按键位掩码 ====================
  *
- *   [核心层] CRSF & PS2 通用 — 运动、解锁、步态、姿态、平衡、急停
- *   [扩展层] PS2 独占 — 调试、自动归位、校准触发、灵敏度切换等
- *
- * 扩展层功能仅在 PS2 模式下生效。CRSF 模式下无对应通道，
- * 系统正常运行不受影响 (无新增功能的退化降级是安全的)。
+ * PS2 有 16 个按键 + 4 个模拟轴。在本固件里它们被翻译成统一通道
+ * (见 hexapod_input.h): 摇杆 → 通道 0~3, 按键 → 通道 4~19 (位序如下)。
+ * 哪个键干什么由**模式矩阵与组合键参数**决定 (网页「模式」页), 不在这
+ * 里硬编码 —— 下面只是位序表, 方括号里是出厂默认动作。
  *
  * Data[3] (BTN1, LSB first):
- *   bit 0: SELECT        [核心] 平衡模式开关
- *   bit 1: L3            [保留] 自动校准触发 (future)
- *   bit 2: R3            [保留] 控制灵敏度切换 (future)
- *   bit 3: START         [核心] 解锁/锁定
- *   bit 4: D-Pad UP      [核心] 抬腿高度配合键
- *   bit 5: D-Pad RIGHT   [核心] 站立姿态: 宽
- *   bit 6: D-Pad DOWN    [核心] 站立姿态: 正常
- *   bit 7: D-Pad LEFT    [核心] 站立姿态: 窄
+ *   bit 0: SELECT        [平衡模式开关]
+ *   bit 1: L3            [未分配]
+ *   bit 2: R3            [未分配]
+ *   bit 3: START         [解锁/上锁]
+ *   bit 4: D-Pad UP      [步态: 下一个 / × 和弦: 抬腿 +]
+ *   bit 5: D-Pad RIGHT   [站立姿态: 下一档]
+ *   bit 6: D-Pad DOWN    [步态: 上一个 / × 和弦: 抬腿 -]
+ *   bit 7: D-Pad LEFT    [站立姿态: 上一档]
  *
  * Data[4] (BTN2, LSB first):
- *   bit 0: L2            [保留] 辅助功能 A (future)
- *   bit 1: R2            [保留] 辅助功能 B (future)
- *   bit 2: L1            [核心] 步态: 上一个
- *   bit 3: R1            [核心] 步态: 下一个
- *   bit 4: △ (Triangle)  [扩展] 调试等级循环
- *   bit 5: ○ (Circle)    [核心] 紧急停止
- *   bit 6: × (Cross)     [核心] 抬腿高度配合键
- *   bit 7: □ (Square)    [保留] 自动归位/站立 (future)
+ *   bit 0: L2            [未分配]
+ *   bit 1: R2            [未分配]
+ *   bit 2: L1            [未分配]
+ *   bit 3: R1            [未分配]
+ *   bit 4: △ (Triangle)  [未分配] (曾: 调试等级循环, 已按用户要求删除)
+ *   bit 5: ○ (Circle)    [紧急停止]
+ *   bit 6: × (Cross)     [抬腿高度和弦的配合键]
+ *   bit 7: □ (Square)    [未分配]
  *
  * 合并为 16-bit: buttons = (Data[4] << 8) | Data[3]
  * 按下 = 0, 松开 = 1
  *
- * 新增扩展功能时: 只需修改 ps2_to_control() 中的对应 case,
- * 调用现有的 ctrl_state 字段或新增字段即可。CRSF 路径不受影响。 */
+ * 新增动作时: 在 hexapod_input.c 的组合键枚举里加一项 + 参数表加一行,
+ * 这里只跟着补一个位序宏。 */
 
 #define PSB_SELECT     (1 << 0)
 #define PSB_L3         (1 << 1)
@@ -108,9 +104,10 @@
 #define PSS_LX  7   /* 左摇杆 X — Data[7] */
 #define PSS_LY  8   /* 左摇杆 Y — Data[8] */
 
-/* ==================== 摇杆死区 (读数偏离中位小于此值视为 0) ==================== */
+/* ==================== 摇杆中位校准 ====================
+ * 死区不在这一层: 摇杆先按中位校准换算到统一量程, 再由统一输入层
+ * 按 ch_deadband 判死区 (两种手柄一套值, 见 hexapod_config.h)。 */
 
-#define PS2_STICK_DEADZONE  8   /* ±8/127 ≈ ±6.3% */
 #define PS2_CENTER_CALIB_SAMPLES  10   /* 连接后摇杆中位采样帧数 (采样期间摇杆需居中) */
 
 /* ==================== 配置模式命令序列 ==================== */
@@ -167,6 +164,7 @@ bool ps2_enter_analog_mode(ps2_state_t *state);
  * @brief 将 PS2 摇杆/按键映射到机器人控制
  * @param state PS2 状态
  * @param ctrl_state 输出: 机器人控制状态
+ * @note 实际映射在统一输入层 (hexapod_input.c), 本函数只做量程换算
  */
 void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state);
 

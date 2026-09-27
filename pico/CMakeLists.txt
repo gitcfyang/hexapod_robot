@@ -45,6 +45,7 @@ add_executable(hexapod_pico
     Src/hexapod_i2c_protocol.c
     Src/hexapod_crsf.c
     Src/hexapod_ps2.c
+    Src/hexapod_input.c
     Src/bno055.c
     Src/hexapod_store.c
     Src/hexapod_params.c

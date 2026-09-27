@@ -403,23 +403,33 @@ int main(void)
             last_status_time = now;
             const control_state_t *state = hexapod_get_state(&g_robot);
 
+            /* 尾部 Bal/St/Hi 是网页「模式」页的实时状态源:
+             * Bal=平衡模式, St=站立姿态(-1/0/+1), Hi=高度积分开关。
+             * 格式改动要同步 server.py 的 RE_RUN_MODE 与 test_webconfig.py。 */
             if (state->robot_on) {
-                hal_debug_printf("[RUN] Travel X:%d Y:%d Z:%d Gait:%d Lift:%d\r\n",
+                hal_debug_printf("[RUN] Travel X:%d Y:%d Z:%d Gait:%d Lift:%d Bal:%d St:%d Hi:%d\r\n",
                             state->travel_length.x,
                             state->travel_length.y,
                             state->travel_length.z,
                             state->gait_type,
-                            state->leg_lift_height);
+                            state->leg_lift_height,
+                            state->balance_mode ? 1 : 0,
+                            state->stance_mode,
+                            (int)HEIGHT_INTEGRATE);
                 if (LED_HEARTBEAT_ENABLED) hal_led_set(0, true);
             } else {
 #if INPUT_CONTROL_MODE == 2
-                hal_debug_printf("[IDLE] Send !O to arm, !F/!B/!L/!R to move\r\n");
+                hal_debug_printf("[IDLE] Send !O to arm, !F/!B/!L/!R to move Bal:%d St:%d Hi:%d\r\n",
+                            state->balance_mode ? 1 : 0, state->stance_mode, (int)HEIGHT_INTEGRATE);
 #else
                 /* 输入源是运行期选择 (!MODE), 文案要跟着当前源走 */
                 if (hal_input_is_ps2()) {
-                    hal_debug_printf("[IDLE] Waiting for START (PS2 arm)...\r\n");
+                    hal_debug_printf("[IDLE] Waiting for START (PS2 arm)... Bal:%d St:%d Hi:%d\r\n",
+                            state->balance_mode ? 1 : 0, state->stance_mode, (int)HEIGHT_INTEGRATE);
                 } else {
-                    hal_debug_printf("[IDLE] Waiting for Arm signal (CH5)...\r\n");
+                    /* 解锁通道可改配 (模式矩阵), 文案不写死 CH5 */
+                    hal_debug_printf("[IDLE] Waiting for Arm signal... Bal:%d St:%d Hi:%d\r\n",
+                            state->balance_mode ? 1 : 0, state->stance_mode, (int)HEIGHT_INTEGRATE);
                 }
 #endif
                 /* led_heartbeat=0 时完全不碰绿灯 —— 否则 !LED g 1 设完
