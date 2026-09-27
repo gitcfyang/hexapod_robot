@@ -324,6 +324,13 @@ uint32_t hal_debug_get_crsf_frame_delta(void);
 uint8_t hal_debug_get_last_servo_count(void);
 
 /**
+ * @brief 打印固件版本 ([VER] Hexapod <版本> (<git 短哈希>))
+ *
+ * 开机横幅与 !VER 命令共用同一格式; 网页配置台的开始页解析这一行显示版本。
+ */
+void hal_fw_version_print(void);
+
+/**
  * @brief 打印一行遥控通道遥测 (网页遥控页实时显示用)
  *
  * 按当前输入源输出 [CH] 行: CRSF 报 16 通道原始值 + 链路/帧计数;

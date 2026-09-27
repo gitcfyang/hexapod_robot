@@ -51,7 +51,21 @@ add_executable(hexapod_pico
 )
 
 pico_set_program_name(hexapod_pico "hexapod_pico")
-pico_set_program_version(hexapod_pico "0.1")
+# picotool 元数据用的版本 (要 MAJOR.MINOR.REVISION 形式, 与 git tag 对齐);
+# 板上显示的版本另取 git describe, 见下面的 HEXAPOD_FW_GIT
+pico_set_program_version(hexapod_pico "0.4.0")
+
+# 固件版本: 每次构建重新生成 hexapod_version.h (git describe: tag + 短哈希 +
+# dirty 标记)。烧录后网页/串口一看就知道板上跑的到底是不是刚编的那次。
+set(HEXAPOD_VERSION_H ${CMAKE_CURRENT_BINARY_DIR}/hexapod_version.h)
+add_custom_target(hexapod_gen_version
+        COMMAND ${CMAKE_COMMAND}
+                -DSRC_DIR=${CMAKE_CURRENT_LIST_DIR}
+                -DOUT=${HEXAPOD_VERSION_H}
+                -P ${CMAKE_CURRENT_LIST_DIR}/cmake/gen_version.cmake
+        BYPRODUCTS ${HEXAPOD_VERSION_H}
+        COMMENT "生成固件版本头 (git describe)")
+add_dependencies(hexapod_pico hexapod_gen_version)
 
 # Modify the below lines to enable/disable output over UART/USB
 # 注意: stdio UART 默认占用 UART0 = GP0(TX)/GP1(RX),
@@ -80,6 +94,7 @@ target_include_directories(hexapod_pico PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}
     Inc
     Src
+    ${CMAKE_CURRENT_BINARY_DIR}    # hexapod_version.h (构建时生成)
 )
 
 pico_add_extra_outputs(hexapod_pico)

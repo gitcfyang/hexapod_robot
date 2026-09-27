@@ -133,6 +133,7 @@ int main(void)
     hal_debug_printf("\r\n=================================\r\n");
     hal_debug_printf("Hexapod Robot - Raspberry Pi Pico\r\n");
     hal_debug_printf("=================================\r\n");
+    hal_fw_version_print();     /* 网页开始页/串口都靠这行核对板上固件 */
 
     /* 非易失存储初始化: 扫描日志环头 + 记录 BOOT 事件
      * (此阶段看门狗尚未启用, flash 写安全) */
@@ -330,7 +331,8 @@ int main(void)
     hal_debug_printf("  Calib:   !C[<id>] !+/- !N !D\r\n");
     hal_debug_printf("\r\nReady for USB commands.\r\n");
 #endif
-    hal_debug_printf("Send '!V' to toggle debug level (current=%u)\r\n", hal_debug_get_level());
+    hal_debug_printf("Send '!V' to toggle debug level (current=%u), '!VER' for version\r\n",
+                     hal_debug_get_level());
 
     /* 主循环 */
     uint32_t last_status_time = 0;

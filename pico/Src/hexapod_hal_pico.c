@@ -428,6 +428,12 @@ batt_state_t hal_battery_state(void)
  * 同时打印采样离散度 (max-min): 旧板 GP26 即因电压尖峰损坏, 而 330k 高串阻
  * 分压的读数对地弹/舵机 EMI 极其敏感, 离散度是分压电路健康度的关键指标
  * (见 STATUS.md「电路保护建议」事件 3)。 */
+void hal_fw_version_print(void)
+{
+    /* 单一格式: 开机横幅、!VER 命令、网页开始页都认这一行 */
+    hal_debug_printf("[VER] Hexapod %s\r\n", HEXAPOD_FW_VERSION);
+}
+
 static void battery_status_print(void)
 {
     if (!adc_initialized) {
@@ -1737,6 +1743,14 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
     /* ---- !IMU: IMU 状态 (欧拉角/中断/校准) ---- */
     if (buf[1] == 'I' && len >= 3 && buf[2] == 'M') {
         imu_status_print();
+        return true;
+    }
+
+    /* ---- !VER: 固件版本 (无需控制状态, 网页开始页在连接前要读) ----
+     * ⚠️ 必须在 switch 之前: case 'V' 是 !V 调试等级切换, 只看到 buf[1]
+     *    就把 !VER 也吃掉 (与 !S/!SAVE、!B/!BATT 同一类前缀冲突) */
+    if (buf[1] == 'V' && len >= 4 && buf[2] == 'E' && buf[3] == 'R') {
+        hal_fw_version_print();
         return true;
     }
 

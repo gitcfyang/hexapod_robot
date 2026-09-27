@@ -24,6 +24,18 @@
 #include "hexapod_types.h"
 #include "hexapod_params.h"   /* 运行时参数实体 g_params (见文件头说明) */
 
+/* ==================== 固件标识 ==================== */
+
+/* 固件版本 (横幅 + !VER + 网页开始页显示), 取自构建时生成的 hexapod_version.h
+ * (git describe: 打 tag 处 = "v0.4.0", tag 之后 = "v0.3.0-16-g8f5b04f", 工作区
+ * 有未提交改动再加 "-dirty")。版本历史只存在于 git tag, 不手工维护第二个号。
+ * 不在 CMake 构建里编译时 (无生成头) 退化为 unknown。 */
+#if __has_include("hexapod_version.h")
+#include "hexapod_version.h"
+#else
+#define HEXAPOD_FW_VERSION "unknown"
+#endif
+
 /* ==================== 机械参数配置 ==================== */
 
 /*
