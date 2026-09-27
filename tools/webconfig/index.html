@@ -286,6 +286,33 @@
   .devlog.err { color: var(--error-400); }
   button[disabled] { opacity: .45; cursor: not-allowed; }
 
+  /* ---------- 开始页 (连接之前; 只读硬件状态, 改不了任何参数) ---------- */
+  /* 与调试页二选一: 默认开始页, 连接成功后换成 #app。固定定位盖住整屏,
+     省得两个页面同时在文档流里互相挤 (也保证 hidden 时不占位) */
+  #welcome {
+    position: fixed; inset: 0; z-index: 10; overflow-y: auto;
+    display: flex; align-items: center; justify-content: center; padding: 2rem 1rem;
+    background: var(--surface-50);
+  }
+  #welcome[hidden] { display: none; }
+  .wel-card {
+    width: min(560px, 94vw); padding: 1.4rem 1.6rem 1.6rem;
+    background: var(--surface-100); border: 2px solid var(--box-line); border-radius: .5rem;
+  }
+  .wel-card h1 {
+    margin: 0; font-size: 26px; font-weight: 700; letter-spacing: .18em;
+    color: var(--primary-500);
+  }
+  .wel-rows { margin: 1rem 0 .25rem; }
+  .wel-rows .row { padding: .35rem 0; border-bottom: 1px solid var(--surface-300); }
+  .wel-rows .row:last-child { border-bottom: 0; }
+  #connectbtn {
+    width: 100%; margin-top: 1rem; font-size: 15px; letter-spacing: .1em;
+    line-height: 40px;
+  }
+  #wel-hint { margin-top: .5rem; min-height: 1.2em; }
+  #welcome-log { max-height: 110px; }
+
   /* ---------- 滚动条 ---------- */
   ::-webkit-scrollbar { width: .3rem; height: .3rem; }
   ::-webkit-scrollbar-track { background: transparent; }
@@ -306,6 +333,46 @@
 </style>
 </head>
 <body>
+
+<!-- ==================== 开始页 ====================
+     连接之前只有这一页: 硬件是否在线、板上固件是什么版本、能不能烧录。
+     参数滑条与命令框都在 #app 里, 连上之前它们连 DOM 都不显示。 -->
+<div id="welcome">
+  <div class="wel-card">
+    <h1>HEXAPOD</h1>
+    <div class="dim">六足机器人配置台 · 确认硬件在线后再连接</div>
+
+    <div class="wel-rows">
+      <div class="row"><span>网页服务</span>
+        <span id="wel-web" class="dim">检测中…</span></div>
+      <div class="row"><span>串口桥接 (serial_console.py)</span>
+        <span id="wel-bridge" class="dim">检测中…</span></div>
+      <div class="row"><span>机器人设备</span>
+        <span id="wel-dev" class="dim">检测中…</span></div>
+    </div>
+
+    <div class="box">
+      <h2>固件</h2>
+      <div class="row"><span>板上运行</span><span id="wel-ver" class="dim">—</span></div>
+      <div id="wel-usb" class="dim">检测中…</div>
+      <div class="row"><span>可烧录 .uf2</span><span id="wel-fw" class="dim">—</span></div>
+      <div class="actions" style="margin-top:.6rem">
+        <button class="mini" id="devbtn">烧录固件…</button>
+      </div>
+    </div>
+
+    <button id="connectbtn" class="regular-button" disabled>连接</button>
+    <div id="wel-hint" class="dim"></div>
+
+    <div class="sect">
+      <h4>最近日志</h4>
+      <div class="devlog" id="welcome-log">（等待桥接输出…）</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== 调试页 (连接之后) ==================== -->
+<div id="app" hidden>
 <div id="main-wrapper">
 
   <div id="topbar">
@@ -313,43 +380,13 @@
     <span class="dot" id="linkdot"></span>
     <span id="linktxt" class="dim">连接中…</span>
     <span class="spacer"></span>
-    <button id="devbtn" class="mini">连接设备</button>
     <button id="pausebtn" class="regular-button">暂停轮询</button>
+    <button id="discbtn" class="danger-button">断开连接</button>
   </div>
 
   <div id="banner">
     串口桥接未连接。请先在 N100 上运行 <code>python3 tools/serial_console.py</code>，
     并确认 Pico 已插好（本页会自动重连，无需刷新）。
-    也可以点右上角「连接设备」—— 检测到设备时能直接进 BOOTSEL 烧录新固件。
-  </div>
-
-  <div class="overlay" id="devmodal">
-    <div class="modal">
-      <h3>设备</h3>
-
-      <div class="sect">
-        <h4>检测到的设备</h4>
-        <div id="devlist" class="dim">检测中…</div>
-      </div>
-
-      <div class="sect">
-        <h4>固件</h4>
-        <div class="actions" style="margin-top:0">
-          <select id="fwsel"></select>
-          <button class="mini" id="fwpick">选择本地 .uf2…</button>
-          <input type="file" id="fwfile" accept=".uf2" hidden>
-        </div>
-        <div id="fwinfo" class="dim" style="margin-top:.3rem"></div>
-      </div>
-
-      <div class="actions">
-        <button class="regular-button" id="flashbtn">烧录固件</button>
-        <button class="mini" id="devrefresh">重新检测</button>
-        <button class="mini" id="devclose">关闭</button>
-      </div>
-
-      <div class="devlog" id="devlog">就绪。</div>
-    </div>
   </div>
 
   <div id="middle">
@@ -478,6 +515,37 @@
     <span class="dim">127.0.0.1:8080</span>
   </div>
 
+</div>
+</div><!-- /#app -->
+
+<!-- 烧录面板: 开始页与调试页都可能要开, 所以放在两者之外 (固定定位的 overlay) -->
+<div class="overlay" id="devmodal">
+  <div class="modal">
+    <h3>设备</h3>
+
+    <div class="sect">
+      <h4>检测到的设备</h4>
+      <div id="devlist" class="dim">检测中…</div>
+    </div>
+
+    <div class="sect">
+      <h4>固件</h4>
+      <div class="actions" style="margin-top:0">
+        <select id="fwsel"></select>
+        <button class="mini" id="fwpick">选择本地 .uf2…</button>
+        <input type="file" id="fwfile" accept=".uf2" hidden>
+      </div>
+      <div id="fwinfo" class="dim" style="margin-top:.3rem"></div>
+    </div>
+
+    <div class="actions">
+      <button class="regular-button" id="flashbtn">烧录固件</button>
+      <button class="mini" id="devrefresh">重新检测</button>
+      <button class="mini" id="devclose">关闭</button>
+    </div>
+
+    <div class="devlog" id="devlog">就绪。</div>
+  </div>
 </div>
 
 <script>
@@ -1443,13 +1511,102 @@ function renderParams(d) {
   refreshPageState();
 }
 
-/* ---------------- SSE ---------------- */
-let lineCount = 0, rateT = Date.now();
+/* ---------------- 开始页 ↔ 调试页 ----------------
+   连接前只有开始页 (看硬件、烧固件), 点「连接」进调试页; 设备掉线、桥接断开、
+   别的标签页断开, 都把人送回开始页。页面加载默认开始页 —— 不记住上次的连接态。 */
+let inDebug = false;
+let BRIDGE_UP = false;                       // 最近一次 hello/link 帧
+let SSE_OK = false;                          // 本页到服务器的 SSE 通不通
+let DEVS = { up: false, port: null, busy: false };
+let VER_TXT = "";                            // 板上固件版本 ([VER] 帧)
+
+function devText(d) {
+  if (!d) return "检测中…";
+  if (d.up) return "在线" + (d.port ? " · " + d.port : "");
+  if (d.busy) return "端口被占用" + (d.port ? " · " + d.port : "");
+  return "未检测到";
+}
+
+function renderWelcome(msg) {
+  $("wel-web").textContent = SSE_OK ? "已连接" : "断开，重连中…";
+  $("wel-web").className = SSE_OK ? "ok" : "err";
+  $("wel-bridge").textContent = BRIDGE_UP ? "已连接" : "未连接";
+  $("wel-bridge").className = BRIDGE_UP ? "ok" : "err";
+  $("wel-dev").textContent = devText(DEVS);
+  $("wel-dev").className = DEVS.up ? "ok" : (DEVS.busy ? "warn" : "dim");
+  $("wel-ver").textContent = VER_TXT || "—";
+  const can = BRIDGE_UP && DEVS.up;
+  $("connectbtn").disabled = !can;
+  $("wel-hint").textContent = msg || (!can
+    ? (!BRIDGE_UP
+        ? "串口桥接没在跑：先在主机上运行 python3 tools/serial_console.py"
+        : DEVS.busy
+          ? "端口被别的程序占着（在主机上 fuser -v " + DEVS.port + " 看是谁）"
+          : "没检测到机器人：插好 USB 后这里会自动更新，无需刷新")
+    : "硬件在线，点「连接」进入调试页");
+}
+
+function setDev(d) {
+  const was = DEVS.up;
+  DEVS = d || { up: false, port: null, busy: false };
+  renderWelcome();
+  if (DEVS.up !== was) loadDevice();   // 拔插之后 USB 列表也跟着变
+}
+
 function setLink(up, msg) {
+  BRIDGE_UP = !!up;
   $("linkdot").className = "dot " + (up ? "on" : "off");
   $("linktxt").textContent = msg;
   $("banner").style.display = up ? "none" : "block";
+  renderWelcome();
 }
+
+function enterDebugUI() {
+  /* 只切页面, 不碰服务端 —— hello 帧说"已经连着"时走这条 */
+  inDebug = true;
+  $("welcome").hidden = true;
+  $("app").hidden = false;
+  showTab(location.hash.slice(1) || "dash");
+  drawChart();          // 画布刚从 hidden 出来, 宽高得重算
+}
+
+async function enterDebug() {
+  /* 点「连接」: 服务端重新确认桥接 + 设备都在线, 之后才开始轮询/发命令 */
+  $("connectbtn").disabled = true;
+  const r = await post("/connect", "");
+  if (!r.ok) { renderWelcome("连接失败：" + (r.err || "未知")); return; }
+  enterDebugUI();
+}
+
+function leaveDebug(msg) {
+  if (!inDebug) { renderWelcome(msg); return; }
+  inDebug = false;
+  $("app").hidden = true;
+  $("welcome").hidden = false;
+  renderWelcome(msg);
+}
+
+const welLogEl = () => $("welcome-log");
+function welLog(line) {
+  /* 开始页的小日志只收"还没连接"时的桥接输出 (开机横幅、掉线提示都在这);
+     调试页有自己的日志页, 不用重复堆 */
+  if (inDebug) return;
+  const el = welLogEl();
+  if (el.textContent === "（等待桥接输出…）") el.textContent = "";
+  el.textContent += (el.textContent ? "\n" : "") + line;
+  const lines = el.textContent.split("\n");
+  if (lines.length > 40) el.textContent = lines.slice(-40).join("\n");   // 别无限涨
+  el.scrollTop = el.scrollHeight;
+}
+
+$("connectbtn").onclick = enterDebug;
+$("discbtn").onclick = async () => {
+  leaveDebug("已断开连接");
+  await post("/disconnect", "");
+};
+
+/* ---------------- SSE ---------------- */
+let lineCount = 0, rateT = Date.now();
 
 function connect() {
   const es = new EventSource("/events");
@@ -1457,15 +1614,35 @@ function connect() {
     const ev = JSON.parse(e.data);
     switch (ev.t) {
       case "hello":
-      case "link":
-        setLink(ev.bridge !== undefined ? ev.bridge : ev.up,
-                ev.msg || (ev.bridge ? "桥接已连接" : "桥接未连接"));
-        /* link 帧不带 paused (只有 hello 带) —— 别把暂停按钮冲回未暂停 */
+        SSE_OK = true;
+        setLink(ev.bridge, ev.msg || (ev.bridge ? "桥接已连接" : "桥接未连接"));
+        /* 刷新/重连后按服务端状态选页面: 别的标签页还连着就别把人踢回开始页 */
+        if (ev.connected) enterDebugUI(); else leaveDebug("");
+        setDev(ev.dev);
+        /* hello 才带 paused —— 别把暂停按钮冲回未暂停 */
         if (ev.paused !== undefined) setPaused(ev.paused);
         break;
-      case "bridge": addLog(ev.msg, "l-ok"); break;
+      case "link":
+        setLink(ev.up, ev.msg);
+        if (!ev.up) leaveDebug("串口桥接已断开");
+        break;
+      case "conn":
+        /* 连接态是全局的: 别的标签页点了连接/断开, 本页跟着切 */
+        if (ev.on) { if (!inDebug) enterDebugUI(); }
+        else leaveDebug(ev.msg || "已断开连接");
+        break;
+      case "dev":
+        setDev(ev);
+        if (!ev.up) leaveDebug("设备已断开");     // 拔线 → 回开始页
+        break;
+      case "ver":
+        VER_TXT = (ev.d && ev.d.text) || "";
+        renderWelcome();
+        break;
+      case "bridge": addLog(ev.msg, "l-ok"); welLog(ev.msg); break;
       case "raw":
         addLog(ev.line);
+        welLog(ev.line);
         /* 写 flash 成功 → 当前值即基线 (保存按钮随之置灰)。
          * 认固件的回显而不是「点了按钮」, 因为从日志页命令框手敲 !CFGW 也走这里,
          * 而且被固件拒绝 (robot is armed) 时不该清掉未保存标记 */
@@ -1488,6 +1665,7 @@ function connect() {
     }
   };
   es.onerror = () => {
+    SSE_OK = false;
     setLink(false, "网页服务断开，重连中…");
     es.close();
     setTimeout(connect, 2000);
@@ -1591,6 +1769,18 @@ function renderDevice() {
     h += '<div class="row"><span>picotool</span><span class="err">未找到，无法烧录</span></div>';
   $("devlist").innerHTML = h;
 
+  /* 开始页的固件卡与这里是同一份 /device 数据 (设备在服务器那侧, 浏览器够不着) */
+  let w = "";
+  for (const v of d.devices)
+    w += `<div class="row"><span>USB · ${v.bus_id}</span>` +
+         `<span class="${v.mode === "bootsel" ? "ok" : ""}">${modeName(v.mode)}</span></div>`;
+  if (!d.devices.length)
+    w = '<div class="row"><span>USB 设备</span><span class="dim">未检测到</span></div>';
+  $("wel-usb").innerHTML = w;
+  $("wel-fw").textContent = !d.firmware.length
+    ? (d.picotool ? "无（先在主机上 make）" : "无 · 未找到 picotool")
+    : `${d.firmware.length} 个可选`;
+
   const sel = $("fwsel");
   sel.innerHTML = "";
   for (const f of d.firmware)
@@ -1671,6 +1861,8 @@ function renderFlash(d) {
 
 window.addEventListener("resize", drawChart);
 showTab(location.hash.slice(1) || "dash");   // 必须在 cv/hist 初始化之后
+renderWelcome();                             // 先画开始页: 等 hello 帧到了再定去留
+loadDevice();                                // 开始页的固件卡要 /device 数据
 connect();
 </script>
 </body>

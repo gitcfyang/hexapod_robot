@@ -976,7 +976,8 @@ def test_connect_gate():
 
     # 最后一个浏览器走了: 连接态作废 (否则重新打开页面时"没人连却在轮询")
     st = wait_conn(HTTP_PORT2, False)
-    check("最后一个浏览器离开后连接态复位", st is not None, "5s 内未复位")
+    check("最后一个浏览器离开后连接态复位", st is not None,
+          "5s 内未复位" if st is None else f"connected={st.get('connected')}")
 
 
 def main():
@@ -1166,9 +1167,30 @@ def main():
           {"bridge", "devices", "firmware", "picotool"} <= set(dev), str(sorted(dev)))
     check("GET /device 的 bridge 与 /state 一致",
           dev["bridge"] is json.loads(http_get("/state"))["bridge"])
-    check("页面含「连接设备」入口与烧录按钮",
-          'id="devbtn"' in raw_page and "连接设备" in raw_page
+    # 开始页 (Betaflight 语义): 默认只显示开始页, 整块调试界面藏在 #app 里;
+    # 进出调试页由服务端的连接态驱动 (conn/dev/link 事件), 页面自己不做主
+    check("页面默认是开始页 (调试页整块初始隐藏)",
+          'id="welcome"' in raw_page and 'id="app" hidden' in raw_page)
+    check("开始页三行状态: 网页服务 / 串口桥接 / 机器人设备",
+          all(f'id="{i}"' in raw_page for i in ("wel-web", "wel-bridge", "wel-dev")))
+    check("开始页有连接按钮, 且由「桥接+设备都在线」使能",
+          'id="connectbtn"' in raw_page
+          and "const can = BRIDGE_UP && DEVS.up;" in raw_page
+          and '$("connectbtn").disabled = !can;' in raw_page)
+    check("开始页能看固件版本 (无需连接)",
+          'id="wel-ver"' in raw_page and 'case "ver":' in raw_page)
+    check("开始页有 USB/可烧录列表与烧录入口",
+          'id="wel-usb"' in raw_page and 'id="wel-fw"' in raw_page
+          and 'id="devbtn"' in raw_page and "烧录固件" in raw_page
           and 'id="flashbtn"' in raw_page)
+    check("开始页有桥接日志区 (未连接也能看启动横幅)",
+          'id="welcome-log"' in raw_page and "welLog(ev.line)" in raw_page
+          and "welLog(ev.msg)" in raw_page)
+    check("调试页有「断开连接」按钮", 'id="discbtn"' in raw_page
+          and "断开连接" in raw_page)
+    check("拔线/掉线事件把调试页送回开始页",
+          'case "dev":' in raw_page and 'case "conn":' in raw_page
+          and 'leaveDebug("设备已断开")' in raw_page)
 
     for bad, why in [("../../etc/passwd", "路径逃逸"), ("/etc/passwd", "非 uf2"),
                      ("nope.uf2", "文件不存在")]:
