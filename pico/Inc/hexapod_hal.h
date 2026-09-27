@@ -315,6 +315,15 @@ uint32_t hal_debug_get_crsf_frame_delta(void);
 uint8_t hal_debug_get_last_servo_count(void);
 
 /**
+ * @brief 打印一行遥控通道遥测 (网页遥控页实时显示用)
+ *
+ * 按当前输入源输出 [CH] 行: CRSF 报 16 通道原始值 + 链路/帧计数;
+ * PS2 报 4 摇杆 + 16 键位掩码 + 连接/帧计数。
+ * 由控制循环按 CH_TELEM_INTERVAL_MS 节流调用, 与 DEBUG_LEVEL 无关。
+ */
+void hal_debug_print_channel_telemetry(void);
+
+/**
  * @brief 设置运行时调试等级
  * @param level 调试等级 (0=关, 1=CRSF, 2=+控制, 3=+舵机)
  */

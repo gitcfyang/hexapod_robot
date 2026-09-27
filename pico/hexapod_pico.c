@@ -335,6 +335,7 @@ int main(void)
     /* 主循环 */
     uint32_t last_status_time = 0;
     uint32_t last_debug_time  = 0;
+    uint32_t last_ch_telem_time = 0;
     uint32_t last_update      = 0;
     uint32_t frame_delta_total = 0;
     uint32_t last_battery_check = 0;
@@ -425,6 +426,14 @@ int main(void)
                     hal_led_set(0, true);
                 }
             }
+        }
+
+        /* ---- 遥控通道遥测 (网页遥控页的实时通道显示) ----
+         * 与 DEBUG_LEVEL 无关: 网页的数据源, 关了调试也要发。
+         * 5Hz 是给人看的刷新率, 与遥控器自身帧率无关。 */
+        if (now - last_ch_telem_time >= CH_TELEM_INTERVAL_MS) {
+            last_ch_telem_time = now;
+            hal_debug_print_channel_telemetry();
         }
 
         /* ---- 运行电压监测 (每 1s) ----

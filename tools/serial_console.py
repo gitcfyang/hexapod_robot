@@ -326,8 +326,11 @@ def send_line(text, state, fd):
     """转换并发送一条命令。返回 'sent' / 'rejected' / 'lost' (写入失败=设备已断开)"""
     out = text if text.startswith("!") else "!P" + text
     if len(out) > MAX_CMD_LEN:
-        sys.stdout.write(f"\r\033[KCommand too long ({len(out)}>{MAX_CMD_LEN}), truncated: {out[:MAX_CMD_LEN]}\r\n")
-        out = out[:MAX_CMD_LEN]
+        # 拒发而不是截断: 截断后的命令可能仍然"合法", 于是静默做错事
+        # (固件侧同样拒收超长命令, 两边行为一致)
+        sys.stdout.write(f"\r\033[KCommand too long ({len(out)}>{MAX_CMD_LEN}), NOT sent: {out[:MAX_CMD_LEN]}…\r\n")
+        redraw(state)        # 保留用户输入, 便于删几个字符重发
+        return "rejected"
     try:
         os.write(fd, (out + "\n").encode())
     except OSError:
@@ -558,8 +561,12 @@ def main():
             sys.stdout.flush()
 
             # 排空缓冲的固件输出 (可能包含连接前的开机日志)
+            # ⚠️ 出口必须同时有"静默 0.2s"和"总时长上限": 固件有 5Hz 的 [CH]
+            # 遥测行, 间隔正好 200ms —— 只看静默的话这个循环永远退不出去,
+            # 主循环卡在这里, TCP 命令全部积压 (现象: 网页读数正常但发命令没反应)。
             try:
-                while True:
+                drain_deadline = time.time() + 1.5
+                while time.time() < drain_deadline:
                     r, _, _ = select.select([fd], [], [], 0.2)
                     if not r:
                         break

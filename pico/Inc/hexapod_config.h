@@ -228,6 +228,11 @@
 /* 调试输出间隔（毫秒），避免 USB 输出阻塞控制循环 */
 #define DEBUG_PRINT_INTERVAL_MS 1000
 
+/* 遥控通道遥测推送间隔 (毫秒)。网页遥控页的实时通道显示用, 与 DEBUG_LEVEL
+ * 无关 —— 它是网页的数据源而不是调试输出。5Hz 在 115200 的 CDC 上无压力
+ * (~40B × 5), 且被网页解析后不进日志面板。 */
+#define CH_TELEM_INTERVAL_MS    200
+
 /* 输入控制模式 (编译期默认输入源, 运行时可 !MODE 切换):
  *   0 = CRSF 接收器 (ELRS, UART1 @420000 baud) — PS2 驱动同步编译, 可 !MODE ps2 切换
  *   1 = PS2 手柄 (bit-bang SPI GP6~GP9)        — CRSF 同步编译, 可 !MODE crsf 切换
@@ -294,17 +299,12 @@
  *     机器人原地不动，不做平移/旋转行走
  *
  *   CH5~CH8 开关在两种模式下功能相同:
- */
-#define CRSF_CHANNEL_FORWARD      1   // CH2: 正常=前进/后退, 平衡=俯仰
-#define CRSF_CHANNEL_STRAFE       0   // CH1: 正常=左右平移, 平衡=横滚
-#define CRSF_CHANNEL_TURN         3   // CH4: 正常=原地旋转, 平衡=偏航
-#define CRSF_CHANNEL_HEIGHT       2   // CH3: 正常=机身高度, 平衡=机身高度
-#define CRSF_CHANNEL_ARM          4   // CH5: 解锁 (二段开关)
-#define CRSF_CHANNEL_GAIT         5   // CH6: 步态 (三段开关)
-#define CRSF_CHANNEL_SPEED        6   // CH7: 站立姿态 (三段: -1=窄80%, 0=正常100%, +1=宽120%)
-#define CRSF_CHANNEL_BALANCE      7   // CH8: 平衡模式 (二段开关)
-
-/* ---- 站立姿态缩放 (CH7) ---- */
+ *
+ * ★ 八个通道号运行时可改 (!CFG crsf_ch_fwd / crsf_ch_str / ...),
+ *   网页「遥控 → 通道映射」填 0~15 (对应遥控器 CH1~CH16)。
+ *   换遥控器/改 ELRS 通道顺序后不用重烧, 改完 !CFGW 即可掉电保持。
+ *   取反仍是按功能的 (dir 组), 不随通道号走 —— 换通道后若方向反了,
+ *   翻转对应的 inv_* 而不是调这里的通道号。 */
 #define CRSF_CHANNEL_FORWARD_DEFAULT      1   // CH2: 正常=前进/后退, 平衡=俯仰
 #define CRSF_CHANNEL_STRAFE_DEFAULT       0   // CH1: 正常=左右平移, 平衡=横滚
 #define CRSF_CHANNEL_TURN_DEFAULT         3   // CH4: 正常=原地旋转, 平衡=偏航
@@ -313,6 +313,20 @@
 #define CRSF_CHANNEL_GAIT_DEFAULT         5   // CH6: 步态 (三段开关)
 #define CRSF_CHANNEL_SPEED_DEFAULT        6   // CH7: 站立姿态 (三段: -1=窄80%, 0=正常100%, +1=宽120%)
 #define CRSF_CHANNEL_BALANCE_DEFAULT      7   // CH8: 平衡模式 (二段开关)
+
+#define CRSF_CHANNEL_FORWARD      (g_params.crsf_ch_fwd)
+#define CRSF_CHANNEL_STRAFE       (g_params.crsf_ch_str)
+#define CRSF_CHANNEL_TURN         (g_params.crsf_ch_turn)
+#define CRSF_CHANNEL_HEIGHT       (g_params.crsf_ch_hgt)
+#define CRSF_CHANNEL_ARM          (g_params.crsf_ch_arm)
+#define CRSF_CHANNEL_GAIT         (g_params.crsf_ch_gait)
+#define CRSF_CHANNEL_SPEED        (g_params.crsf_ch_stance)
+#define CRSF_CHANNEL_BALANCE      (g_params.crsf_ch_bal)
+
+/* ---- 站立姿态缩放 (CH7) ----
+ * ★ 三个缩放比 + 过渡速度/步长均运行时可改
+ *   (!CFG stance_narrow / stance_normal / stance_wide / stance_speed /
+ *    stance_step_mm), 网页「参数 → 站立姿态」。 */
 #define STANCE_DEFAULT_MODE       -1   /* 上电默认: -1=窄, 0=正常, +1=宽 */
 #define STANCE_SCALE_NARROW_DEFAULT      80   /* 窄姿态: 80% (足端靠近机身) */
 #define STANCE_SCALE_NORMAL_DEFAULT     100   /* 正常姿态: 100% */

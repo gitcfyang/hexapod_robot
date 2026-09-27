@@ -1798,6 +1798,38 @@ uint8_t hal_debug_get_last_servo_count(void)
     return g_last_servo_count;
 }
 
+/* ---- 遥控通道遥测 (网页遥控页的实时通道显示) ----
+ * 与 DEBUG_LEVEL 无关: 它是网页的数据源, 不是调试输出 —— 调成 0 也要照发。
+ * 帧率不在这里算 (整数打印省事), 前端按 fc 的差值/时间差自己算。
+ * 通道值一律用原始整数, 避免浮点 printf 的开销与体积。 */
+void hal_debug_print_channel_telemetry(void)
+{
+#if INPUT_CONTROL_MODE == 2
+    /* USB CDC 命令模式: 没有遥控器, 无通道可报 */
+#else
+#if PS2_ENABLED
+    if (g_input_mode == INPUT_MODE_PS2) {
+        /* PS2: 4 摇杆 (0~255) + 16 键位掩码 (0=按下) + 连接/帧计数。
+         * 键位语义由网页按 PSB_* 位序解释, 固件只报掩码。 */
+        hal_debug_printf("[CH] m=ps2 con=%d btns=%u lx=%u ly=%u rx=%u ry=%u fc=%lu\r\n",
+                         g_ps2_state.connected ? 1 : 0, g_ps2_state.buttons,
+                         g_ps2_state.joy_lx, g_ps2_state.joy_ly,
+                         g_ps2_state.joy_rx, g_ps2_state.joy_ry,
+                         (unsigned long)g_ps2_state.frame_count);
+        return;
+    }
+#endif
+    /* CRSF: 16 通道原始值 (172~1811, 中位 992) + 链路 + 帧计数 */
+    hal_debug_printf("[CH] m=crsf link=%d fc=%lu",
+                     g_crsf_state.link_connected ? 1 : 0,
+                     (unsigned long)g_crsf_state.frame_count);
+    for (int i = 0; i < 16; i++) {
+        hal_debug_printf(" c%d=%u", i, g_crsf_state.channels[i]);
+    }
+    hal_debug_printf("\r\n");
+#endif /* INPUT_CONTROL_MODE == 2 */
+}
+
 /* ==================== 校准模式接口 ==================== */
 
 bool hal_is_calibration_active(void)
