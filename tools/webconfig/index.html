@@ -1945,11 +1945,18 @@ function buildParamPages() {
   }
 }
 buildParamPages();
+
+/* 状态声明必须排在下面 init 之前: init 会直接调用各页的 render 函数, 而它们读
+ * curParams/pRows。const/let 在声明前处于 TDZ, 访问即抛 ReferenceError, 顶层
+ * 脚本到此中断 —— 连通用的 connect() 都执行不到, 页面永远停在「检测中…」。 */
+const pRows = {};             // name → {row, range, num} 或 {row, box, state}
+const pBase = {};             // name → 上次存盘时的值
+let curParams = {};           // 最近一次 params 快照的 list
+
 initPerPage();                // 外设页的滑条/按钮 (DOM 已由上一步建好)
 initCtrlPage();               // 控制页的 PWM 周期滑条 (同上)
 initModesPage();              // 模式页的矩阵行/组合键行 (同上)
 initCalibPage();              // 校准页的电压标定输入框 (IMU 卡只用 data-cmd, 无需 JS)
-const pRows = {};             // name → {row, range, num} 或 {row, box, state}
 
 /* ---------------- 「有改动未保存」判定 ----------------
  * 页面上的每次改动都即时下发 (!CFG <name> <v>), 所以「未保存」= 当前生效值 ≠
@@ -1959,8 +1966,6 @@ const pRows = {};             // name → {row, range, num} 或 {row, box, state
  *
  * 基线在参数第一次出现时记下 (页面载入即等于当时生效值), 之后每次看到固件的
  * [STORE] Params saved OK 重建 —— 这样从日志页命令框手敲 !CFGW 也能同步。 */
-const pBase = {};             // name → 上次存盘时的值
-let curParams = {};           // 最近一次 params 快照的 list
 
 function isUnsaved(p) {
   return pBase[p.name] !== undefined && p.val !== pBase[p.name];

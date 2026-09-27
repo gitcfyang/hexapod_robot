@@ -16,6 +16,7 @@
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -1036,6 +1037,46 @@ def test_param_e2e(sse):
 GATE_POLL_IV = 0.5
 
 
+# 页面脚本本身能不能跑到底。顶层脚本任何一处抛异常 —— 语法错、TDZ (const/let 在
+# 声明前被读)、取到空元素 —— 后面的语句就全不执行, 而 connect() 恰好是最后一行
+# (index.html 末尾): 页面于是永远停在「检测中…」, 浏览器一个请求都不发。
+# 上面所有断言都是 grep 静态 HTML, 对"页面整体没跑起来"完全无感 (curParams 的
+# TDZ 故障就是这么漏出去的), 所以这里真开一次无头浏览器, 看页面自己的 JS 有没有
+# 把状态行改掉。
+#
+# 页面直接按文件加载 (与 server 现读现发的是同一份字节): /events 一上来就失败,
+# 页面不再挂 SSE 长连 —— 否则 --dump-dom 永远等不到加载完成。而连不上时的文案
+# 正是 connect() 的 onerror 分支写的, 于是「状态行被改过」= 脚本执行到了最后一行。
+CHROME = next((p for p in (shutil.which(n) for n in
+                           ("google-chrome", "chromium", "chromium-browser")) if p), None)
+
+
+def test_page_js():
+    if not CHROME:
+        print("  SKIP  没有无头浏览器, 跳过页面执行检查")
+        return
+    prof = "/tmp/wc_chrome_profile"
+    shutil.rmtree(prof, ignore_errors=True)
+    page = "file://" + os.path.join(HERE, "index.html")
+    with open("/tmp/wc_chrome.log", "wb") as errlog:
+        try:
+            r = subprocess.run(
+                [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu",
+                 f"--user-data-dir={prof}", "--virtual-time-budget=5000",
+                 "--dump-dom", page],
+                stdout=subprocess.PIPE, stderr=errlog,
+                stdin=subprocess.DEVNULL, timeout=90)
+        except subprocess.TimeoutExpired:
+            check("页面脚本执行到底 (状态行不再停在「检测中…」)", False,
+                  "浏览器 90s 没吐出 DOM, 见 /tmp/wc_chrome.log")
+            return
+    dom = r.stdout.decode("utf-8", "replace")
+    m = re.search(r'id="wel-web"[^>]*>([^<]*)<', dom)
+    got = m.group(1) if m else None
+    check("页面脚本执行到底 (状态行不再停在「检测中…」)", got == "断开，重连中…",
+          f"wel-web = {got!r}; 浏览器日志 /tmp/wc_chrome.log")
+
+
 def wait_dev(port, up, timeout=20):
     """等 /state 里的设备在线状态变成 up"""
     end = time.time() + timeout
@@ -1572,6 +1613,9 @@ def main():
     sse2.close()
 
     test_connect_gate()
+
+    print("\n[5] 页面脚本 (无头浏览器)")
+    test_page_js()
 
     print(f"\n{len(passed)} 项通过, {len(failed)} 项失败")
     if failed:

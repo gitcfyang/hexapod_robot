@@ -941,7 +941,7 @@ Pico ──USB CDC──> serial_console.py ──TCP:7100──> webconfig/serv
 - `tools/webconfig/server.py` — 桥接客户端 + SSE 广播 + 静态服务 + 轮询调度
 - `tools/webconfig/flasher.py` — 设备检测 (扫 /sys) + picotool 烧录; 只此一处碰 USB
 - `tools/webconfig/index.html` — 单页应用 (零依赖, 无构建步骤)
-- `tools/webconfig/test_webconfig.py` — 251 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延)
+- `tools/webconfig/test_webconfig.py` — 252 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延与页面脚本执行; 无 headless 浏览器时最后一项自动跳过)
 
 ```bash
 python3 tools/serial_console.py       # 终端 1: 串口守护 (headless 运行即可)
