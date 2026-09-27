@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """TCP 桥接端到端测试 (无硬件, 用 socat pty 对模拟串口)。
 
-覆盖: 双向转发 / 多客户端广播 / 慢客户端断开 / 串口断开重连恢复。
+覆盖: 双向转发 / 多客户端广播 / 慢客户端断开 / 串口断开重连恢复 / 设备在线状态发布。
 用法: 在 tools/ 目录下 `python3 test_bridge.py`
 """
 import os, re, signal, socket, subprocess, sys, time
@@ -161,6 +161,9 @@ check("客户端 A 连接成功", a is not None)
 if a:
     ok, buf, _ = recv_until(a, rb"\[IDLE\].*tick=\d+")
     check("客户端 A 收到 [IDLE] 状态行", ok, drained(buf))
+    # 桥接连着 ≠ 设备在线: 接入那一刻就补发当前设备状态
+    # (同一批数据里, 所以查累积缓冲而不是再收一轮)
+    check("客户端 A 接入即收到 [TCP] dev on", b"[TCP] dev on" in buf, drained(buf))
 
 # ---------- 3. 客户端 A 下发命令 ----------
 print("\n[3] 客户端 A 下发命令 (TCP -> 机器人)")
@@ -233,12 +236,17 @@ if socat_p:
     socat_p.kill()
 time.sleep(1.5)
 if c:
+    ok, buf, _ = recv_until(c, rb"\[TCP\] dev off", timeout=6)
+    check("串口消失后 C 收到 [TCP] dev off", ok, drained(buf))
+if c:
     ok, _, _ = recv_until(c, rb"\[IDLE\]", timeout=3)
     check("串口消失后 C 保持连接 (无遥测但仍连着)", not ok)
 
 spawn(["socat", "-d", "-d", "pty,raw,echo=0,link=" + PTY_A,
        "pty,raw,echo=0,link=" + PTY_B], "/tmp/t_socat2.log")
 time.sleep(3.0)          # 假机器人每 0.5s 重试开 pty, 控制台每 0.5s 重扫
+ok, buf, _ = recv_until(c, rb"\[TCP\] dev on ", timeout=20) if c else (False, b"", 0)
+check("socat 重启后 C 收到 [TCP] dev on", ok, drained(buf))
 ok, buf, _ = recv_until(c, rb"\[IDLE\].*tick=\d+", timeout=20) if c else (False, b"", 0)
 check("socat 重启后控制台自动重连并恢复遥测", ok, drained(buf))
 try:

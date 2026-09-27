@@ -21,6 +21,9 @@ TCP 桥接数据流与线程安全约定:
 
   ★ 串口 fd 只由主线程读写; TCP 线程只碰套接字; 两者仅通过线程安全队列通信。
     客户端命令复用主线程的 send_line(), 因此长度限制/前缀/排队语义与控制台输入完全一致。
+
+  ★ 桥接连着 ≠ 机器人在线: 设备状态由 "[TCP] dev on|busy|off [端口]" 单独发布
+    (publish_dev_state), 客户端接入时补发一次当前值。网页配置台靠它决定能否连接。
 """
 
 import argparse
@@ -62,6 +65,7 @@ os.set_blocking(_wake_r, False)
 os.set_blocking(_wake_w, False)
 _tcp_server = None
 _listener = None
+_dev_state = "[TCP] dev off"         # 最近一次设备状态行 (主线程写, TCP 线程读来补发)
 
 # stdio 是否为终端。headless 运行 (如 N100 上的后台服务, 或由测试脚本派生)
 # 时 stdin 不是 tty: termios 配置会失败, 且 stdin 恒可读会把主循环拖成忙等。
@@ -174,6 +178,22 @@ def bridge_publish(data):
         _tcp_linebuf.clear()
 
 
+def publish_dev_state(state, port=None):
+    """
+    发布设备在线状态给 TCP 客户端: "[TCP] dev on /dev/ttyACM0" / "busy <port>" / "off"。
+
+    桥接连着 ≠ 机器人在线 —— 网页配置台靠这行判断"能不能连接", 所以每次状态**变化**
+    都发一次 (重复调用自动去重), 新客户端接入时也由 TCP 线程补发当前值。
+    仅主线程调用 (与 bridge_publish 同路径)。
+    """
+    global _dev_state
+    line = f"[TCP] dev {state}" + (f" {port}" if port else "")
+    if line == _dev_state:
+        return
+    _dev_state = line
+    bridge_publish((line + "\n").encode())
+
+
 def tcp_server_thread():
     """TCP 服务线程: 仅操作套接字, 绝不触碰串口 fd。"""
     global _listener
@@ -210,6 +230,7 @@ def tcp_server_thread():
                     _clients[conn] = bytearray()
                     n = len(_clients)
                 conn.sendall(b"[TCP] bridge connected. Type commands, e.g. !A\r\n")
+                conn.sendall(_dev_state.encode() + b"\n")   # 立即告知设备在线状态
                 sys.stdout.write(f"\r\033[K[TCP] 客户端接入 {addr[0]}:{addr[1]} (共 {n})\r\n")
                 sys.stdout.flush()
             except OSError:
@@ -524,6 +545,7 @@ def main():
 
             if port is None:
                 # ---- 等待设备出现, 同时支持预输入 (排队命令) ----
+                publish_dev_state("off")     # 设备消失 (拔线) 或 "占用" 后端口没了
                 if time.monotonic() - last_notice >= STATUS_INTERVAL:
                     last_notice = time.monotonic()
                     sys.stdout.write("\r\033[K[wait] 未发现串口设备, 持续扫描... (Ctrl+D 退出)\r\n")
@@ -553,12 +575,15 @@ def main():
                     sys.stdout.write(f"\r\033[K[wait] 发现 {port} 但打开失败: {e} — 持续重试...\r\n")
                     sys.stdout.flush()
                     redraw(state)
+                    # 端口在但打不开: 多半是别的程序占着 (第二个读者), 网页端要能提示
+                    publish_dev_state("busy", port)
                 time.sleep(0.3)
                 continue
             last_open_error = None
 
             sys.stdout.write(f"\r\033[K[conn] 已连接 {port}\r\n")
             sys.stdout.flush()
+            publish_dev_state("on", port)
 
             # 排空缓冲的固件输出 (可能包含连接前的开机日志)
             # ⚠️ 出口必须同时有"静默 0.2s"和"总时长上限": 固件有 5Hz 的 [CH]
@@ -591,6 +616,7 @@ def main():
                     os.close(fd)
                     sys.stdout.write("\r\033[K[lost] 连接断开, 继续扫描...\r\n")
                     sys.stdout.flush()
+                    publish_dev_state("off")
                     last_notice = 0.0
                     continue
 
@@ -599,6 +625,7 @@ def main():
                 os.close(fd)
                 sys.stdout.write("\r\033[K[lost] 连接断开, 继续扫描...\r\n")
                 sys.stdout.flush()
+                publish_dev_state("off")
                 last_notice = 0.0
                 continue
 
@@ -612,6 +639,7 @@ def main():
                 break
             sys.stdout.write("\r\033[K[lost] 连接断开, 继续扫描...\r\n")
             sys.stdout.flush()
+            publish_dev_state("off")
             last_notice = 0.0
 
     except KeyboardInterrupt:
