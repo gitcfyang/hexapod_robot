@@ -349,6 +349,7 @@ int main(void)
         if (now - last_update >= CONTROL_LOOP_PERIOD_MS) {
             hal_input_sync_mode();   /* 输入源跟随 input_mode 参数 (网页滑条也即时生效) */
             hexapod_update(&g_robot);
+            hal_periph_poll();       /* 外设使能/波特率/I2C 模式跟随参数 + UART0 收行转发 */
             last_update = now;
 
             /* 事件日志回写: 仅在安全上下文刷入 flash。行走中页编程关中断
@@ -407,7 +408,7 @@ int main(void)
                             state->travel_length.z,
                             state->gait_type,
                             state->leg_lift_height);
-                hal_led_set(0, true);
+                if (LED_HEARTBEAT_ENABLED) hal_led_set(0, true);
             } else {
 #if INPUT_CONTROL_MODE == 2
                 hal_debug_printf("[IDLE] Send !O to arm, !F/!B/!L/!R to move\r\n");
@@ -419,11 +420,14 @@ int main(void)
                     hal_debug_printf("[IDLE] Waiting for Arm signal (CH5)...\r\n");
                 }
 #endif
-                hal_led_set(0, false);
-
-                /* 待机时每5秒闪一下 */
-                if (now % 5000 < 100) {
-                    hal_led_set(0, true);
+                /* led_heartbeat=0 时完全不碰绿灯 —— 否则 !LED g 1 设完
+                 * 两秒就被这里冲掉, 手动控制形同虚设 */
+                if (LED_HEARTBEAT_ENABLED) {
+                    hal_led_set(0, false);
+                    /* 待机时每5秒闪一下 */
+                    if (now % 5000 < 100) {
+                        hal_led_set(0, true);
+                    }
                 }
             }
         }
@@ -469,7 +473,7 @@ int main(void)
                     hal_debug_printf("[BATT] OVERVOLTAGE %u mV! Servo power DISCONNECTED.\r\n",
                                      voltage);
                     store_log_event(STORE_EVT_BATT_OV, voltage);
-                    hal_led_set(1, true);  /* 红灯常亮 */
+                    if (LED_ALARM_ENABLED) hal_led_set(1, true);  /* 红灯常亮 */
                     uint16_t ov_notes[] = {1200, 0, 1200, 0, 1200};
                     uint16_t ov_dur[]   = {150, 100, 150, 100, 300};
                     hal_play_sound(5, ov_notes, ov_dur);
@@ -482,7 +486,7 @@ int main(void)
                     hal_debug_printf("[BATT] CUTOFF %u mV! Servo power DISCONNECTED.\r\n",
                                      voltage);
                     store_log_event(STORE_EVT_BATT_CUTOFF, voltage);
-                    hal_led_set(1, true);  /* 红灯常亮 */
+                    if (LED_ALARM_ENABLED) hal_led_set(1, true);  /* 红灯常亮 */
                     uint16_t alarm_notes[] = {200, 0, 200, 0, 200};
                     uint16_t alarm_dur[]   = {150, 100, 150, 100, 300};
                     hal_play_sound(5, alarm_notes, alarm_dur);
@@ -493,7 +497,7 @@ int main(void)
                     /* 电压回升但未达恢复阈值: 保持断电, 等待进一步回升 */
                     if (voltage >= BATTERY_RECOVERY_MV) {
                         servo_power_cut = false;
-                        hal_led_set(1, false);
+                        if (LED_ALARM_ENABLED) hal_led_set(1, false);
                         /* 仅在机器人解锁状态下恢复供电 (锁定 = 断电由 ARM 控制) */
                         const control_state_t *bstate = hexapod_get_state(&g_robot);
                         if (bstate && bstate->robot_on) {
@@ -507,7 +511,7 @@ int main(void)
                         }
                     }
                 } else {
-                    hal_led_set(1, (now % 500) < 250);  /* 2Hz 闪烁 */
+                    if (LED_ALARM_ENABLED) hal_led_set(1, (now % 500) < 250);  /* 2Hz 闪烁 */
                 }
             } else {
                 /* 正常 */
@@ -525,7 +529,7 @@ int main(void)
                                          voltage);
                     }
                 }
-                hal_led_set(1, false);
+                if (LED_ALARM_ENABLED) hal_led_set(1, false);
             }
         }
 

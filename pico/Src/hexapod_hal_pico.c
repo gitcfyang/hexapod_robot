@@ -50,6 +50,38 @@ static servo_batch_t g_servo_batch;
 static uint8_t  g_last_servo_count = 0;      /* 上次 flush 的舵机数（调试用） */
 static bool     g_servo_available   = false; /* 舵机硬件是否可用 */
 
+/* ---- 空闲 PWM 通道 (14 路通用输出) ----
+ * 编号约定见 hexapod_config.h 的 FREE_PWM_* : idx 0~6 左板, 7~13 右板。
+ * dirty 表示"RAM 值比硬件新, 下次 flush 要写出去" —— 值本身断电不保持。 */
+static uint16_t g_free_pwm[FREE_PWM_COUNT];
+static bool     g_free_pwm_dirty[FREE_PWM_COUNT];
+
+/** @brief 该板占用的空闲 PWM 下标区间 (按 I2C 地址, 不按板索引) */
+static void free_pwm_range(uint8_t addr, uint8_t *first, uint8_t *last)
+{
+    if (addr == PCA9685_ADDR_LEFT) {
+        *first = FREE_PWM_LEFT_FIRST;
+        *last  = FREE_PWM_LEFT_LAST;
+    } else {
+        *first = FREE_PWM_RIGHT_FIRST;
+        *last  = FREE_PWM_RIGHT_LAST;
+    }
+}
+
+/** @brief 该板空闲段的起始物理通道号 */
+static uint8_t free_pwm_ch_base(uint8_t addr)
+{
+    return (addr == PCA9685_ADDR_LEFT) ? FREE_PWM_LEFT_CH_BASE : FREE_PWM_RIGHT_CH_BASE;
+}
+
+static bool free_pwm_any_dirty(void)
+{
+    for (uint8_t i = 0; i < FREE_PWM_COUNT; i++) {
+        if (g_free_pwm_dirty[i]) return true;
+    }
+    return false;
+}
+
 bool hal_servo_init(void)
 {
     /* 清零舵机缓存 */
@@ -122,7 +154,12 @@ bool hal_servo_set_angles(const uint8_t *servo_ids,
 void hal_servo_flush(void)
 {
     if (!g_servo_available) { g_last_servo_count = 0; return; }
-    if (g_servo_batch.count == 0) { g_last_servo_count = 0; return; }
+    /* 没有待发舵机也没有待发空闲 PWM 才提前返回 —— 只看 count 的话
+     * 单独改了 !PWM 而舵机静止时, 那个值要等下一次舵机动作才写出去 */
+    if (g_servo_batch.count == 0 && !free_pwm_any_dirty()) {
+        g_last_servo_count = 0;
+        return;
+    }
 
     g_last_servo_count = g_servo_batch.count;  /* 记录调试信息 */
 
@@ -149,14 +186,32 @@ void hal_servo_flush(void)
             }
         }
 
+        /* 空闲 PWM 合并进同一批: pca9685_write_all_channels 每次都是 16 通道
+         * 整写, 不合并的话本板空闲通道会被这批的 0 覆盖掉 (每 ~20ms 一次,
+         * 表现为"设了 PWM 立刻归零")。 */
+        uint8_t fp_first, fp_last;
+        free_pwm_range(addr, &fp_first, &fp_last);
+        bool free_dirty = false;
+        for (uint8_t i = fp_first; i <= fp_last; i++) {
+            if (!g_free_pwm_dirty[i]) continue;
+            pulses[free_pwm_ch_base(addr) + (i - fp_first)] = g_free_pwm[i];
+            free_dirty = true;
+        }
+        if (free_dirty) has_pending = true;
+
         if (has_pending) {
             if (pca9685_write_all_channels(pca9685_get_board_addr(b), pulses, 16)) {
                 /* 写入成功 → 清除 pending */
                 for (uint8_t id = id_start; id <= id_end; id++) {
                     g_servo_batch.pending[id] = false;
                 }
+                if (free_dirty) {
+                    for (uint8_t i = fp_first; i <= fp_last; i++) {
+                        g_free_pwm_dirty[i] = false;
+                    }
+                }
             } else {
-                /* 写入失败 → 保留 pending, 下周期重试 */
+                /* 写入失败 → 保留 pending, 下周期重试 (空闲 PWM 同理保留 dirty) */
                 all_ok = false;
             }
         }
@@ -190,6 +245,14 @@ void hal_servo_flush(void)
 void hal_servo_free_all(void)
 {
     memset(&g_servo_batch, 0, sizeof(g_servo_batch));
+    /* 空闲 PWM 也一起归零: pca9685_free_all() 是两块板 16 通道整写, 硬件上
+     * 它们本来就会被清掉 —— 但 RAM 里那份不清就会说谎 (!PWMQ 报着 5000,
+     * 引脚上其实是 0, 而且 dirty 已清、不会再补发)。去扭矩/急停 = 全部输出停,
+     * 这条语义对空闲通道也成立, 所以两边保持一致。 */
+    for (uint8_t i = 0; i < FREE_PWM_COUNT; i++) {
+        g_free_pwm[i]       = 0;
+        g_free_pwm_dirty[i] = false;
+    }
     if (g_servo_available) {
         pca9685_free_all();
     }
@@ -1057,6 +1120,544 @@ static void ps2_state_print(void)
 }
 #endif /* PS2_ENABLED */
 
+/* ==================== 预留外设 ====================
+ *
+ * 电机 / LED / 蜂鸣器 / 外部 UART0 / 扩展 I2C+ADC / 空闲 PWM。这些器件 PCB
+ * 上都留了接口但暂未接线, 所以受参数控制的几项默认关闭 (网页「外设」页可调)。
+ *
+ * 语义是"测试工具": 命令立即生效, 输出值只在 RAM, 断电不保持 —— 要持久化的
+ * 是那几个使能参数, 不是当前的占空比/脉宽。理由很实际: 上电就按上次的
+ * 占空比转动电机/输出 PWM, 是个没人看着就能出事的行为。
+ */
+
+#define PERIPH_BUZZ_CHUNK_MS    400     /* 分块播放: 单块 < 看门狗 1500ms */
+#define PERIPH_U0_LINE_MAX      80      /* 转发的 UART0 单行长度上限 */
+
+/* ---- 状态缓存 (这些引脚都没有回读通道, 缓存即"上次设的值") ---- */
+static uint16_t g_motor_duty[2]  = {0, 0};
+static uint16_t g_buzz_freq      = 0;
+static uint16_t g_buzz_ms        = 0;
+static uint8_t  g_ext_i2c_found  = 0;
+static uint16_t g_ext_adc_mv[2]  = {0, 0};
+static uint32_t g_uart0_rx_bytes = 0;
+static uint32_t g_uart0_tx_bytes = 0;
+static uint32_t g_uart0_rx_lines = 0;
+
+/* ==================== 软件 I2C (GP26=SDA, GP27=SCL) ====================
+ *
+ * 为什么不用硬件 I2C 控制器: RP2040 上 GP26/27 只映射到 I2C1, 而 I2C1 已经
+ * 被 GP14/15 上的 PCA9685 + BNO055 占用 (I2C0 只能到 GP28/29, GP28 是电池
+ * ADC)。把 GP26/27 也选成 I2C1 的话, 外部排针和内部舵机总线就成了同一个
+ * 控制器的两条线 —— 外部引脚悬空会把整条内部总线拖死。位翻转没有这个
+ * 耦合, 代价是速率低 (约 50kHz, 扫描/读写寄存器够用)。
+ *
+ * 开漏用"输出 0 / 切回输入靠上拉"模拟: 谁都不会主动把线驱到高,
+ * 总线上所有器件因此可以安全地线与。
+ */
+
+static inline void bb_delay(void) { busy_wait_us(EXT_I2C_BIT_DELAY_US); }
+
+/* 先写锁存再切方向: 反过来会在切输出的一瞬间把上一拍的 1 驱出去 */
+static void bb_sda_low(void) { gpio_put(EXT_I2C_SDA_PIN, 0); gpio_set_dir(EXT_I2C_SDA_PIN, GPIO_OUT); }
+static void bb_scl_low(void) { gpio_put(EXT_I2C_SCL_PIN, 0); gpio_set_dir(EXT_I2C_SCL_PIN, GPIO_OUT); }
+static void bb_sda_rel(void) { gpio_set_dir(EXT_I2C_SDA_PIN, GPIO_IN); }
+static void bb_scl_rel(void) { gpio_set_dir(EXT_I2C_SCL_PIN, GPIO_IN); }
+static bool bb_sda_read(void) { return gpio_get(EXT_I2C_SDA_PIN); }
+
+static void bb_i2c_init(void)
+{
+    gpio_init(EXT_I2C_SDA_PIN);
+    gpio_init(EXT_I2C_SCL_PIN);
+    gpio_set_dir(EXT_I2C_SDA_PIN, GPIO_IN);
+    gpio_set_dir(EXT_I2C_SCL_PIN, GPIO_IN);
+    gpio_pull_up(EXT_I2C_SDA_PIN);
+    gpio_pull_up(EXT_I2C_SCL_PIN);
+    busy_wait_us(20);   /* 等内部上拉把两条线拉稳再起始 */
+}
+
+static void bb_i2c_start(void)
+{
+    bb_sda_rel(); bb_scl_rel(); bb_delay();
+    bb_sda_low();               bb_delay();   /* SCL 高时拉低 SDA = START */
+    bb_scl_low();               bb_delay();
+}
+
+static void bb_i2c_stop(void)
+{
+    bb_sda_low();               bb_delay();
+    bb_scl_rel();               bb_delay();   /* SCL 高时释放 SDA = STOP */
+    bb_sda_rel();               bb_delay();
+}
+
+/** @brief 写一个字节, 返回 true = 从机应答 (第 9 个时钟 SDA 被拉低) */
+static bool bb_i2c_write_byte(uint8_t b)
+{
+    for (int i = 7; i >= 0; i--) {
+        if (b & (1u << i)) bb_sda_rel(); else bb_sda_low();
+        bb_delay();
+        bb_scl_rel(); bb_delay();
+        bb_scl_low(); bb_delay();
+    }
+    bb_sda_rel(); bb_delay();
+    bb_scl_rel(); bb_delay();
+    bool ack = !bb_sda_read();
+    bb_scl_low(); bb_delay();
+    return ack;
+}
+
+/** @brief 扫描 0x08~0x77 (跳过保留地址段), 返回找到的设备数并打印地址 */
+static uint8_t ext_i2c_scan(void)
+{
+    uint8_t found = 0;
+    hal_debug_printf("[PER] i2c2 scan:");
+    for (uint8_t a = 0x08; a <= 0x77; a++) {
+        bb_i2c_start();
+        bool ack = bb_i2c_write_byte((uint8_t)(a << 1));   /* 地址 + 写位 */
+        bb_i2c_stop();
+        if (ack) {
+            hal_debug_printf(" 0x%02X", a);
+            found++;
+        }
+    }
+    if (found == 0) hal_debug_printf(" no devices");
+    hal_debug_printf("\r\n");
+    return found;
+}
+
+/* ==================== 扩展 ADC (GP26=ADC0, GP27=ADC1) ==================== */
+
+static bool g_ext_adc_ready = false;
+
+/**
+ * @brief 读一次扩展 ADC 通道并换算成 mV (16 次平均, 与电池侧同法抑噪)
+ *
+ * ⚠️ 读之前先切 mux, 读完必须切回电池通道: adc 是单例, 而电池那边只在
+ *    首次调用时 select 过一次, 之后就裸 adc_read() —— 不还原的话下一次
+ *    电池读数会落在 GP26/27 上 (表现为电压突然变成几百 mV)。
+ */
+static uint16_t ext_adc_read_mv(uint8_t input)
+{
+    if (!g_ext_adc_ready) {
+        /* 不依赖电池侧的 adc_initialized 标志: batt_check=0 时它永远是 false */
+        adc_init();
+        g_ext_adc_ready = true;
+    }
+    adc_select_input(input);
+    uint32_t sum = 0;
+    for (int i = 0; i < 16; i++) {
+        sum += adc_read();
+        busy_wait_us(5);
+    }
+    adc_select_input(BATTERY_ADC_INPUT);
+    return (uint16_t)((sum / 16u) * ADC_REF_VOLTAGE / ADC_RESOLUTION);
+}
+
+/* ==================== 外设配置应用 ==================== */
+
+/** @brief GP26/27 脱离当前功能 (切模式前先做, 免得留下上拉或驱动) */
+static void ext_pins_detach(void)
+{
+    gpio_disable_pulls(EXT_I2C_SDA_PIN);
+    gpio_set_dir(EXT_I2C_SDA_PIN, GPIO_IN);
+    gpio_disable_pulls(EXT_I2C_SCL_PIN);
+    gpio_set_dir(EXT_I2C_SCL_PIN, GPIO_IN);
+}
+
+static void ext_i2c_adc_apply(int32_t mode)
+{
+    ext_pins_detach();
+
+    if (mode == EXT_I2C_MODE_I2C) {
+        bb_i2c_init();
+        hal_debug_printf("[PER] ext GP26/27: software I2C (SDA=GP%u SCL=GP%u)\r\n",
+                         EXT_I2C_SDA_PIN, EXT_I2C_SCL_PIN);
+    } else if (mode == EXT_I2C_MODE_ADC) {
+        if (!g_ext_adc_ready) {
+            adc_init();
+            g_ext_adc_ready = true;
+        }
+        adc_gpio_init(EXT_ADC0_PIN);
+        adc_gpio_init(EXT_ADC1_PIN);
+        adc_select_input(BATTERY_ADC_INPUT);
+        hal_debug_printf("[PER] ext GP26/27: ADC0/ADC1\r\n");
+    } else {
+        g_ext_i2c_found = 0;
+        g_ext_adc_mv[0] = g_ext_adc_mv[1] = 0;
+        /* 关闭不打印: 这是默认状态, 每次上电报一行只是噪声 */
+    }
+}
+
+static void ext_uart_apply(bool en, int32_t baud)
+{
+    if (en) {
+        uart_init(uart0, (uint)baud);
+        gpio_set_function(EXT_UART0_TX_PIN, GPIO_FUNC_UART);
+        gpio_set_function(EXT_UART0_RX_PIN, GPIO_FUNC_UART);
+        hal_debug_printf("[PER] uart0 ON (TX=GP%u RX=GP%u @ %ld baud)\r\n",
+                         EXT_UART0_TX_PIN, EXT_UART0_RX_PIN, (long)baud);
+    } else {
+        uart_deinit(uart0);
+        gpio_set_function(EXT_UART0_TX_PIN, GPIO_FUNC_SIO);
+        gpio_disable_pulls(EXT_UART0_TX_PIN);
+        gpio_set_dir(EXT_UART0_TX_PIN, GPIO_IN);
+        gpio_set_function(EXT_UART0_RX_PIN, GPIO_FUNC_SIO);
+        gpio_set_dir(EXT_UART0_RX_PIN, GPIO_IN);
+        gpio_pull_up(EXT_UART0_RX_PIN);   /* 悬空 RX 上拉, 免得收到噪声 */
+        /* 关闭不打印, 同上 */
+    }
+}
+
+/* ---- UART0 收行转发 ([U0] 前缀进 USB 调试口 → 网页外设页) ---- */
+
+static char    g_u0_line[PERIPH_U0_LINE_MAX];
+static uint8_t g_u0_len  = 0;
+static bool    g_u0_drop = false;   /* 本行已超长: 丢到换行为止, 不吐半行 */
+
+static void uart0_rx_poll(void)
+{
+    while (uart_is_readable(uart0)) {
+        int c = uart_getc(uart0);
+        if (c == '\r') continue;
+        g_uart0_rx_bytes++;
+
+        if (c == '\n') {
+            if (!g_u0_drop) {
+                g_u0_line[g_u0_len] = '\0';
+                hal_debug_printf("[U0] %s\r\n", g_u0_line);
+            }
+            g_u0_len  = 0;
+            g_u0_drop = false;
+            g_uart0_rx_lines++;
+        } else if (c >= 0x20 && c < 0x7F) {
+            if (g_u0_len < PERIPH_U0_LINE_MAX - 1) {
+                g_u0_line[g_u0_len++] = (char)c;
+            } else {
+                g_u0_drop = true;
+            }
+        }
+        /* 其余 (控制字符/退格/中文) 直接丢 —— 混进 [U0] 行只会把网页搞乱 */
+    }
+}
+
+/* ==================== 状态输出 ==================== */
+
+static void pwm_status_print(void);
+
+static void periph_print_ext(void)
+{
+    hal_debug_printf("[PER] ext: mode=%ld found=%u a0=%u a1=%u\r\n",
+                     (long)EXT_PIN_MODE, (unsigned)g_ext_i2c_found,
+                     (unsigned)g_ext_adc_mv[0], (unsigned)g_ext_adc_mv[1]);
+}
+
+/**
+ * @brief 外设总状态 (6 行) —— 网页外设页的轮询数据源
+ *
+ * 每行形如 "[PER] <节>: <k=v ...>", 节名固定为 motors/leds/buzzer/uart0/ext/pwm。
+ * ⚠️ [PER] 这个前缀同时也是 PCA9685 周期校准 (!PER) 的输出前缀, 所以
+ *    server.py 的解析正则按节名白名单匹配, 不要改成"任意词"。
+ */
+void periph_status_print(void)
+{
+    hal_debug_printf("[PER] motors: m1=%u m2=%u\r\n",
+                     (unsigned)g_motor_duty[0], (unsigned)g_motor_duty[1]);
+    hal_debug_printf("[PER] leds: g=%d r=%d hb=%ld alarm=%ld\r\n",
+                     hal_led_get(0) ? 1 : 0, hal_led_get(1) ? 1 : 0,
+                     (long)g_params.led_heartbeat, (long)g_params.led_alarm);
+    hal_debug_printf("[PER] buzzer: freq=%u ms=%u\r\n",
+                     (unsigned)g_buzz_freq, (unsigned)g_buzz_ms);
+    hal_debug_printf("[PER] uart0: en=%ld baud=%ld rx=%lu tx=%lu lines=%lu\r\n",
+                     (long)g_params.uart0_en, (long)g_params.uart0_baud,
+                     (unsigned long)g_uart0_rx_bytes,
+                     (unsigned long)g_uart0_tx_bytes,
+                     (unsigned long)g_uart0_rx_lines);
+    periph_print_ext();
+    pwm_status_print();
+}
+
+/** @brief 14 路空闲 PWM 的当前值 (一行, 下标即 !PWM 的 idx) */
+static void pwm_status_print(void)
+{
+    hal_debug_printf("[PER] pwm:");
+    for (uint8_t i = 0; i < FREE_PWM_COUNT; i++) {
+        hal_debug_printf(" %u=%u", (unsigned)i, (unsigned)g_free_pwm[i]);
+    }
+    hal_debug_printf("\r\n");
+}
+
+/** @brief 空闲 PWM 下标 → 该路所在 PCA9685 的板索引 */
+static uint8_t free_pwm_board_idx(uint8_t idx)
+{
+    uint8_t addr = (idx <= FREE_PWM_LEFT_LAST) ? PCA9685_ADDR_LEFT : PCA9685_ADDR_RIGHT;
+    uint8_t bi = pca9685_get_board_idx_by_addr(addr);
+    return (bi == 0xFF) ? 0 : bi;
+}
+
+/* ==================== 周期轮询 (主循环 20ms 调用) ==================== */
+
+void hal_periph_poll(void)
+{
+    /* 配置快照对比: 参数可能被网页滑条 / !CFG / !CFGR 改掉, 这里让硬件跟上。
+     * 每 20ms 一次只是几个整数比较, 不需要节流 —— 节流反而会让网页上改了
+     * 参数要等一两秒才生效, 和"点了就有反应"的预期对不上。 */
+    static bool    s_uart_en   = false;
+    static int32_t s_uart_baud = 0;
+    static int32_t s_ext_mode  = -1;
+
+    bool    uart_en = UART0_ENABLED ? true : false;
+    int32_t baud    = g_params.uart0_baud;
+
+    if (uart_en != s_uart_en || baud != s_uart_baud) {
+        ext_uart_apply(uart_en, baud);
+        s_uart_en   = uart_en;
+        s_uart_baud = baud;
+    }
+
+    if (EXT_PIN_MODE != s_ext_mode) {
+        ext_i2c_adc_apply(EXT_PIN_MODE);
+        s_ext_mode = EXT_PIN_MODE;
+    }
+
+    if (s_uart_en) uart0_rx_poll();
+
+    /* 空闲 PWM 必须在 hal_servo_flush 那批 16 通道整写里发出去, 而未解锁时
+     * hexapod_update 根本不调 flush —— 那样 !PWM 得先解锁才见效, 当测试工具
+     * 就废了。这里补发一次 (无 dirty 时只是一遍数组扫描)。
+     *
+     * 校准模式 (!C / !PER) 下跳过: 那两个模式用 pca9685_set_servo_pulse 直接
+     * 写舵机通道, 我们这批整写会把它们刚设的脉宽清零。 */
+    if (free_pwm_any_dirty() &&
+        !hal_is_calibration_active() && !hal_is_period_calib_active()) {
+        hal_servo_flush();
+    }
+}
+
+/* ==================== 命令实现 ==================== */
+
+/**
+ * @brief 从 pos 起取一个十进制整数 (跳过前导空格)
+ * @param out 解析结果, 仅当 *ok 为 true 时有效
+ * @return 下一个待解析位置
+ */
+static uint8_t next_int(const uint8_t *buf, uint8_t len, uint8_t pos,
+                        int32_t *out, bool *ok)
+{
+    while (pos < len && buf[pos] == ' ') pos++;
+
+    bool neg = false;
+    if (pos < len && buf[pos] == '-') { neg = true; pos++; }
+
+    int32_t v = 0;
+    bool any = false;
+    while (pos < len && buf[pos] >= '0' && buf[pos] <= '9') {
+        v = v * 10 + (buf[pos] - '0');
+        if (v > 1000000) v = 1000000;
+        any = true;
+        pos++;
+    }
+    if (any && out) *out = neg ? -v : v;
+    if (ok) *ok = any;
+    return pos;
+}
+
+/** @brief !MOTOR <1|2> <0-1000> | !MOTOR (双停) — 无方向引脚, 只能调速 */
+static void cmd_motor(const uint8_t *buf, uint8_t len)
+{
+    int32_t n = 0, duty = 0;
+    bool ok_n = false, ok_d = false;
+    uint8_t pos = next_int(buf, len, 6, &n, &ok_n);   /* 跳过 "!MOTOR" */
+    if (ok_n) pos = next_int(buf, len, pos, &duty, &ok_d);
+    (void)pos;
+
+    if (!ok_n) {
+        /* 无参 = 双停 (急停用, 不用记是哪个电机) */
+        hal_dc_motor_set(0, 0);
+        hal_dc_motor_set(1, 0);
+        g_motor_duty[0] = g_motor_duty[1] = 0;
+    } else if (ok_d && n >= 1 && n <= 2) {
+        uint16_t d = (uint16_t)((duty < 0) ? 0 : (duty > 1000 ? 1000 : duty));
+        hal_dc_motor_set((uint8_t)(n - 1), d);
+        g_motor_duty[n - 1] = d;
+    } else {
+        hal_debug_printf("Usage: !MOTOR <1|2> <0-1000>  |  !MOTOR  (both stop)\r\n");
+        return;
+    }
+    hal_debug_printf("[PER] motors: m1=%u m2=%u\r\n",
+                     (unsigned)g_motor_duty[0], (unsigned)g_motor_duty[1]);
+}
+
+/** @brief !LED <g|r> <0|1> — 手动 LED (所有权归参数, 见 config.h) */
+static void cmd_led(const uint8_t *buf, uint8_t len)
+{
+    uint8_t pos = 4;                                  /* 跳过 "!LED" */
+    while (pos < len && buf[pos] == ' ') pos++;
+    if (pos >= len) { hal_debug_printf("Usage: !LED <g|r> <0|1>\r\n"); return; }
+
+    char which = (char)buf[pos++];
+    int32_t v = 0;
+    bool ok = false;
+    next_int(buf, len, pos, &v, &ok);
+
+    if (!ok || (which != 'g' && which != 'r')) {
+        hal_debug_printf("Usage: !LED <g|r> <0|1>\r\n");
+        return;
+    }
+
+    uint8_t id = (which == 'r') ? 1 : 0;
+    hal_led_set(id, v != 0);
+
+    /* 手动设置会被状态块冲掉, 与其让人对着"设了不起作用"猜, 不如直接说 */
+    if (id == 0 && LED_HEARTBEAT_ENABLED) {
+        hal_debug_printf("[PER] WARN led_heartbeat=1: 绿灯 2s 内会被心跳覆盖, "
+                         "先 !CFG led_heartbeat 0\r\n");
+    }
+    if (id == 1 && LED_ALARM_ENABLED && BATTERY_CHECK_ENABLED) {
+        hal_debug_printf("[PER] WARN led_alarm=1: 红灯 1s 内会被电池状态覆盖, "
+                         "先 !CFG led_alarm 0\r\n");
+    }
+
+    hal_debug_printf("[PER] leds: g=%d r=%d hb=%ld alarm=%ld\r\n",
+                     hal_led_get(0) ? 1 : 0, hal_led_get(1) ? 1 : 0,
+                     (long)g_params.led_heartbeat, (long)g_params.led_alarm);
+}
+
+/**
+ * @brief 播放提示音并全程喂狗
+ *
+ * 分块是因为 hal_play_sound 是纯 sleep_ms 的阻塞实现, 而主循环看门狗只有
+ * 1500ms —— 一口气放满 2s 会直接把板子复位。块间会有 ~30ms 静音
+ * (hal_play_sound 的音符间隔), 所以长音听起来是一串短音。
+ */
+static void periph_buzz(uint16_t freq, uint16_t ms)
+{
+    uint16_t left = ms;
+    while (left > 0) {
+        uint16_t chunk = (left > PERIPH_BUZZ_CHUNK_MS) ? PERIPH_BUZZ_CHUNK_MS : left;
+        hal_play_sound(1, &freq, &chunk);
+        watchdog_update();
+        left = (uint16_t)(left - chunk);
+    }
+}
+
+/** @brief !BUZZ <freq> <ms> — 阻塞 (ms ≤ 2000), 期间控制回路停摆 */
+static void cmd_buzz(const uint8_t *buf, uint8_t len)
+{
+    int32_t freq = 0, ms = 0;
+    bool ok_f = false, ok_m = false;
+    uint8_t pos = next_int(buf, len, 5, &freq, &ok_f);   /* 跳过 "!BUZZ" */
+    if (ok_f) pos = next_int(buf, len, pos, &ms, &ok_m);
+    (void)pos;
+
+    if (!ok_f || !ok_m) {
+        hal_debug_printf("Usage: !BUZZ <freq %u-%u> <ms 0-%u>  (阻塞)\r\n",
+                         (unsigned)BUZZER_MIN_FREQ_HZ, (unsigned)BUZZER_MAX_FREQ_HZ,
+                         (unsigned)BUZZER_MAX_MS);
+        return;
+    }
+
+    /* 下限取 BUZZER_MIN_FREQ_HZ: hal_play_sound 内部也会夹到这里,
+     * 在入口就夹掉, 回显的值才等于实际响的频率 */
+    if (freq < (int32_t)BUZZER_MIN_FREQ_HZ) freq = BUZZER_MIN_FREQ_HZ;
+    if (freq > (int32_t)BUZZER_MAX_FREQ_HZ) freq = BUZZER_MAX_FREQ_HZ;
+    if (ms < 0) ms = 0;
+    if (ms > (int32_t)BUZZER_MAX_MS) ms = BUZZER_MAX_MS;
+
+    g_buzz_freq = (uint16_t)freq;
+    g_buzz_ms   = (uint16_t)ms;
+
+    if (ms > 0) {
+        hal_debug_printf("[PER] buzzer: %ld Hz %ld ms (blocking, 控制回路暂停)\r\n",
+                         (long)freq, (long)ms);
+        periph_buzz((uint16_t)freq, (uint16_t)ms);
+    }
+    hal_debug_printf("[PER] buzzer: freq=%u ms=%u\r\n",
+                     (unsigned)g_buzz_freq, (unsigned)g_buzz_ms);
+}
+
+/** @brief !UART0T <text> — 从外部 UART0 发一行文本 (需 uart0_en=1) */
+static void cmd_uart0_text(const uint8_t *buf, uint8_t len)
+{
+    if (!UART0_ENABLED) {
+        hal_debug_printf("[PER] uart0 disabled — 先 !CFG uart0_en 1\r\n");
+        return;
+    }
+
+    uint8_t pos = 7;                                  /* 跳过 "!UART0T" */
+    while (pos < len && buf[pos] == ' ') pos++;
+    uint8_t n = (uint8_t)(len - pos);
+
+    for (uint8_t i = 0; i < n; i++) {
+        uart_putc(uart0, (char)buf[pos + i]);
+    }
+    g_uart0_tx_bytes += n;
+
+    /* buf 不保证 NUL 结尾, 用精度而不是终止符截断 */
+    hal_debug_printf("[U0TX] sent %u bytes: %.*s\r\n", (unsigned)n, (int)n,
+                     (const char *)&buf[pos]);
+}
+
+/** @brief !I2C2 — 扫描外部软件 I2C 总线 (需 ext_i2c_mode=1) */
+static void cmd_i2c2(void)
+{
+    if (EXT_PIN_MODE != EXT_I2C_MODE_I2C) {
+        hal_debug_printf("[PER] ext_i2c_mode=%ld, 先 !CFG ext_i2c_mode 1\r\n",
+                         (long)EXT_PIN_MODE);
+        return;
+    }
+    g_ext_i2c_found = ext_i2c_scan();
+    periph_print_ext();
+}
+
+/** @brief !ADC2 — 读外部 ADC0/ADC1 (需 ext_i2c_mode=2) */
+static void cmd_adc2(void)
+{
+    if (EXT_PIN_MODE != EXT_I2C_MODE_ADC) {
+        hal_debug_printf("[PER] ext_i2c_mode=%ld, 先 !CFG ext_i2c_mode 2\r\n",
+                         (long)EXT_PIN_MODE);
+        return;
+    }
+    g_ext_adc_mv[0] = ext_adc_read_mv(EXT_ADC0_INPUT);
+    g_ext_adc_mv[1] = ext_adc_read_mv(EXT_ADC1_INPUT);
+    periph_print_ext();
+}
+
+/** @brief !PWM <idx> <us> — 设一路空闲 PWM 的脉宽 (0 = 关) */
+static void cmd_pwm(const uint8_t *buf, uint8_t len)
+{
+    int32_t idx = 0, us = 0;
+    bool ok_i = false, ok_u = false;
+    uint8_t pos = next_int(buf, len, 4, &idx, &ok_i);   /* 跳过 "!PWM" */
+    if (ok_i) pos = next_int(buf, len, pos, &us, &ok_u);
+    (void)pos;
+
+    if (!ok_i || !ok_u || idx < 0 || idx >= FREE_PWM_COUNT) {
+        hal_debug_printf("Usage: !PWM <idx 0-%u> <us>  "
+                         "(idx %u-%u 左板 0x40, %u-%u 右板 0x41)\r\n",
+                         (unsigned)(FREE_PWM_COUNT - 1),
+                         (unsigned)FREE_PWM_LEFT_FIRST, (unsigned)FREE_PWM_LEFT_LAST,
+                         (unsigned)FREE_PWM_RIGHT_FIRST, (unsigned)FREE_PWM_RIGHT_LAST);
+        return;
+    }
+
+    if (us < 0) us = 0;
+    uint16_t period = pca9685_get_pwm_period_us(free_pwm_board_idx((uint8_t)idx));
+    if (us > (int32_t)period) us = period;   /* 超过一个周期 = 恒高, 没有意义 */
+
+    g_free_pwm[(uint8_t)idx]       = (uint16_t)us;
+    g_free_pwm_dirty[(uint8_t)idx] = true;
+    hal_debug_printf("[PER] pwm: %ld=%ld\r\n", (long)idx, (long)us);
+}
+
+/** @brief !PWMOFF — 14 路空闲 PWM 全部归零 */
+static void cmd_pwm_off(void)
+{
+    for (uint8_t i = 0; i < FREE_PWM_COUNT; i++) {
+        g_free_pwm[i]       = 0;
+        g_free_pwm_dirty[i] = true;
+    }
+    hal_debug_printf("[PER] pwm: all=0\r\n");
+}
+
 /* ==================== 串口命令行接收 ==================== */
 
 /* 命令行缓冲区长度的唯一出处。
@@ -1106,6 +1707,14 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
     if (len < 2 || buf[0] != '!') return false;
 
     /* ---- !I2C: I2C 总线设备检测 (无需控制状态, 启动失败时也可用) ---- */
+    /* ---- !I2C2: 外部软件 I2C (GP26/27) 总线扫描 ----
+     * ⚠️ 必须在 !I2C 之前: 下面那条只看到 buf[2]=='2' 就认了, 会把
+     *    "!I2C2" 当成内部总线的 !I2C 命令吃掉。 */
+    if (buf[1] == 'I' && len >= 5 && buf[2] == '2' && buf[3] == 'C' && buf[4] == '2') {
+        cmd_i2c2();
+        return true;
+    }
+
     if (buf[1] == 'I' && len >= 3 && buf[2] == '2') {
         i2c_bus_check();
         return true;
@@ -1198,6 +1807,66 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
                 hal_imu_init();
             }
         }
+        return true;
+    }
+
+    /* ---- 预留外设命令 ----
+     * 位置: ctrl_state 判空之前 —— 外设都是纯输出/纯诊断, 与机器人状态无关,
+     * 而且"初始化失败后用 !MOTOR 测电机 / 用 !LED 试灯"正是要用的场合。
+     *
+     * ⚠️ 全部必须拦在下面 switch 之前, 否则首字母会撞上运动命令:
+     *    !MOTOR→case 'M'(站立姿态)  !LED→case 'L'(左移)
+     *    !BUZZ →case 'B'(后退)      !ADC2→case 'A'(舵机快照)
+     *    !UART0T→case 'U'(抬腿)     !PWM/!PERIPH→case 'P'(周期校准)
+     * 靠长度与前几个字符区分, 与 !BATT/!SAVE 同一套路。 */
+    if (buf[1] == 'M' && len >= 6 &&
+        buf[2] == 'O' && buf[3] == 'T' && buf[4] == 'O' && buf[5] == 'R') {
+        cmd_motor(buf, len);
+        return true;
+    }
+    if (buf[1] == 'L' && len >= 4 && buf[2] == 'E' && buf[3] == 'D') {
+        cmd_led(buf, len);
+        return true;
+    }
+    if (buf[1] == 'B' && len >= 5 &&
+        buf[2] == 'U' && buf[3] == 'Z' && buf[4] == 'Z') {
+        cmd_buzz(buf, len);
+        return true;
+    }
+    if (buf[1] == 'U' && len >= 6 &&
+        buf[2] == 'A' && buf[3] == 'R' && buf[4] == 'T' && buf[5] == '0') {
+        if (len >= 7 && buf[6] == 'T') {
+            cmd_uart0_text(buf, len);
+        } else {
+            hal_debug_printf("[PER] uart0: en=%ld baud=%ld rx=%lu tx=%lu lines=%lu\r\n",
+                             (long)g_params.uart0_en, (long)g_params.uart0_baud,
+                             (unsigned long)g_uart0_rx_bytes,
+                             (unsigned long)g_uart0_tx_bytes,
+                             (unsigned long)g_uart0_rx_lines);
+        }
+        return true;
+    }
+    if (buf[1] == 'A' && len >= 5 &&
+        buf[2] == 'D' && buf[3] == 'C' && buf[4] == '2') {
+        cmd_adc2();
+        return true;
+    }
+    if (buf[1] == 'P' && len >= 4 && buf[2] == 'W' && buf[3] == 'M') {
+        if (len >= 7 && buf[4] == 'O' && buf[5] == 'F' && buf[6] == 'F') {
+            cmd_pwm_off();
+        } else if (len >= 5 && buf[4] == 'Q') {
+            pwm_status_print();
+        } else {
+            cmd_pwm(buf, len);
+        }
+        return true;
+    }
+    /* !PERIPH — 外设总状态 (网页外设页轮询用)。
+     * ⚠️ 与周期校准的 !PER 只差三个字符, 且 !PER<i> 是合法命令 —— 必须
+     *    靠完整的 "!PERIPH" 区分, 不能只看前缀。 */
+    if (buf[1] == 'P' && len >= 7 &&
+        buf[2] == 'E' && buf[3] == 'R' && buf[4] == 'I' && buf[5] == 'P' && buf[6] == 'H') {
+        periph_status_print();
         return true;
     }
 
@@ -1750,6 +2419,12 @@ void hal_led_set(uint8_t led_id, bool state)
             gpio_put(LED_GREEN_PIN, state);
             break;
     }
+}
+
+bool hal_led_get(uint8_t led_id)
+{
+    led_init_once();
+    return (led_id == 1) ? gpio_get(LED_RED_PIN) : gpio_get(LED_GREEN_PIN);
 }
 
 void hal_led_blink(uint8_t led_id, uint8_t times)

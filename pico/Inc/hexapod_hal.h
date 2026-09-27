@@ -233,6 +233,15 @@ void hal_play_sound(uint8_t note_count,
 void hal_led_set(uint8_t led_id, bool state);
 
 /**
+ * @brief 读回 LED 当前电平
+ * @param led_id 0=绿色(GP25), 1=红色(GP12)
+ * @return true = 亮
+ * @note 状态查询用的是引脚实况而不是"上次设的值" —— 主循环的心跳/电池块
+ *       也会写这两个脚, 只记自己的写入会报出一个假的当前状态。
+ */
+bool hal_led_get(uint8_t led_id);
+
+/**
  * @brief LED闪烁
  * @param led_id 0=绿色(GP25), 1=红色(GP12)
  * @param times 闪烁次数
@@ -347,6 +356,21 @@ bool hal_is_calibration_active(void);
  *         由 !PER 命令独占 coxa 舵机）
  */
 bool hal_is_period_calib_active(void);
+
+/* ==================== 预留外设接口 ==================== */
+
+/**
+ * @brief 外设轮询: 让硬件跟随 uart0_en/uart0_baud/ext_i2c_mode 参数
+ * @note 主循环每 20ms 调用一次。参数相等时只是几个整数比较;
+ *       另外负责转发外部 UART0 收到的整行, 以及补发空闲 PWM。
+ */
+void hal_periph_poll(void);
+
+/**
+ * @brief 打印外设总状态 (6 行 "[PER] <节>: <k=v ...>")
+ * @note 行格式是 tools/webconfig/server.py 的解析契约, 节名不可随意改。
+ */
+void periph_status_print(void);
 
 /**
  * @brief 导出当前校准数据 (供非易失存储模块保存)
