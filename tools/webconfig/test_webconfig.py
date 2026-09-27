@@ -403,9 +403,15 @@ def test_firmware_contract():
     check("校准页有逐舵机面板 (选中格 → 滑条 → 设为中心)",
           'id="cal-edit"' in html and 'id="cal-ang"' in html
           and 'id="cal-center"' in html and "设为中心" in html)
-    check("「设为中心」下发 !HO <id> <angle>", "`!HO ${CAL.sel} ${v}`" in html)
-    check("面板滑条转动走 !P (与调试页同一命令)",
-          "`!P ${CAL.sel} ${v}`" in html)
+    check("「设为中心」下发 !HO <id> <angle> (空格是分隔符)",
+          "`!HO ${CAL.sel} ${v}`" in html)
+    # !P 这条相反: id 必须紧跟命令字, 中间不给空格。固件从 buf[2] 读 id、第一个
+    # 空格之后读角度, "!P 0 300" 会被读成"舵机 0 → 角度 0"(角度取到 id 的首位),
+    # 静默写到别处 —— 页面上只有"滑条拖了舵机几乎不动", 没有任何报错。
+    check("面板滑条转动走 !P<id> <angle> (id 紧跟 !P)",
+          "`!P${CAL.sel} ${v}`" in html and "`!P ${CAL.sel} ${v}`" not in html)
+    check("固件 !P 的形状与源码写的一致 (页面照它发)",
+          "!P<servo_id> <angle>" in hal and "Usage: !P<id> <angle>" in hal)
     check("页码缓存 ho 帧并挂到 SSE 分发上",
           'case "ho": renderHo(ev.d); break;' in html)
     # !A 报的是角度而不是脉宽 (同样是 0=中位那套单位, 与 !P/!HO 一致)。改成
@@ -1352,6 +1358,15 @@ try {
                       "g29fn": 0, "g29lv": 1}});
   out.g23dis2 = $("pt-cfgl-gp23").disabled;
   out.g23chk2 = $("pt-cfgl-gp23").checked;
+  /* 第三拍: 把面板真的按下去, 捕获 sendCmd 拿到的**原样命令串**。静态 check 只能
+   * 证明页面里写着某个模板 —— 模板自身抄错也照样 PASS (这正是 "!P 0 300" 那次的
+   * 教训: 固件从 buf[2] 读 id, 多一个空格把角度读成 id 首位, 静默转到别处)。 */
+  var CMDS = [];
+  sendCmd = function (cmd) { CMDS.push(cmd); };
+  $("cal-ang").value = 300; $("cal-ang").onchange();   /* 拖动滑条松手 */
+  $("cal-p20").onclick();                              /* 微调 +20 */
+  $("cal-center").onclick();                           /* 设为中心 */
+  out.cmds = CMDS;
   $("probe").textContent = JSON.stringify(out);
 } catch (e) { $("probe").textContent = "THROW " + e; }
 </script>
@@ -1433,6 +1448,11 @@ def test_page_js():
           pr.get("calSel") == "#3 · R · coxa" and pr.get("calOffBox") == "12"
           and pr.get("calAng") == "-120" and pr.get("calHidden") is False,
           str({k: pr.get(k) for k in ("calSel", "calOffBox", "calAng", "calHidden")}))
+    # 页面 → 固件的唯一接缝就是这几个命令串 (探针捕获的真实字符串, 不是模板)。
+    # !P 的 id 紧跟命令字; !HO 相反要空格 —— 两种形状在这里并排钉住。
+    check("滑条/微调/设为中心发出去的命令串 (id 位置与空格)",
+          pr.get("cmds") == ["!P3 300", "!P3 320", "!HO 3 320"],
+          str(pr.get("cmds")))
 
 
 def wait_dev(port, up, timeout=20):
