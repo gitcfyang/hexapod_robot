@@ -103,6 +103,9 @@ typedef struct {
     int32_t crsf_ch_bal;         /* 平衡模式 */
     int32_t input_mode;          /* 默认输入源 0=CRSF 1=PS2 */
 
+    /* ---- 系统 (sys) ---- */
+    int32_t loop_ms;             /* 控制循环周期 (ms); 见 config.h 的缩放说明 */
+
     /* ---- 预留外设 (per) ----
      * 这些器件都还没接线, 参数控制的是"固件要不要去驱动那几个引脚"。 */
     int32_t led_heartbeat;       /* 主循环绿灯心跳使能 0/1 */

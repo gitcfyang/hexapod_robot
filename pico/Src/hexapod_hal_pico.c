@@ -1374,9 +1374,10 @@ static void periph_print_ext(void)
 }
 
 /**
- * @brief 外设总状态 (6 行) —— 网页外设页的轮询数据源
+ * @brief 外设总状态 (7 行) —— 网页外设页/控制页的轮询数据源
  *
- * 每行形如 "[PER] <节>: <k=v ...>", 节名固定为 motors/leds/buzzer/uart0/ext/pwm。
+ * 每行形如 "[PER] <节>: <k=v ...>", 节名固定为
+ * motors/leds/buzzer/uart0/ext/pwm/pwmperiod。
  * ⚠️ [PER] 这个前缀同时也是 PCA9685 周期校准 (!PER) 的输出前缀, 所以
  *    server.py 的解析正则按节名白名单匹配, 不要改成"任意词"。
  */
@@ -1396,6 +1397,11 @@ void periph_status_print(void)
                      (unsigned long)g_uart0_rx_lines);
     periph_print_ext();
     pwm_status_print();
+    /* PWM 周期校准值 (µs, 两板独立) —— 网页控制页的滑条回读源;
+     * 硬件刷新频率 = 1e6/周期, 软硬同源 (见 hexapod_i2c_protocol.h) */
+    hal_debug_printf("[PER] pwmperiod: l=%u r=%u\r\n",
+                     (unsigned)pca9685_get_pwm_period_us(0),
+                     (unsigned)pca9685_get_pwm_period_us(1));
 }
 
 /** @brief 14 路空闲 PWM 的当前值 (一行, 下标即 !PWM 的 idx) */
@@ -2655,10 +2661,11 @@ static void period_calib_print_status(void)
 {
     for (uint8_t b = 0; b < pca9685_get_board_count(); b++) {
         uint8_t addr = pca9685_get_board_addr(b);
-        hal_debug_printf("[PER] Board %u (0x%02X, %s legs): period=%u us\r\n",
+        hal_debug_printf("[PER] Board %u (0x%02X, %s legs): period=%u us (~%u Hz)\r\n",
                          b, addr,
                          (addr == PCA9685_ADDR_LEFT) ? "left " : "right",
-                         pca9685_get_pwm_period_us(b));
+                         pca9685_get_pwm_period_us(b),
+                         (unsigned)(1000000u / pca9685_get_pwm_period_us(b)));
     }
     hal_debug_printf("[PER] Coxa @center, horn_offset=%s. "
                      "Cmds: !PER0 <us>  !PER1 <us>  !PERO 0/1  !PERS  !PERQ\r\n",
@@ -2738,8 +2745,9 @@ static bool period_calib_handle_command(uint8_t *buf, uint8_t len)
             pca9685_set_pwm_period_us(idx, us);
             period_calib_apply_coxas();   /* 立即以新周期重写 coxa → 舵机实时响应 */
 
-            hal_debug_printf("[PER] Board %u (0x%02X) period=%u us, coxa re-applied\r\n",
-                             idx, addr, pca9685_get_pwm_period_us(idx));
+            hal_debug_printf("[PER] Board %u (0x%02X) period=%u us (~%u Hz), coxa re-applied\r\n",
+                             idx, addr, pca9685_get_pwm_period_us(idx),
+                             (unsigned)(1000000u / pca9685_get_pwm_period_us(idx)));
             return true;
         }
 

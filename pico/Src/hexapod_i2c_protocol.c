@@ -143,8 +143,14 @@ bool pca9685_init(void)
         pca9685_write_reg(g_board_addrs[i], PCA9685_MODE2, PCA9685_MODE2_OUTDRV);
     }
 
-    /* 设置 PWM 频率为 50Hz */
-    if (!pca9685_set_freq(PCA9685_FREQUENCY)) return false;
+    /* 设置每块板的 PWM 频率: 由各自的实测周期换算 (两板独立校准,
+     * 默认见 hexapod_i2c_protocol.h)。flash 里的校准记录稍后由
+     * store_apply_to_robot 回放, 那时会再按记录写一次。 */
+    for (uint8_t i = 0; i < g_board_count; i++) {
+        if (!pca9685_set_freq_board(i, (uint16_t)(1000000u / g_board_pwm_period_us[i]))) {
+            return false;
+        }
+    }
 
     /* 所有通道初始输出低电平 */
     pca9685_free_all();
@@ -152,9 +158,10 @@ bool pca9685_init(void)
     return true;
 }
 
-bool pca9685_set_freq(uint16_t freq)
+bool pca9685_set_freq_board(uint8_t board_idx, uint16_t freq)
 {
     if (freq < 1 || freq > 1000) return false;
+    if (board_idx >= g_board_count) return false;
 
     /* 计算预分频值
      * PRE_SCALE = round(osc_clock / (4096 * freq)) - 1
@@ -164,34 +171,39 @@ bool pca9685_set_freq(uint16_t freq)
     uint8_t pre_scale = (uint8_t)(pre_scale_val + 0.5f);
     if (pre_scale < 3) pre_scale = 3;
 
-    for (uint8_t i = 0; i < g_board_count; i++) {
-        uint8_t addr = g_board_addrs[i];
-        uint8_t mode1;
+    uint8_t addr = g_board_addrs[board_idx];
+    uint8_t mode1;
 
-        /* 进入 SLEEP 模式 */
-        pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
-        mode1 |= PCA9685_MODE1_SLEEP;
-        pca9685_write_reg(addr, PCA9685_MODE1, mode1);
+    /* 进入 SLEEP 模式 (改 PRE_SCALE 的前提) */
+    pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
+    mode1 |= PCA9685_MODE1_SLEEP;
+    pca9685_write_reg(addr, PCA9685_MODE1, mode1);
 
-        /* 写入预分频 */
-        pca9685_write_reg(addr, PCA9685_PRE_SCALE, pre_scale);
+    /* 写入预分频 */
+    pca9685_write_reg(addr, PCA9685_PRE_SCALE, pre_scale);
 
-        /* 唤醒 */
-        pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
-        mode1 &= ~PCA9685_MODE1_SLEEP;
-        mode1 |= PCA9685_MODE1_AI;
-        pca9685_write_reg(addr, PCA9685_MODE1, mode1);
-    }
+    /* 唤醒 (保留 AI 等其余位) */
+    pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
+    mode1 &= ~PCA9685_MODE1_SLEEP;
+    mode1 |= PCA9685_MODE1_AI;
+    pca9685_write_reg(addr, PCA9685_MODE1, mode1);
 
-    sleep_ms(1);
+    sleep_ms(1);   /* 振荡器稳定后再 RESTART */
 
     /* 发送 RESTART */
+    pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
+    mode1 |= PCA9685_MODE1_RESTART;
+    pca9685_write_reg(addr, PCA9685_MODE1, mode1);
+
+    return true;
+}
+
+bool pca9685_set_freq(uint16_t freq)
+{
+    if (freq < 1 || freq > 1000) return false;
+
     for (uint8_t i = 0; i < g_board_count; i++) {
-        uint8_t addr = g_board_addrs[i];
-        uint8_t mode1;
-        pca9685_read_reg(addr, PCA9685_MODE1, &mode1);
-        mode1 |= PCA9685_MODE1_RESTART;
-        pca9685_write_reg(addr, PCA9685_MODE1, mode1);
+        if (!pca9685_set_freq_board(i, freq)) return false;
     }
 
     return true;
@@ -268,6 +280,13 @@ void pca9685_set_pwm_period_us(uint8_t board_idx, uint16_t period_us)
     if (period_us > 15000) period_us = 15000;
 
     g_board_pwm_period_us[board_idx] = period_us;
+
+    /* 软硬同源: 硬件刷新频率跟着这个周期走 (见头文件说明), 否则脉冲
+     * 数学按实测周期、芯片却按标称周期跑, 输出脉宽整体偏移。板子缺席
+     * (初始化前/未检出) 时只记软件值, init 或记录回放时会再写。 */
+    if (board_idx < pca9685_get_board_count()) {
+        pca9685_set_freq_board(board_idx, (uint16_t)(1000000u / period_us));
+    }
 }
 
 /* ==================== 舵机PWM输出 ==================== */

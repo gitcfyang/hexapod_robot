@@ -44,25 +44,24 @@
 
 /* ==================== 舵机参数 ==================== */
 
-/* 每片 PCA9685 的 PWM 实际周期 (微秒)。
+/* 每片 PCA9685 的 PWM 周期 (微秒), ★ 运行时可调 (!PER0/1 <us>, !SAVE 存 flash)。
  *
  * 两片 PCA9685 的内部振荡器可能有偏差，故两块板各自独立可设。
  * 本机用 !PER 交互式校准实测 (以摆臂到位为判据, 无需示波器) 后填入,
  * 实测两板取值恰好相同。代码根据目标板自动选择对应周期。
  *
- * PCA9685 计数器 = 脉宽目标 × 4096 / PWM 周期。
- * 直接按实际周期反算计数值, 保证输出的脉宽绝对准确。
+ * 这一个值同时决定两件事, 脉宽才绝对准确:
+ *   1. 软件脉冲数学: PCA9685 计数器 = 脉宽目标 × 4096 / PWM 周期;
+ *   2. 硬件刷新频率: 同一值换算 PRE_SCALE 写进芯片 (pca9685_set_freq_board)。
+ * 两者必须同源 —— 若硬件固定按 100Hz 标称跑而软件按实测周期换算, 输出脉宽
+ * 会整体偏移振荡器误差的比例 (校准就白做了)。
  *
- *   100Hz 标称: 10000 μs
- *   实测值取决于每片 PCA9685 的振荡器精度 (~±15%)。
- *
- * 不要通过改 PCA9685_FREQUENCY 来补偿 — 那是间接修正。
- * 改这两个值直接修正脉宽。 */
+ *   100Hz 标称: 10000 μs; 实测值取决于每片 PCA9685 的振荡器精度 (~±15%)。
+ * 芯片自身的 25MHz 振荡器误差无法软件消除 (它同时缩放软/硬件两侧),
+ * 残余部分交给 horn_offset (机械零位) 修。 */
 /* 历史: 曾用 8475 (板0) / 4310, 已由 !PER 实测值取代 */
 #define PWM_PERIOD_US_BOARD0    9500   /* 板 0x40 (左腿板) !PER 实测标定值 */
 #define PWM_PERIOD_US_BOARD1    9500   /* 板 0x41 (右腿板) !PER 实测标定值 */
-
-#define PCA9685_FREQUENCY       100      /* 目标频率, 100Hz 匹配控制循环 */
 #define SERVO_PULSE_MIN         500
 #define SERVO_PULSE_MAX         2500
 #define PCA9685_RESOLUTION      4096
@@ -79,6 +78,16 @@
 
 bool pca9685_init(void);
 bool pca9685_set_freq(uint16_t freq);
+
+/**
+ * @brief 设置单块 PCA9685 的硬件刷新频率 (写 PRE_SCALE 寄存器)
+ * @param board_idx 板索引 (0=0x40 左腿板, 1=0x41 右腿板)
+ * @param freq PWM 频率 (Hz, 1~1000; PRE_SCALE 下限 3 → 实际最高约 1.5kHz)
+ * @return true = 写入成功; 板不存在 (未检出/索引越界/参数越界) 返回 false
+ * @note 走 SLEEP → PRE_SCALE → 唤醒 (保留 AI) → RESTART, 其间该板输出暂停
+ *       约 1ms; 只在初始化/校准/回放记录时调用, 不在控制循环里用。
+ */
+bool pca9685_set_freq_board(uint8_t board_idx, uint16_t freq);
 bool pca9685_set_servo_pulse(uint8_t servo_id, uint16_t pulse_us);
 bool pca9685_set_servo_pulses(const uint8_t *servo_ids, 
                               const uint16_t *pulse_us,
@@ -116,8 +125,9 @@ uint8_t pca9685_get_board_idx_by_addr(uint8_t addr);
  * @brief 运行时设置某块板的 PWM 周期校准值 (µs)
  * @param board_idx 板索引 (0=0x40 左腿板, 1=0x41 右腿板)
  * @param period_us 实测 PWM 周期 (限幅 5000~15000 µs)
- * @note 用于 !PER 校准模式: 设置后立即对后续脉冲计算生效,
- *       校准完成后将最终值填入 hexapod_i2c_protocol.h 重新编译
+ * @note 用于 !PER 校准模式 / 网页控制页 / flash 记录回放: 设置后立即对
+ *       后续脉冲计算生效, 并同源写硬件刷新频率 (见 pca9685_set_freq_board)。
+ *       板子缺席时只记软件值 (硬件侧等板子在了再写)。
  */
 void pca9685_set_pwm_period_us(uint8_t board_idx, uint16_t period_us);
 

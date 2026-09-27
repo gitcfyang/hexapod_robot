@@ -16,7 +16,8 @@
 
 #define DEFAULT_GAIT_SPEED      100     // 默认步态速度
 #define DEFAULT_LEG_LIFT_HEIGHT 40      // 默认抬腿高度（mm）(站立深度 INIT_Y=50mm 的 80%)
-#define CONTROL_LOOP_PERIOD_MS  10        // 舵机刷新周期（10ms = 100Hz，匹配 PCA9685 100Hz PWM）
+/* CONTROL_LOOP_PERIOD_MS 已迁至 hexapod_config.h —— 它是运行时可调参数
+ * (loop_ms), 宏指向 g_params, 需要 config.h 的参数实体声明。 */
 #define GAIT_STEP_PERIOD_MS     60       // 步态推进周期（ms）。越大=越慢。RIPPLE_12有12步，
                                          // 60ms×12=720ms/周期。步长80mm时速度=80/0.72≈111mm/s。
 

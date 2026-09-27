@@ -228,6 +228,19 @@
 #define IMU_COMPENSATION_GAIN_DEFAULT   10
 #define IMU_COMPENSATION_GAIN           (g_params.imu_gain)
 
+/* ==================== 控制循环 ==================== */
+
+/* 控制循环周期 (ms): 舵机刷新 + IK 解算的节拍, ★ 运行时可调 (参数 loop_ms)。
+ * 默认 10ms = 100Hz, 与 PCA9685 的 100Hz 标称刷新率相当。
+ *
+ * ⚠️ 步态走速由 gait_period (时间戳制) 决定, 与本值无关 —— 改本值只改
+ *    插值平滑度: 调小更平滑但主循环占用更高, 调大反之。
+ *    两个"每周期"量随之线性缩放: stance_speed (过渡速度 ×100/周期) 与
+ *    stance_step_mm (单周期最大位移 mm/周期) —— 10ms 下调好的过渡手感,
+ *    改成 5ms 后一个周期只走原来一半, 过渡会变慢一倍。 */
+#define CONTROL_LOOP_PERIOD_MS_DEFAULT  10
+#define CONTROL_LOOP_PERIOD_MS          ((uint32_t)g_params.loop_ms)
+
 /* ==================== 调试配置 ==================== */
 
 /* 调试输出等级 (通过 USB CDC 串口输出)：

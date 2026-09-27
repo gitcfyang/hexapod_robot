@@ -397,6 +397,7 @@
       <button class="tab" data-tab="radio">遥控</button>
       <button class="tab" data-tab="power">电源</button>
       <button class="tab" data-tab="balance">平衡</button>
+      <button class="tab" data-tab="ctrl">控制</button>
       <button class="tab" data-tab="calib">校准</button>
       <button class="tab" data-tab="per">外设</button>
       <button class="tab" data-tab="log">日志</button>
@@ -1261,6 +1262,10 @@ const PAGES = [
   { id: "balance", title: "平衡", groups: ["imu"],
     note: "IMU 姿态补偿的开关、增益和轴符号。符号反了会让机身越调越歪，" +
           "标定时把机器人向一侧倾斜，看补偿方向是否与倾斜方向相反。" },
+  { id: "ctrl", title: "控制", groups: ["sys"],
+    note: "控制循环周期 (loop_ms)：舵机刷新与 IK 解算的节拍，5~20ms（默认 10ms = 100Hz）。" +
+          "它<b>不改走速</b>（走速由步态周期决定），只改插值平滑度；" +
+          "姿态页的过渡速度与单周期最大位移是「每周期」量，改了这个值它们的实际效果会跟着缩放。" },
   { id: "per", title: "外设", groups: ["per"], custom: perCustomHTML,
     note: '<span id="per-stale" class="perdot dim">外设状态: —</span> · ' +
           "板子上预留但还没接线的那些口子: 两个直流电机、蜂鸣器、双 LED、外部 UART0、" +

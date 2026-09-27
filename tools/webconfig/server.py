@@ -112,12 +112,13 @@ CRSF_CH_MID = 992
 #   [PER] uart0: en=0 baud=115200 rx=0 tx=0 lines=0
 #   [PER] ext: mode=0 found=0 a0=0 a1=0
 #   [PER] pwm: 0=0 1=0 ... 13=0
+#   [PER] pwmperiod: l=9500 r=9500            ← 两板 PWM 周期校准值 (µs)
 #
 # ⚠️ [PER] 这个前缀同时也是 PCA9685 周期校准 (!PER / !PERQ) 的输出前缀,
 #    那些行的格式是 "[PER] Board 0 (0x40, left legs): period=9500 us" 之类。
 #    所以节名必须走白名单, 不能写成 (\w+): 否则 !PER 的输出会当成外设状态
 #    塞进前端 (而且字段名对不上, 表现为卡片上冒出莫名其妙的数字)。
-RE_PER = re.compile(r"^\[PER\] (motors|leds|buzzer|uart0|ext|pwm): (.*)$")
+RE_PER = re.compile(r"^\[PER\] (motors|leds|buzzer|uart0|ext|pwm|pwmperiod): (.*)$")
 
 # 外部 UART0 的收发回显 (固件 hal_pico.c: cmd_uart0_text / uart0_rx_poll):
 #   [U0TX] sent 5 bytes: hello

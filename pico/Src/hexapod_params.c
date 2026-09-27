@@ -98,6 +98,9 @@ static const param_t s_table[] = {
     { "crsf_ch_bal",    &g_params.crsf_ch_bal,      0, 15, CRSF_CHANNEL_BALANCE_DEFAULT, "", "chan" },
     { "input_mode",     &g_params.input_mode,       0,  1, INPUT_MODE_DEFAULT,           "", "chan" },
 
+    /* ---- 系统 ---- */
+    { "loop_ms",        &g_params.loop_ms,          5,     20, CONTROL_LOOP_PERIOD_MS_DEFAULT, "ms", "sys" },
+
     /* ---- 预留外设 ---- */
     { "led_heartbeat",  &g_params.led_heartbeat,    0,      1, LED_HEARTBEAT_ENABLED_DEFAULT, "", "per" },
     { "led_alarm",      &g_params.led_alarm,        0,      1, LED_ALARM_ENABLED_DEFAULT,     "", "per" },

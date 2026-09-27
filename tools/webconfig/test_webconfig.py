@@ -129,6 +129,7 @@ S_PER = [
     "[PER] uart0: en=1 baud=115200 rx=42 tx=7 lines=3",
     "[PER] ext: mode=2 found=0 a0=1234 a1=5678",
     "[PER] pwm: 0=0 1=1500 2=0 3=5000 4=0 5=0 6=0 7=0 8=0 9=0 10=0 11=0 12=0 13=0",
+    "[PER] pwmperiod: l=9500 r=9500",
 ]
 # 外部 UART0 的收发 ([U0TX] 是 !UART0T 的回执, [U0] 是收到的整行)
 S_U0 = [
@@ -199,7 +200,7 @@ RE_SAVE_ACK = re.compile(r"if \(/\\\[STORE\\\] ([^/]+)/\.test\(ev\.line\)\)")
 
 # 网页的分页表 (index.html 的 PAGES) 必须覆盖固件里出现的每一个分组,
 # 否则那组参数在网页上无处可去 —— 加参数时忘了配页面就会静默丢一个组。
-WEB_GROUPS = {"batt", "motion", "stance", "tune", "dir", "imu", "chan", "per"}
+WEB_GROUPS = {"batt", "motion", "stance", "tune", "dir", "imu", "chan", "per", "sys"}
 
 
 def test_firmware_contract():
@@ -415,11 +416,11 @@ def test_parser():
     check("通道: 切模式后不残留上一模式的字段",
           "lx" not in c2 and "btns" not in c2 and c2["mode"] == "crsf", str(sorted(c2)))
 
-    # 外设状态: 一次 !PERIPH 是 6 行, 每行一节。分节合并 (而不是整份覆盖),
+    # 外设状态: 一次 !PERIPH 是 7 行, 每行一节。分节合并 (而不是整份覆盖),
     # 是为了让前端在只收到一半时也有东西可渲染。
     t = wc.Telemetry()
     kinds = [wc.parse_line(t, l) for l in S_PER]
-    check("外设: 6 行各成一节", [k[0] if k else None for k in kinds] == ["per"] * 6)
+    check("外设: 7 行各成一节", [k[0] if k else None for k in kinds] == ["per"] * 7)
     per = t.snapshot()["per"]
     check("外设: 电机占空比", per.get("motors") == {"m1": 500, "m2": 0}, str(per.get("motors")))
     check("外设: LED 实况与所有权参数一起报",
@@ -435,6 +436,9 @@ def test_parser():
     check("外设: 14 路空闲 PWM 按 idx 编号",
           len(per.get("pwm", {})) == 14 and per["pwm"]["3"] == 5000 and per["pwm"]["1"] == 1500,
           str(per.get("pwm")))
+    # PWM 周期校准值 (µs): 控制页滑条的回读源 —— 两板各自的数, 不是一份
+    check("外设: 两板 PWM 周期各自回报",
+          per.get("pwmperiod") == {"l": 9500, "r": 9500}, str(per.get("pwmperiod")))
 
     # 分节合并: 只来一行时, 之前那几节必须还在 (前端整页渲染, 缺节会闪 0)
     wc.parse_line(t, "[PER] motors: m1=0 m2=0")
@@ -463,7 +467,7 @@ def test_parser():
     # 否则校准行会被当成外设节, 在页面上显示成一台不存在的设备
     t = wc.Telemetry()
     for cal in ["[PER] Coxa write: 6/6 OK (horn_offset: off)",
-                "[PER] Board 0 (0x40, left legs): period=20000 us",
+                "[PER] Board 0 (0x40, left legs): period=20000 us (~50 Hz)",
                 "[PER] i2c2 scan: 0x40 0x41",
                 "[PER] ext_i2c_mode=0, 先 !CFG ext_i2c_mode 1"]:
         check(f"校准/诊断行不算外设节 ({cal[6:26]}…)",
@@ -571,7 +575,9 @@ REPLAY = {"!BATT": S_BATT, "!I2C": S_I2C, "!I2C q": S_I2C_Q,
           "!LED": ["[PER] leds: g=0 r=0 hb=0 alarm=1"],
           "!PWM": ["[PER] pwm: 3=5000"],
           "!PWMOFF": ["[PER] pwm: all=0"],
-          "!BUZZ": ["[PER] buzzer: freq=1500 ms=300"]}
+          "!BUZZ": ["[PER] buzzer: freq=1500 ms=300"],
+          "!PER0": ["[PER] Board 0 (0x40) period=9500 us (~105 Hz), coxa re-applied"],
+          "!PER1": ["[PER] Board 1 (0x41) period=9500 us (~105 Hz), coxa re-applied"]}
 
 
 def fake_response(cmd):
@@ -1030,7 +1036,7 @@ def main():
 
     # 参数分页: 每页一个 tab 按钮 + 一个卡片宿主。页面本身由 JS 按 PAGES 生成,
     # 所以断言生成器的输入 (PAGES 里的 id) 与 HTML 里的 tab 按钮两边都在。
-    for pid in ("gait", "stance", "radio", "power", "balance", "per"):
+    for pid in ("gait", "stance", "radio", "power", "balance", "per", "ctrl"):
         check(f"页面含参数分页 tab: {pid}",
               f'data-tab="{pid}"' in raw_page and f'id: "{pid}"' in raw_page)
     check("分页的组覆盖固件全部分组",
