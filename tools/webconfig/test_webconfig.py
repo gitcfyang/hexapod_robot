@@ -120,6 +120,22 @@ S_VER = [
     "[VER] Hexapod v0.3.0-16-g8f5b04f-dirty",
 ]
 
+# 遥控门回执 (hexapod_hal_pico.c: !RC 命令 + 6s 超时自解锁): 严格两单词,
+# 不带任何后缀 —— server 的正则锚定整行, 加后缀就等于解析不出来
+S_RC = [
+    "[RC] locked",
+    "[RC] unlocked",
+]
+
+# 供电/运行状态 (hexapod_core.c 跳变行 + hexapod_pico.c 每 2s 摘要) ——
+# 控制页「供电」徽标的数据源, 两条路都写同一个状态键
+S_RUN = [
+    "Robot ON (servo power enabled)",
+    "Robot OFF (servo power cut)",
+    "[RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40",
+    "[IDLE] Send !O to arm, !F/!B/!L/!R to move",
+]
+
 # 外设状态 (hexapod_hal_pico.c: periph_status_print / !PERIPH) —— 一行一节,
 # 节名是 server.py 的白名单契约。轮询线程每 2 秒问一次。
 S_PER = [
@@ -188,6 +204,10 @@ PARAMS_C = os.path.join(ROOT, "pico", "Src", "hexapod_params.c")
 CONFIG_H = os.path.join(ROOT, "pico", "Inc", "hexapod_config.h")
 STORE_H = os.path.join(ROOT, "pico", "Inc", "hexapod_store.h")
 STORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_store.c")
+CORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_core.c")
+I2C_C = os.path.join(ROOT, "pico", "Src", "hexapod_i2c_protocol.c")
+HAL_C = os.path.join(ROOT, "pico", "Src", "hexapod_hal_pico.c")
+PICO_C = os.path.join(ROOT, "pico", "hexapod_pico.c")
 INDEX_HTML = os.path.join(HERE, "index.html")
 
 RE_TABLE_ROW = re.compile(
@@ -243,6 +263,32 @@ def test_firmware_contract():
     missing = [f for _, f, _ in rows if f"g_params.{f}" not in cfg]
     check("每个参数都有 config.h 宏指向它 (否则改了没人读)",
           not missing, "缺: " + ", ".join(missing))
+
+    # ---- 状态行契约 ----
+    # 解析样本 ([1]) 是从固件 printf 抄来的; 这里反过来钉住固件那几行。固件改了
+    # 文案而样本没跟上时没有任何报错, 只是页面上的徽标永远停在"—"。
+    hal = open(HAL_C, encoding="utf-8").read()
+    core = open(CORE_C, encoding="utf-8").read()
+    pico = open(PICO_C, encoding="utf-8").read()
+
+    check("固件遥控门回执是严格两单词 (server 正则锚定整行, 加后缀就认不出)",
+          '"[RC] %s\\r\\n"' in hal and '"locked" : "unlocked"' in hal)
+    # 供电状态有两条独立来源: !O 的回显 (hal) 与状态跳变行 (core) —— 网页两个都收
+    check("固件 !O 回显能被供电正则认出来",
+          '"Robot %s\\r\\n"' in hal and '"ON" : "OFF"' in hal
+          and wc.RE_ROBOT_PWR.match("Robot ON") is not None)
+    check("固件状态跳变行 (带后缀) 同样被认出来",
+          '"Robot ON (servo power enabled)\\r\\n"' in core
+          and wc.RE_ROBOT_PWR.match("Robot ON (servo power enabled)") is not None)
+    check("固件每 2s 状态摘要 [RUN]/[IDLE] 与样本一致",
+          "[RUN] Travel X:%d Y:%d Z:%d Gait:%d Lift:%d" in pico
+          and "[IDLE] " in pico
+          and wc.RE_RUN_STATE.match(S_RUN[2]) is not None
+          and wc.RE_RUN_STATE.match(S_RUN[3]) is not None)
+    # 外设行: 节名是 server 的白名单, 对不上就整行丢掉 (外设页少一行, 无报错)
+    check("固件 !PERIPH 的 pwmperiod 行节名在 server 白名单里",
+          "[PER] pwmperiod: l=%u r=%u" in hal
+          and wc.RE_PER.match("[PER] pwmperiod: l=9500 r=9500") is not None)
 
     # 保存按钮的基线靠这句固件回显重建 (网页认回显而不是「点了按钮」, 手敲 !CFGW
     # 和被固件拒绝的情况才都能正确)。改文案而不同步前端 → 保存后按钮一直亮着。
@@ -497,6 +543,36 @@ def test_parser():
               ("[TCP] bridge connected. Type commands, e.g. !A",
                "[TCP] 客户端接入 127.0.0.1:1234 (共 1)")))
 
+    # 遥控门 ([RC]): 控制页「遥控门」徽标的数据源。格式契约 = 严格两单词
+    t = wc.Telemetry()
+    r = wc.parse_line(t, S_RC[0])
+    check("[RC] 锁定行 → rc 帧 locked", r is not None and r[0] == "rc"
+          and r[1] == {"locked": True}, str(r))
+    r = wc.parse_line(t, S_RC[1])
+    check("[RC] 解锁行 → 同一状态键覆盖", r is not None and r[1] == {"locked": False}, str(r))
+    check("[RC] 带后缀的行不认 (固件只回两单词)",
+          wc.parse_line(t, "[RC] locked (timeout)") is None)
+
+    # 供电状态: 跳变行 (Robot ON/OFF) 与 2s 摘要 ([RUN]/[IDLE]) 写同一个键 ——
+    # 点 !O 立即回, 没点按钮时靠摘要兜底
+    t = wc.Telemetry()
+    for line, want in ((S_RUN[0], True), (S_RUN[1], False),
+                       (S_RUN[2], True), (S_RUN[3], False)):
+        r = wc.parse_line(t, line)
+        check(f"供电状态: {line[:26]}… → on={want}",
+              r is not None and r[0] == "run" and r[1].get("on") == want, str(r))
+    # [RUN] 行还带行程/步态/抬腿 (控制页的「固件回报」), 别把 X/Y/Z 解析成别的
+    r = wc.parse_line(t, S_RUN[2])
+    check("[RUN] 行带出行程/步态/抬腿",
+          r is not None and {k: r[1].get(k) for k in ("x", "y", "z", "gait", "lift")}
+          == {"x": 60, "y": 0, "z": 0, "gait": 0, "lift": 40}, str(r))
+    check("[IDLE] 行只有供电状态 (不去猜行程)",
+          wc.parse_line(wc.Telemetry(), S_RUN[3])[1] == {"on": False}, str(r))
+    # 快照是合并的: 行程字段进了 run 之后不会被后面的 Robot ON/OFF 行冲掉 ——
+    # 前端靠这一点常显"机器现在在怎么走"
+    check("行程字段在后续状态行里保留",
+          wc.parse_line(t, "Robot ON")[1].get("x") == 60, str(r))
+
     check("未知行不产生事件 (原样进日志)", wc.parse_line(t, "some random debug line") is None)
 
 
@@ -579,10 +655,21 @@ REPLAY = {"!BATT": S_BATT, "!I2C": S_I2C, "!I2C q": S_I2C_Q,
           "!PER0": ["[PER] Board 0 (0x40) period=9500 us (~105 Hz), coxa re-applied"],
           "!PER1": ["[PER] Board 1 (0x41) period=9500 us (~105 Hz), coxa re-applied"]}
 
+# 假固件里会被命令改掉的状态 (真固件里在 control_state 上)
+FAKE_ROBOT = {"locked": False, "on": False}
+
 
 def fake_response(cmd):
     if cmd.startswith("!CFG"):          # !CFG / !CFGR / !CFGW
         return fake_cfg(cmd)
+    # 两个"有状态"的命令: 应答取决于之前收到过什么, 否则"锁没锁上/供没供电"
+    # 在测试里看不出区别 (回放假固件只做回声时最容易漏掉的一类)
+    if cmd == "!RC" or cmd.startswith("!RC "):      # 无参 = 锁, 有参 = 按参数
+        FAKE_ROBOT["locked"] = (cmd != "!RC 1")
+        return ["[RC] locked" if FAKE_ROBOT["locked"] else "[RC] unlocked"]
+    if cmd == "!O" or cmd.startswith("!O "):        # 无参 = 切换, 有参 = 置位
+        FAKE_ROBOT["on"] = (not FAKE_ROBOT["on"]) if cmd == "!O" else (cmd == "!O 1")
+        return ["Robot ON" if FAKE_ROBOT["on"] else "Robot OFF"]
     # 长的命令头先试: 否则 "!I2C q" 会被 "!I2C" 这条前缀吃掉, 回放出全扫描版本
     for key in sorted(REPLAY, key=len, reverse=True):
         if cmd == key or cmd.startswith(key + " "):
@@ -605,6 +692,7 @@ def replay_robot(pty):
     os.set_blocking(fd, False)
     buf = b""
     last_push = 0.0
+    last_run_push = 0.0
     while True:
         try:
             data = os.read(fd, 4096)
@@ -633,6 +721,16 @@ def replay_robot(pty):
                     os.write(fd, line.encode() + b"\r\n")
                 except OSError:
                     pass
+        # 状态摘要每秒一遍 (真机 2s, 这里加密让它稳定落进测试窗口): 供电状态
+        # 除了 !O 的回声之外还有这条独立来源, 两条路都得能解析出来
+        if now - last_run_push >= 1.0:
+            last_run_push = now
+            line = ("[RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40" if FAKE_ROBOT["on"]
+                    else "[IDLE] Send !O to arm, !F/!B/!L/!R to move")
+            try:
+                os.write(fd, line.encode() + b"\r\n")
+            except OSError:
+                pass
         time.sleep(0.02)
 
 
@@ -834,6 +932,7 @@ def test_param_e2e(sse):
 #
 # 第二套实例: 连接门要测的是"轮询有没有在发", 所以这组必须开着轮询,
 # 不能和主用例的 --no-poll 挤在一起。间隔调到 0.5s 让判定快而稳定。
+# 遥控门 (!RC) 也挂在这组: 它的心跳是同一个轮询线程发的, 间隔同样调快。
 
 GATE_POLL_IV = 0.5
 
@@ -877,8 +976,13 @@ def gate_batt_count(sse, seconds, skip=0.0):
     return sum(1 for e in tail if e.get("t") == "batt"), evs + tail
 
 
+def locked_frames(evs):
+    """只挑出"门是锁的"那些 rc 帧 (解锁回执不是心跳)"""
+    return [e for e in evs if e.get("t") == "rc" and e.get("d", {}).get("locked")]
+
+
 def test_connect_gate():
-    print("\n[4] 连接门: 连接前不轮询 / 连接后轮询 / 掉线自动回开始页")
+    print("\n[4] 连接门: 连接前不轮询 / 连接后轮询 / 遥控门锁定与心跳 / 掉线回开始页")
 
     for args, log, cwd in [
         (["socat", "-d", "-d", f"pty,raw,echo=0,link={PTY_A2}",
@@ -890,7 +994,8 @@ def test_connect_gate():
           "--bridge-port", str(BRIDGE_PORT2),
           "--batt-interval", str(GATE_POLL_IV), "--imu-interval", str(GATE_POLL_IV),
           "--servo-interval", str(GATE_POLL_IV), "--i2c-interval", str(GATE_POLL_IV),
-          "--periph-interval", str(GATE_POLL_IV)], "/tmp/wc_server2.log", HERE),
+          "--periph-interval", str(GATE_POLL_IV),
+          "--rc-interval", str(GATE_POLL_IV)], "/tmp/wc_server2.log", HERE),
     ]:
         spawn(args, log, cwd)
 
@@ -917,10 +1022,12 @@ def test_connect_gate():
           and hello.get("connected") is False, str(hello))
 
     # ---- 连接之前: 一个轮询命令都不该发 ----
-    n, _ = gate_batt_count(sse, 2.5)
+    n, evs0 = gate_batt_count(sse, 2.5)
     check("连接前不轮询 (开始页不打扰串口)", n == 0, f"{n} 个 batt 帧")
+    check("连接前不碰遥控门 (站在开始页时遥控器照常能开)",
+          not [e for e in evs0 if e.get("t") == "rc"], str(evs0[:3]))
 
-    # ---- 点连接 ----
+    # ---- 点连接: 不带 body = 没勾「调试时允许遥控器控制」 ----
     r = json.loads(http_post("/connect", "", HTTP_PORT2))
     check("POST /connect 成功", r.get("ok") is True, str(r))
     n, evs = gate_batt_count(sse, 3.0)
@@ -928,6 +1035,15 @@ def test_connect_gate():
     check("连接事件推给所有浏览器 (多标签页一致)",
           any(e.get("t") == "conn" and e.get("on") is True for e in evs),
           str([e.get("t") for e in evs][:8]))
+
+    # ---- 遥控门: 默认锁上, 靠心跳续租 (固件 6s 收不到就自己解锁) ----
+    rc = [e for e in evs if e.get("t") == "rc"]
+    locks = locked_frames(rc)
+    check("连接后锁上遥控门 (rc 帧 locked=True)", locks, str(rc[:3]))
+    check("锁定期间持续重发 !RC 0 (心跳, 3s 内 ≥3 条)",
+          len(locks) >= 3, f"{len(locks)} 条锁定帧")
+    check("遥控门状态推给浏览器 (控制页徽标的数据源)",
+          all(e.get("d", {}).get("locked") is not None for e in rc), str(rc[:3]))
 
     # ---- 断开: 回开始页, 轮询停 ----
     r = json.loads(http_post("/disconnect", "", HTTP_PORT2))
@@ -938,12 +1054,26 @@ def test_connect_gate():
     check("断开事件推给所有浏览器",
           any(e.get("t") == "conn" and e.get("on") is False for e in evs),
           str([e.get("t") for e in evs][:8]))
+    # 遥控门要交还: 先看最后一条 rc 帧是不是"放开", 再看放开之后有没有被锁回去
+    # (在途的 !RC 0 可能比 !RC 1 早到, 但绝不会晚到 —— 两者同锁互斥)
+    rc = [e for e in evs if e.get("t") == "rc"]
+    unlock = max((i for i, f in enumerate(rc) if not f["d"].get("locked")), default=None)
+    check("断开连接放开遥控门 (!RC 1 → rc 帧 unlocked)", unlock is not None,
+          str(rc[-3:]))
+    check("放开之后不再被锁回去 (心跳停了)",
+          unlock is not None and not locked_frames(rc[unlock + 1:]),
+          str(rc[unlock:][:3]))
 
     # 断开只是不连了, 设备还在线 —— 可以再连回来
-    r = json.loads(http_post("/connect", "", HTTP_PORT2))
+    r = json.loads(http_post("/connect", json.dumps({"radio": True}), HTTP_PORT2))
     check("断开后可再次连接 (设备仍在线)", r.get("ok") is True, str(r))
-    n, _ = gate_batt_count(sse, 3.0)
+    n, evs = gate_batt_count(sse, 3.0)
     check("重新连接后轮询恢复", n > 0, f"{n} 个 batt 帧")
+    # 勾了「调试时允许遥控器控制」: 只回一条解锁 (固件可能上一轮还锁着), 没有心跳
+    rc = [e for e in evs if e.get("t") == "rc"]
+    check("radio=true 时不锁遥控门 (只有一条解锁回执)",
+          any(not f["d"].get("locked") for f in rc) and not locked_frames(rc),
+          str(rc[:3]))
 
     # ---- 拔线: 设备消失 → 连接态作废, 浏览器自动回开始页 ----
     socat2 = procs[-4]                      # 本组第一个 spawn 的是 socat
@@ -974,10 +1104,13 @@ def test_connect_gate():
     check("插回后连接态仍为断开", st is not None and st.get("connected") is False,
           str(st.get("connected") if st else None))
 
-    r = json.loads(http_post("/connect", "", HTTP_PORT2))
+    r = json.loads(http_post("/connect", "not json at all", HTTP_PORT2))
     check("再次连接成功", r.get("ok") is True, str(r))
-    n, _ = gate_batt_count(sse, 3.0)
+    n, evs = gate_batt_count(sse, 3.0)
     check("再连后轮询恢复", n > 0, f"{n} 个 batt 帧")
+    # body 解析不出来时按"没勾开关"处理 —— 宁可锁住也不能让遥控器误接管
+    check("连接 body 不是 JSON 时按默认锁定",
+          locked_frames(evs), str([e.get("t") for e in evs][:8]))
     sse.close()
 
     # 最后一个浏览器走了: 连接态作废 (否则重新打开页面时"没人连却在轮询")

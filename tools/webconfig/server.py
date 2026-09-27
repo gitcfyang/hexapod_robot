@@ -145,6 +145,22 @@ RE_VER = re.compile(r"^\[VER\] (.*)$")
 #   [TCP] dev off                设备不在
 RE_DEV = re.compile(r"^\[TCP\] dev (on|off|busy)(?: (\S+))?$")
 
+# 机器人供电/运行状态 (控制页的「供电」徽标):
+#   Robot ON (servo power enabled) / Robot OFF (servo power cut)
+#     —— 供电状态机在跳变时打印 (点 !O 立即回)
+#   [RUN] Travel X:.. / [IDLE] ...
+#     —— 主循环每 2 秒的状态摘要 (没点按钮时的兜底来源)
+RE_ROBOT_PWR = re.compile(r"^Robot (ON|OFF)\b")
+RE_RUN_STATE = re.compile(r"^\[(RUN|IDLE)\]")
+# [RUN] 那行还带行程/步态/抬腿 —— 控制页「固件回报」就靠它回读:
+#   [RUN] Travel X:60 Y:0 Z:0 Gait:0 Lift:40
+RE_RUN_TRAVEL = re.compile(r"X:(-?\d+) Y:(-?\d+) Z:(-?\d+) Gait:(\d+) Lift:(\d+)")
+
+# 遥控门 (调试页锁定遥控输入):
+#   [RC] locked / [RC] unlocked —— 固件 !RC 的回执, 也是 6s 超时自解锁的通知。
+#   格式严格两单词 (server 只认这一种, 见 hal_pico.c), 不带任何后缀。
+RE_RC = re.compile(r"^\[RC\] (locked|unlocked)$")
+
 
 class Telemetry:
     """各子系统的最新状态。每次解析更新后整体推给前端 (前端只渲染最后一份)。"""
@@ -160,6 +176,8 @@ class Telemetry:
             "per": {},
             "params": {"list": {}, "count": 0, "changed": 0},
             "ver": {},
+            "rc": {},          # 遥控门: {"locked": bool}
+            "run": {},         # 供电/运行: {"on": bool, x/y/z/gait/lift (仅 [RUN] 行带)}
         }
 
     def update(self, key, fields):
@@ -215,6 +233,26 @@ def parse_line(telem, line):
     m = RE_VER.match(line)
     if m:
         return "ver", telem.update("ver", {"text": m.group(1)})
+
+    m = RE_RC.match(line)
+    if m:
+        return "rc", telem.update("rc", {"locked": m.group(1) == "locked"})
+
+    m = RE_ROBOT_PWR.match(line)
+    if m:
+        return "run", telem.update("run", {"on": m.group(1) == "ON"})
+
+    # [RUN]/[IDLE] 只是"在跑/待机"的另一种说法, 供电状态以 Robot ON/OFF 为准 ——
+    # 但超时自解锁/重启后可能只收到摘要行, 所以两条都写同一个键。
+    # [RUN] 行里还有行程/步态/抬腿 (前端合并显示, 缺字段 = 保留上次的值)
+    m = RE_RUN_STATE.match(line)
+    if m:
+        snap = {"on": m.group(1) == "RUN"}
+        t = RE_RUN_TRAVEL.search(line)
+        if t:
+            snap.update(x=int(t.group(1)), y=int(t.group(2)), z=int(t.group(3)),
+                        gait=int(t.group(4)), lift=int(t.group(5)))
+        return "run", telem.update("run", snap)
 
     m = RE_BATT_RAW.match(line)
     if m:
@@ -483,6 +521,44 @@ _dev = {"up": False, "port": None, "busy": False}
 # 连接后下发; 任一浏览器断开则都回开始页 (简单, 且不会互相打架)。
 _connected = threading.Event()
 
+# ---- 调试期遥控门 (!RC) ----
+# 调试页默认要把遥控器挡在外面 (手柄/接收机照常轮询上报, 但不驱动机器人),
+# 开始页的连接开关决定放不放进来。门是全局单值, 与连接态同理。
+# 锁定靠心跳维持 (!RC 0 每 ~2 秒一条, 见 poller_thread); 固件 6 秒收不到
+# 任何 !RC 就自动解锁 —— server 崩了时遥控器必须能兜底。
+_rc_locked = threading.Event()
+_rc_lock = threading.Lock()      # 让"改状态 + 发 !RC"与心跳互斥, 见 _radio_heartbeat
+
+
+def _radio_apply(locked):
+    """锁/解锁遥控门 —— 全 server 唯一的 !RC 0/1 发送者。
+
+    ⚠️ 只在"桥接在线 + 设备在线"时真发: 设备缺席时 serial_console 会
+    把命令排队, 重插时重放的那条 !RC 会打在新上电的机器人上。
+    """
+    with _rc_lock:
+        if locked:
+            _rc_locked.set()
+        else:
+            _rc_locked.clear()
+        if not (BRIDGE and BRIDGE.connected and dev_state()["up"]):
+            return
+        BRIDGE.send("!RC 0" if locked else "!RC 1")
+
+
+def _radio_heartbeat():
+    """续租: 还锁着就重发 !RC 0
+
+    与 _radio_apply 共用 _rc_lock —— 少了它, 解锁时序里会漏出一条晚了
+    几微秒的 !RC 0 (轮询线程刚判完 is_set 就被解锁线程插队), 机器人又锁上
+    只能等固件 6 秒超时。
+    """
+    with _rc_lock:
+        if not _rc_locked.is_set():
+            return
+        if BRIDGE and BRIDGE.connected and dev_state()["up"]:
+            BRIDGE.send("!RC 0")
+
 
 def dev_state():
     with _dev_lock:
@@ -499,6 +575,7 @@ def set_dev(state, port=None):
     if not up and _connected.is_set():
         # 设备没了: 连接态作废, 轮询立即停 —— 否则命令会被排队, 重插时洪水
         _connected.clear()
+        _radio_apply(False)      # 设备不在了, 遥控门只能由固件 6s 超时兜底
         broadcast({"t": "conn", "on": False, "msg": "设备已断开"})
     return up
 
@@ -601,9 +678,13 @@ def device_info():
     }
 
 
-def handle_connect():
+def handle_connect(body=""):
     """
     开始页点「连接」: 桥接与设备**都在线**才放行, 并拉一次参数表。
+
+    可选 JSON body {"radio": bool} —— 开始页的连接开关, 选"调试时允许遥控器
+    控制"才为 true。默认 (空 body / 解析失败) 锁定遥控: 调试页要能自己开着
+    机器人调, 手上碰一下手柄就乱跑是更坏的结果。
 
     这是 UI 层的门 (开始页在连接前不显示任何参数/命令), 不是权限层 ——
     HTTP 只绑本机, 与 POST /cmd 的信任模型一致 (能开本机端口的人本来就能
@@ -613,7 +694,15 @@ def handle_connect():
         return {"ok": False, "err": "串口桥接未连接 (serial_console.py 没在跑?)"}
     if not dev_state()["up"]:
         return {"ok": False, "err": "机器人未在线"}
+    radio = False
+    raw = (body or "").strip()
+    if raw:
+        try:
+            radio = bool(json.loads(raw).get("radio", False))
+        except (ValueError, AttributeError):
+            radio = False           # 非法 body 当"不放开"处理, 偏安全的一侧
     _connected.set()
+    _radio_apply(not radio)       # 遥控门: 默认锁上, 开关勾了才放行
     BRIDGE.send("!CFG")           # 参数表随连接拉一次, 调试页首屏要用
     broadcast({"t": "conn", "on": True})
     return {"ok": True, **dev_state()}
@@ -622,6 +711,7 @@ def handle_connect():
 def handle_disconnect():
     """调试页点「断开连接」: 停轮询, 回开始页 (设备仍在线, 可再连)"""
     _connected.clear()
+    _radio_apply(False)           # 调试结束: 遥控器交还控制权
     broadcast({"t": "conn", "on": False, "msg": "已断开连接"})
     return {"ok": True}
 
@@ -735,8 +825,10 @@ class Handler(BaseHTTPRequestHandler):
                 _subscribers.discard(q)
                 last = not _subscribers
             if last:
-                # 最后一个浏览器走了: 没有调试页了, 连接态作废 (轮询随之停)
+                # 最后一个浏览器走了: 没有调试页了, 连接态作废 (轮询随之停),
+                # 遥控门也放开 —— 没人看着的时候遥控器必须能接管
                 _connected.clear()
+                _radio_apply(False)
 
     MAX_UPLOAD = 8 * 1024 * 1024
 
@@ -782,7 +874,7 @@ class Handler(BaseHTTPRequestHandler):
                 _poll_paused.clear()
             self._send_json({"ok": True, "paused": _poll_paused.is_set()})
         elif self.path == "/connect":
-            self._send_json(handle_connect())
+            self._send_json(handle_connect(body))
         elif self.path == "/disconnect":
             self._send_json(handle_disconnect())
         else:
@@ -857,7 +949,7 @@ def handle_param(body):
 
 # ==================== 轮询 ====================
 
-def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0):
+def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0, rc_iv=2.0):
     """
     定时下发只读命令喂仪表盘。仅在"有浏览器 + 已连接 + 未暂停 + 桥接在线"时发,
     其余时候完全不打扰串口 (否则会污染同时在用的串口终端)。
@@ -868,16 +960,24 @@ def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0):
     I2C 用 `!I2C q` (仅定向检测) 而非 `!I2C` —— 后者含 128 地址全总线扫描。
     健康总线上两者都是 ~20ms, 但命令处理在固件的 20ms 控制循环内 (= 舵机停更
     时长), 而总线被拉死时每个地址都吃满 5ms 超时, 128 个最坏累计 640ms。
+
+    遥控门心跳 (rc_iv) 不受"暂停轮询"影响: 暂停是"别再问数据了", 而心跳是
+    "调试页还开着"的续租 —— 停了它, 固件 6 秒后就把遥控器放进来。
     """
-    next_batt = next_imu = next_servo = next_i2c = next_periph = 0.0
+    next_batt = next_imu = next_servo = next_i2c = next_periph = next_rc = 0.0
     while True:
         time.sleep(0.1)
         with _subs_lock:
             has_client = bool(_subscribers)
         if (not has_client or not _connected.is_set()
-                or _poll_paused.is_set() or not (BRIDGE and BRIDGE.connected)):
+                or not (BRIDGE and BRIDGE.connected)):
             continue
         now = time.monotonic()
+        if rc_iv > 0 and now >= next_rc:
+            next_rc = now + rc_iv
+            _radio_heartbeat()
+        if _poll_paused.is_set():
+            continue
         if batt_iv > 0 and now >= next_batt:
             BRIDGE.send("!BATT")
             next_batt = now + batt_iv
@@ -917,12 +1017,14 @@ def main():
                     help="!I2C q (I2C 总线) 轮询间隔秒 (0=关)")
     ap.add_argument("--periph-interval", type=float, default=2.0,
                     help="!PERIPH (外设状态) 轮询间隔秒 (0=关)")
+    ap.add_argument("--rc-interval", type=float, default=2.0,
+                    help="遥控门心跳间隔秒 (!RC 0; 固件 6s 收不到就自解锁, 0=关)")
     ap.add_argument("--no-poll", action="store_true", help="完全禁用自动轮询")
     args = ap.parse_args()
 
     if args.no_poll:
         args.batt_interval = args.imu_interval = args.servo_interval = 0
-        args.i2c_interval = args.periph_interval = 0
+        args.i2c_interval = args.periph_interval = args.rc_interval = 0
 
     def on_line(line):
         _stats["lines"] += 1
@@ -935,10 +1037,11 @@ def main():
             broadcast({"t": "bridge", "msg": line})
             return
         parsed = parse_line(TELEM, line)
-        # 参数行/外设行不再进日志面板: 一次 !CFG 就是几十行, 轮询的 !PERIPH 又是
-        # 每 2 秒 6 行, 都会把日志冲掉。两者在各自的页面上有专门显示。
+        # 被解析出来的行不再当 raw 重发: 它们在自己的页面上有专门显示, 而日志
+        # 面板是给"没人认领"的行用的。参数行一次 !CFG 就是几十行; [CH] 是 5Hz
+        # 推送; !PERIPH 每 2s 6 行; rc 心跳每 ~2s 一条 —— 都会把日志冲掉。
         # (FAIL/WARN 提示行解析不出来, 仍然照常进日志)
-        if not (parsed and parsed[0] in ("params", "per")):
+        if not (parsed and parsed[0] in ("params", "per", "ch", "rc", "run")):
             broadcast({"t": "raw", "line": line})
         if parsed:
             key, snap = parsed
@@ -951,6 +1054,7 @@ def main():
             # 连接态与轮询先停 —— 命令只会被排队, 攒着等设备回来重放
             if _connected.is_set():
                 _connected.clear()
+                _radio_apply(False)     # 发不出去 (桥接已断), 靠固件 6s 超时兜底
                 broadcast({"t": "conn", "on": False, "msg": "桥接已断开"})
             return
         with _subs_lock:
@@ -959,6 +1063,9 @@ def main():
             return
         if _connected.is_set():
             BRIDGE.send("!CFG")      # 桥接(重)连后补参数表, 否则断线期间改的看不到
+            if _rc_locked.is_set():
+                # 重连期间固件多半已 6s 超时自解锁, 把门重新锁上
+                _radio_apply(True)
         elif dev_state()["up"]:
             BRIDGE.send("!VER")      # 未连接时只需刷新开始页的版本行
 
@@ -966,7 +1073,8 @@ def main():
     threading.Thread(target=BRIDGE.run, daemon=True, name="bridge").start()
     threading.Thread(target=poller_thread, daemon=True, name="poller",
                      args=(args.batt_interval, args.imu_interval, args.servo_interval,
-                           args.i2c_interval, args.periph_interval)
+                           args.i2c_interval, args.periph_interval,
+                           args.rc_interval)
                      ).start()
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
