@@ -234,14 +234,29 @@ bool store_calib_loaded(void)
     return s_calib_valid;
 }
 
-void store_apply_to_robot(hexapod_t *robot)
+uint8_t store_apply_to_robot(hexapod_t *robot)
 {
-    if (!robot || !s_calib_valid) return;
+    if (!robot || !s_calib_valid) return 0;
 
+    /* 只套用 done_mask 置位的舵机 —— 记录里的偏移是按"该舵机是否校准过"写的,
+     * 没校准过的位是占位值 (g_calib_best 为 0 → 偏移 -900), 无条件套用会把
+     * config.h 里的默认偏移冲成 -90°, 整条腿错位。
+     * 校准到一半就保存 (只调了 3 路) 是完全正常的用法, 记录里本就带着
+     * done_mask 就是为了这个 —— 载入侧过去一直没读它。 */
+    uint8_t applied = 0;
     for (int leg = 0; leg < CNT_LEGS; leg++) {
-        robot->leg_configs[leg].coxa_horn_offset  = s_calib.horn_offsets[leg * 3 + 0];
-        robot->leg_configs[leg].femur_horn_offset = s_calib.horn_offsets[leg * 3 + 1];
-        robot->leg_configs[leg].tibia_horn_offset = s_calib.horn_offsets[leg * 3 + 2];
+        int16_t *dst[3] = {
+            &robot->leg_configs[leg].coxa_horn_offset,
+            &robot->leg_configs[leg].femur_horn_offset,
+            &robot->leg_configs[leg].tibia_horn_offset,
+        };
+        for (int j = 0; j < 3; j++) {
+            uint8_t id = (uint8_t)(leg * 3 + j);
+            if (s_calib.done_mask & (1u << id)) {
+                *dst[j] = s_calib.horn_offsets[id];
+                applied++;
+            }
+        }
     }
 
     /* PWM 周期: 纯 RAM 写入 (PRE_SCALE 与周期值无关), 无 I2C 流量。
@@ -252,6 +267,8 @@ void store_apply_to_robot(hexapod_t *robot)
     for (uint8_t b = 0; b < nb; b++) {
         pca9685_set_pwm_period_us(b, s_calib.pwm_period_us[b]);
     }
+
+    return applied;
 }
 
 bool store_save_calib(bool safe_context)

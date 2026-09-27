@@ -133,9 +133,13 @@ bool store_load(void);
 
 /**
  * @brief 将已加载的校准值写入运行时配置 (舵盘偏移 + PWM 周期)
+ *
+ * 只套用记录里 done_mask 置位的舵机, 未校准的保持 robot_init() 设的
+ * config.h 默认值 —— 校准到一半就保存是正常用法, 不能把没调过的腿冲掉。
  * @param robot 机器人实例 (须已 robot_init)
+ * @return 实际套用的舵机数 (0 = 无有效记录 / 无已校准项)
  */
-void store_apply_to_robot(hexapod_t *robot);
+uint8_t store_apply_to_robot(hexapod_t *robot);
 
 /**
  * @brief 保存当前校准数据到 Flash (!SAVE)

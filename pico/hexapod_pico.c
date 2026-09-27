@@ -257,8 +257,11 @@ int main(void)
     /* 非易失校准: 加载并覆盖运行时配置
      * (舵机供电未开, 此时写入 PWM 周期无实际输出, 时序安全) */
     if (store_load()) {
-        store_apply_to_robot(&g_robot);
-        hal_debug_printf("[STORE] Calibration loaded from flash (offsets + periods)\r\n");
+        /* 返回实际套用的舵机数: 部分校准的记录只覆盖已调过的腿, 打完计数
+         * 一眼能看出"到底吃进去几路", 不用去猜 done_mask */
+        uint8_t n_cal = store_apply_to_robot(&g_robot);
+        hal_debug_printf("[STORE] Calibration loaded from flash (%u/18 servos + periods)\r\n",
+                         (unsigned)n_cal);
     } else {
         hal_debug_printf("[STORE] No valid calibration - using hexapod_config.h defaults\r\n");
     }
