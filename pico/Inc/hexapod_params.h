@@ -38,7 +38,7 @@
  * @brief 全部运行时参数 (RAM 实体, 定义在 hexapod_params.c)
  *
  * 字段名 = 参数表里的名字, 与 hexapod_config.h 的宏一一对应。
- * 十组 (见 param_t.group), 网页每页显示一到多组 (modes 组在「模式」页,
+ * 十一组 (见 param_t.group), 网页每页显示一到多组 (modes 组在「模式」页,
  * 不是滑条而是矩阵界面)。
  */
 typedef struct {
@@ -71,6 +71,33 @@ typedef struct {
     int32_t stance_speed;        /* 姿态过渡速度 ×100/周期 */
     int32_t stance_step_mm;      /* 单腿每周期最大位移 mm */
 
+    /* ---- 几何 (geo) ----
+     * 运动学几何, 全部**上电时**应用 (params_load → robot_init 构造腿部配置);
+     * 运行中改不重算 (coxa_angle/init_pos 被平衡旋转/站姿缩放改写, 重建会打架)。
+     * 按位置 (rear/mid/front) 给"右侧值", 左腿由 config.h 的宏按镜像规则取反;
+     * FOOT_DX 与 BODY_OFFSET_X **不镜像** (左右同值)。 */
+    int32_t leg_coxa_mm;         /* 基节长度 mm */
+    int32_t leg_femur_mm;        /* 股节长度 mm */
+    int32_t leg_tibia_mm;        /* 胫节长度 mm */
+    int32_t init_height_mm;      /* 站立时足端在基节下方深度 mm (INIT_Y) */
+    int32_t femur_servo_zero;    /* 股节舵机零位 0.1° */
+    int32_t tibia_servo_zero;    /* 胫节舵机零位 0.1° */
+    int32_t coxa_angle_rear;     /* 后腿安装角 0.1° (左腿取反) */
+    int32_t coxa_angle_mid;      /* 中腿安装角 0.1° (左腿取反) */
+    int32_t coxa_angle_front;    /* 前腿安装角 0.1° (左腿取反) */
+    int32_t body_offset_x_rear;  /* 后腿基节前后偏移 mm (不镜像) */
+    int32_t body_offset_x_mid;   /* 中腿基节前后偏移 mm (不镜像) */
+    int32_t body_offset_x_front; /* 前腿基节前后偏移 mm (不镜像) */
+    int32_t body_offset_z_rear;  /* 后腿基节左右偏移 mm (左腿取反) */
+    int32_t body_offset_z_mid;   /* 中腿基节左右偏移 mm (左腿取反) */
+    int32_t body_offset_z_front; /* 前腿基节左右偏移 mm (左腿取反) */
+    int32_t foot_dx_rear;        /* 后腿站立足端前后坐标 mm (不镜像) */
+    int32_t foot_dx_mid;         /* 中腿站立足端前后坐标 mm (不镜像) */
+    int32_t foot_dx_front;       /* 前腿站立足端前后坐标 mm (不镜像) */
+    int32_t foot_dz_rear;        /* 后腿站立足端左右坐标 mm (左腿取反) */
+    int32_t foot_dz_mid;         /* 中腿站立足端左右坐标 mm (左腿取反) */
+    int32_t foot_dz_front;       /* 前腿站立足端左右坐标 mm (左腿取反) */
+
     /* ---- 手感 / 死区 (tune, 两协议共用) ---- */
     int32_t deadband;            /* 控制量死区 (-500~+500 域) */
     int32_t ch_deadband;         /* 原始通道死区 (raw 172~1811 域) */
@@ -99,9 +126,10 @@ typedef struct {
     int32_t input_mode;          /* 默认输入源 0=CRSF 1=PS2 */
 
     /* ---- 模式矩阵 (modes) ----
-     * 值 = ch<<3 | bits (ch: 统一通道 id, 31=未分配; bits: 低1/中2/高4),
+     * 值 = ch<<3 | bits | click<<8 (ch: 统一通道 id, 31=未分配; bits: 低1/中2/高4;
+     * click: 1=单击触发 0=按住生效),
      * 打包/解码见 hexapod_input.c, 界面在网页「模式」页。 */
-    int32_t mode_arm;            /* 解锁 (电平语义) */
+    int32_t mode_arm;            /* 解锁 (电平/单击, 见 click 位) */
     int32_t mode_bal;            /* 平衡模式 */
     int32_t mode_g0;             /* 步态: 波纹12步 */
     int32_t mode_g1;             /* 步态: 三角6步 */
@@ -112,8 +140,9 @@ typedef struct {
     int32_t mode_sp;             /* 站立姿态: 正常 */
     int32_t mode_sw;             /* 站立姿态: 宽 */
 
-    /* ---- PS2 组合键 (modes 组) ----
-     * 值 = btn_a | btn_b<<5 (16 = 无); 只对 PS2 帧生效, 详见 config.h。 */
+    /* ---- 组合键 (modes 组) ----
+     * 值 = btn_a | btn_b<<5 | hold<<10 (16 = 无; hold: 1=按住生效 0=单击触发);
+     * PS2 上是真按键, CRSF 上按键 = 通道 CH5~CH16, 详见 config.h。 */
     int32_t combo_arm;           /* 解锁/上锁 */
     int32_t combo_bal;           /* 平衡模式 */
     int32_t combo_gnext;         /* 步态: 下一个 */
@@ -149,7 +178,7 @@ typedef struct {
     int32_t     max;         /* 上限 (含) */
     int32_t     def;         /* 出厂默认 (= config.h 的 *_DEFAULT) */
     const char *unit;        /* 显示单位, 可为空串 */
-    const char *group;       /* 分组: batt/motion/stance/tune/dir/imu/chan/modes/sys/per */
+    const char *group;       /* 分组: batt/motion/stance/geo/tune/dir/imu/chan/modes/sys/per */
 } param_t;
 
 /** @brief 参数表首地址与项数 (只读, 供遍历/网页生成表单用) */

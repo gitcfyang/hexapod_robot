@@ -434,6 +434,7 @@
       <button class="tab active" data-tab="dash">状态</button>
       <button class="tab" data-tab="gait">步态</button>
       <button class="tab" data-tab="stance">姿态</button>
+      <button class="tab" data-tab="geo">几何</button>
       <button class="tab" data-tab="radio">遥控</button>
       <button class="tab" data-tab="modes">模式</button>
       <button class="tab" data-tab="power">电源</button>
@@ -1453,13 +1454,16 @@ const ctrlCustomHTML = `
       </div>
     </div>`;
 
-/* ---------------- 模式页 (矩阵 + PS2 组合键) ----------------
- * 每个模式 = 一个通道 + 激活区间 (低/中/高可多选), 打包成一个参数
- * (ch<<3 | bits) 存进 flash —— 所以整份模式表都能掉电保持。
+/* ---------------- 模式页 (矩阵 + 组合键) ----------------
+ * 每个模式 = 一个通道 + 激活区间 (低/中/高可多选) + 触发方式 (单击/按住),
+ * 打包成一个参数 (ch<<3 | bits | click<<8) 存进 flash —— 整份模式表都能
+ * 掉电保持。组合键同理: btn_a | btn_b<<5 | hold<<10 (勾「单击触发」= hold 0)。
+ * 低 8 位 (mode) / 低 10 位 (combo) 是旧布局, 高位是后加的 —— 旧配置读出来
+ * 就是「按住」/「单击」(与参数化之前的行为一致)。
  *
  * 通道 id 是两协议统一的 (固件 hexapod_input.h): 0~15 = CRSF 的 CH1~CH16,
  * PS2 上 0~3 是摇杆、4~19 是按键 (按下 = 高)。于是同一个模式既能挂遥控
- * 开关, 也能挂手柄按键。
+ * 开关, 也能挂手柄按键; 组合键在遥控器上按键 = 通道 CH5~CH16。
  *
  * 这些参数不生成通用滑条 (PARAM_HIDE), 由下面两张表自己渲染与回写;
  * 值仍在参数表里, 照常参与保存 / 恢复默认 / 未保存计数。 */
@@ -1508,20 +1512,33 @@ const modesCustomHTML = `
       <div class="note" style="margin-top:.4rem">
         <b>勾上哪几档, 通道落在那几档时这个模式生效</b> —— 遥控器两段开关勾「高」,
         三段开关给三个模式各勾一档。通道 0~15 是遥控器的 CH1~CH16; 手柄上前四个
-        是摇杆、后面是按键 (按住 = 高)。解锁是<b>电平</b>语义: 开关停在激活区间里
-        才解锁, 拨走即上锁。「未分配」= 该模式不由矩阵控制 (手柄想用按键切换,
-        配下面的组合键)。
+        是摇杆、后面是按键 (按住 = 高)。<br>
+        最右的<b>「单击触发」勾选框</b>: 勾上 = 进入激活区间的瞬间动作一次
+        (解锁/平衡 = 拨一下翻转, 再拨一下翻回; 步态/站姿 = 进档时选一次);
+        不勾 = <b>按住生效</b> (停在激活区间里一直保持, 拨走即失效, 默认)。
+        两段开关想当解锁按钮用就勾上, 与手柄的单击解锁行为一致。
+        <b>步态/站姿这类多行目标: 只要有任何一行是按住型且正在激活, 单击行就不响应</b>
+        —— 默认 CH6/CH7 三段全勾 (覆盖全部档位) 时单击行永远轮不到, 想用单击
+        先把对应通道的电平行取消。「未分配」= 该模式不由矩阵控制 (手柄想用按键
+        切换, 配下面的组合键)。
       </div>
     </div>
 
     <div class="box wide">
-      <h2>PS2 按键组合键</h2>
+      <h2>按键组合键</h2>
       <div id="cb-rows"></div>
       <div class="note" style="margin-top:.4rem">
         手柄没有开关通道, 一次性动作用按键表达: 左列<b>单击</b>触发一次;
         右列选了键就是<b>按住左键、再点右键</b> (如 × + ↑ 抬腿)。
-        右列「无」= 该动的归上面的矩阵管 (手柄上按住对应键就生效)。
-        组合键只对手柄生效, 遥控器永远走矩阵, 两边互不干扰。
+        右列「无」= 该动的归上面的矩阵管 (手柄上按住对应键就生效)。<br>
+        <b>遥控器同样可用</b>: 按键 = 通道 CH5~CH16, 值拨到高位 (&gt;1192) 算按下,
+        两个开关都拨高就是和弦。某目标在上面的矩阵里<b>有分配的行</b>时, 该目标的
+        组合键让位 (矩阵优先) —— 默认配置下遥控器行为与不加组合键时完全相同;
+        想用组合键驱动某目标, 先把该目标所有矩阵行设为「未分配」。
+        手柄的 △/○/×/□ 没有对应通道, 在遥控器上不会触发。
+        最右的<b>「单击触发」勾选框</b>: 勾上 = 按一下动作一次 (默认);
+        不勾 = <b>按住生效</b> (解锁/平衡按住期间保持, 切步态/抬腿这类按住每
+        0.4 秒重复一次, 长按连续切换)。
       </div>
     </div>
 
@@ -1561,6 +1578,7 @@ function initModesPage() {
         `<label><input type="checkbox" id="md-lo-${key}">低</label>` +
         `<label><input type="checkbox" id="md-md-${key}">中</label>` +
         `<label><input type="checkbox" id="md-hi-${key}">高</label>` +
+        `<label style="margin-left:.8rem"><input type="checkbox" id="md-ck-${key}">单击触发</label>` +
       `</div>`;
     host.appendChild(row);
 
@@ -1569,11 +1587,14 @@ function initModesPage() {
       const bits = ($("md-lo-" + key).checked ? 1 : 0) |
                    ($("md-md-" + key).checked ? 2 : 0) |
                    ($("md-hi-" + key).checked ? 4 : 0);
-      /* 未分配: ch=31 且 bits=0 (固件把 bits=0 也当未分配, 保持一致) */
-      sendSet(pname, ch === MODE_NONE ? (MODE_NONE << 3) : ((ch << 3) | bits));
+      const click = $("md-ck-" + key).checked ? 1 : 0;
+      /* 未分配: ch=31 且 bits=0 (固件把 bits=0 也当未分配, 保持一致);
+       * click 在 bit8, 低 8 位布局不变 —— 旧配置读出来就是 0 (按住) */
+      sendSet(pname, (ch === MODE_NONE ? (MODE_NONE << 3) : ((ch << 3) | bits)) |
+                     (click << 8));
     };
     $("md-sel-" + key).onchange = push;
-    for (const pre of ["md-lo-", "md-md-", "md-hi-"]) $(pre + key).onchange = push;
+    for (const pre of ["md-lo-", "md-md-", "md-hi-", "md-ck-"]) $(pre + key).onchange = push;
   }
 
   let keyOpts = `<option value="${COMBO_NONE}">无</option>`;
@@ -1587,16 +1608,22 @@ function initModesPage() {
     row.innerHTML =
       `<div class="plabel">${label}</div>` +
       `<select id="cb-a-${key}">${keyOpts}</select>` +
-      `<select id="cb-b-${key}">${keyOpts}</select>`;
+      `<select id="cb-b-${key}">${keyOpts}</select>` +
+      `<label style="display:flex;gap:.2rem;align-items:center;font-size:12px;cursor:pointer">` +
+        `<input type="checkbox" id="cb-ck-${key}">单击触发</label>`;
     cbHost.appendChild(row);
+    $("cb-ck-" + key).checked = true;   /* 组合键默认单击; 下一帧回显会按固件值校正 */
 
     const push = () => {
       const a = parseInt($("cb-a-" + key).value, 10);
       const b = parseInt($("cb-b-" + key).value, 10);
-      sendSet(pname, a | (b << 5));
+      /* 勾 = 单击 (默认) → hold 位清 0; 不勾 = 按住生效 → bit10 置 1 */
+      const hold = $("cb-ck-" + key).checked ? 0 : 1;
+      sendSet(pname, a | (b << 5) | (hold << 10));
     };
     $("cb-a-" + key).onchange = push;
     $("cb-b-" + key).onchange = push;
+    $("cb-ck-" + key).onchange = push;
   }
 }
 
@@ -1607,8 +1634,11 @@ function renderModesConfig() {
     const p = curParams[pname];
     if (!p) continue;
     const key = pname.slice(5);
-    const ch = (p.val >> 3) & 0x1F;
-    const bits = p.val & 7;
+    /* 先掩低 8 位再拆 —— click 在 bit8, 不掩会渗进 ch 的高位 (与固件同规则) */
+    const lo = p.val & 0xFF;
+    const ch = (lo >> 3) & 0x1F;
+    const bits = lo & 7;
+    const click = (p.val >> 8) & 1;
     const sel = $("md-sel-" + key);
     if (!sel) continue;
     if (document.activeElement !== sel) sel.value = ch >= CH_OPTIONS.length ? MODE_NONE : ch;
@@ -1616,6 +1646,8 @@ function renderModesConfig() {
       const box = $(pre + key);
       if (box && document.activeElement !== box) box.checked = (bits & mask) !== 0;
     }
+    const ck = $("md-ck-" + key);
+    if (ck && document.activeElement !== ck) ck.checked = click !== 0;
     /* 通道选了但一档都没勾 = 固件当未分配处理, 这里也灰掉免得误会 */
     $("md-" + key).classList.toggle("is-unassigned",
       ch >= CH_OPTIONS.length || bits === 0);
@@ -1626,10 +1658,13 @@ function renderModesConfig() {
     if (!p) continue;
     const key = pname.slice(6);
     const a = p.val & 0x1F, b = (p.val >> 5) & 0x1F;
+    const hold = (p.val >> 10) & 1;
     for (const [id, v] of [["cb-a-" + key, a], ["cb-b-" + key, b]]) {
       const sel = $(id);
       if (sel && document.activeElement !== sel) sel.value = v > 15 ? COMBO_NONE : v;
     }
+    const ck = $("cb-ck-" + key);
+    if (ck && document.activeElement !== ck) ck.checked = hold === 0;
   }
 }
 
@@ -1659,6 +1694,12 @@ const PAGES = [
           "参数之间不校验运动学自洽 (如 lift_max 超过腿长的一半会解算失败)。" },
   { id: "stance", title: "姿态", groups: ["stance"],
     note: "三个姿态档 (窄/正常/宽) 的站姿缩放，以及切换姿态时的过渡速度与单周期最大位移。" },
+  { id: "geo", title: "几何", groups: ["geo"], instant: false,
+    note: "运动学几何: 腿节长度、基节安装角与机身/足端坐标、初始站立高度、" +
+          "股/胫节舵机零位 —— 换了机架或量到新尺寸时改这里, 不用重烧固件。" +
+          "按位置 (后/中/前) 填<b>右侧的值</b>, 左腿自动镜像 (安装角与 Z/DZ 取反; " +
+          "前后坐标 X/DX 左右相同不取反)。" +
+          "<b>本页参数重启后生效</b> (上电时构造腿部配置, 运行中改不会重算)。" },
   { id: "radio", title: "遥控", groups: ["tune", "dir", "chan"],
     custom: `
     <div class="box wide">
@@ -1691,8 +1732,9 @@ const PAGES = [
           "不随通道号走 —— 换通道后若方向反了，翻转「方向取反」里对应那项，而不是调通道号。" +
           "解锁/步态/站姿这些开关不在这里，在「模式」页。" },
   { id: "modes", title: "模式", groups: ["modes"], custom: modesCustomHTML,
-    note: "解锁、平衡、步态、站立姿态这几个开关<b>挂到哪个通道、落在哪几档</b>，" +
-          "以及手柄的一次性动作用哪组按键 —— 遥控器与手柄共用一份表。" +
+    note: "解锁、平衡、步态、站立姿态这几个开关<b>挂到哪个通道、落在哪几档、" +
+          "是按住生效还是单击触发</b>，以及手柄的一次性动作用哪组按键 —— " +
+          "遥控器与手柄共用一份表。" +
           "所有改动都是普通参数：改完即时生效，按「保存到 Flash」掉电保持。" },
   { id: "power", title: "电源", groups: ["batt"],
     note: "电池保护阈值与分压比。<b>分压比必须按实际电阻实测标定</b>，" +
@@ -1726,7 +1768,8 @@ function buildParamPages() {
       `<div class="tab_wrapper">
          <div class="tab_title">${pg.title}</div>
          <div class="note">${pg.note}
-           改完即时生效（无需重启）；要掉电保持需按「保存到 Flash」（机器人须处于锁定状态）。
+           ${pg.instant === false ? "" : "改完即时生效（无需重启）；"}
+           要掉电保持需按「保存到 Flash」（机器人须处于锁定状态）。
            滑条在松开鼠标时下发，数字框回车确认。<b>名称高亮 = 与出厂默认不同。</b></div>
          <div class="content_toolbar">
            <button id="p-reload-${pg.id}" class="regular-button">读取</button>

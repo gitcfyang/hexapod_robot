@@ -220,8 +220,19 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
     for (int i = 0; i < 16; i++) ch[i] = state->channels[i];
     for (int i = 16; i < HEXINP_CH_COUNT; i++) ch[i] = CRSF_CH_VALUE_MID;
 
-    /* 按键掩码恒 0: CRSF 帧只有通道, 组合键只在 PS2 路径上求值 */
-    hexapod_input_apply(HEXINP_PROTO_CRSF, ch, 0, ctrl_state);
+    /* 按键掩码 = CH5~CH16 派生 (按钮下标 i ↔ 通道 4+i): 值 > 1192 算按下,
+     * 阈值与模式矩阵的 HIGH 档一致 —— 开关拨到高位即"按下", 组合键因此
+     * 也能用遥控器开关表达 (两个开关按住 = 和弦)。伪通道 16~19 恒中位,
+     * 所以高 4 位 (△○×□ 对应的下标 12~15) 永远不会置位。
+     * 某目标在矩阵里有分配行时该目标的组合键会被让位, 见 hexapod_input.c。 */
+    uint16_t btns = 0;
+    for (int i = 0; i < 16; i++) {
+        if (ch[HEXINP_CH_BTN_BASE + i] > CRSF_CH_VALUE_MID + 200) {
+            btns |= (uint16_t)(1u << i);
+        }
+    }
+
+    hexapod_input_apply(HEXINP_PROTO_CRSF, ch, btns, ctrl_state);
 }
 
 bool crsf_check_link(const crsf_state_t *state, uint32_t timeout_ms, uint32_t current_ms)

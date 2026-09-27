@@ -5,10 +5,11 @@
  *
  * ★ 两类参数, 改法不同:
  *
- *   1. 硬件/机械常量 (引脚、腿节长度、舵机零位、安装角、舵机 ID 映射)
+ *   1. 硬件/机械常量 (引脚、舵机 ID 映射、舵机软限位、舵盘偏移)
  *      —— 直接改下面的数字。改了要重新编译烧录。
  *
- *   2. 运行时可调参数 (电池阈值、步长、死区、方向取反、功能开关…)
+ *   2. 运行时可调参数 (电池阈值、步长、死区、方向取反、功能开关、
+ *      几何量: 腿节长度/安装角/足端坐标/舵机零位…)
  *      —— 形如 `#define X (g_params.x)`, 实际值存在 RAM 里, 可用
  *          !CFG / !CFGR / !CFGW 串口改, 或在网页 Configurator 里拖滑块。
  *          它们各自的默认值写在同一行的 `X_DEFAULT` 宏里 ——
@@ -16,6 +17,10 @@
  *          详见 hexapod_params.h。
  *
  *   两类都以 `_DEFAULT` 结尾的宏 = 上面第 2 类的"出厂默认值"。
+ *
+ * ★ 几何参数 (geo 组) 只在上电时应用: params_load → robot_init 构造
+ *   腿部配置。运行中改不重算 (平衡旋转/站姿缩放正在改写那些字段),
+ *   改完重启生效 —— 但不必重新烧录。
  */
 
 #ifndef HEXAPOD_CONFIG_H
@@ -65,10 +70,14 @@
  *
  *   机身 ──[Coxa: 水平]──[Femur: 竖直]──[Tibia: 竖直]── 足端
  *          ←─ L_coxa ─→←── L_femur ──→←── L_tibia ──→
- */
-#define LEG_COXA_LENGTH     45
-#define LEG_FEMUR_LENGTH    75
-#define LEG_TIBIA_LENGTH    120
+ *
+ * ★ 运行时可改 (网页「几何」页, 重启生效): 六腿同值, 不镜像。 */
+#define LEG_COXA_LENGTH_DEFAULT     45
+#define LEG_FEMUR_LENGTH_DEFAULT    75
+#define LEG_TIBIA_LENGTH_DEFAULT    120
+#define LEG_COXA_LENGTH     ((uint16_t)(g_params.leg_coxa_mm))
+#define LEG_FEMUR_LENGTH    ((uint16_t)(g_params.leg_femur_mm))
+#define LEG_TIBIA_LENGTH    ((uint16_t)(g_params.leg_tibia_mm))
 
 /* ---- 舵机零位参考 (0.1度单位) ----
  *
@@ -85,9 +94,14 @@
  *               ≈ 58.7° - 12.7° = 46.0°
  *   → FEMUR_SERVO_ZERO = 450 (舵机0°→股节45°, 差1°在horn_offset补)
  *   膝角 = acos((75²+120²-140.5²)/(2×75×120)) ≈ 89.1° → TIBIA_SERVO_ZERO = 900
- */
-#define FEMUR_SERVO_ZERO    450     /* 舵机0° → 股节离垂直45° = 离水平45° */
-#define TIBIA_SERVO_ZERO    900     /* 舵机0° → 膝角90° */
+ *
+ * ★ 运行时可改 (网页「几何」页, 重启生效): 六腿同值 —— 零位在左右取反
+ *   之前应用, 所以一侧一个标量即可, 与安装角不同不镜像。
+ *   改动前是编译期常量, IK 直接读宏 (hexapod_ik.c), 参数化后无需改 IK。 */
+#define FEMUR_SERVO_ZERO_DEFAULT    450
+#define TIBIA_SERVO_ZERO_DEFAULT    900
+#define FEMUR_SERVO_ZERO    (g_params.femur_servo_zero)   /* 舵机0° → 股节离垂直45° = 离水平45° */
+#define TIBIA_SERVO_ZERO    (g_params.tibia_servo_zero)   /* 舵机0° → 膝角90° */
 
 /* ==================== 安全配置 ==================== */
 
@@ -495,19 +509,28 @@
  *         │
  *         └────── X+
  */
-#define BODY_OFFSET_RR_X    -104
-#define BODY_OFFSET_RR_Z    63     /* 右后: Z+ */
-#define BODY_OFFSET_RM_X    0
-#define BODY_OFFSET_RM_Z    79     /* 右中: Z+ (中腿最宽) */
-#define BODY_OFFSET_RF_X    104
-#define BODY_OFFSET_RF_Z    63     /* 右前: Z+ */
+/* ★ 运行时可改 (网页「几何」页, 重启生效): 按位置 (rear/mid/front) 给右侧值。
+ *   Z 左腿取反; X **不镜像** (左右同值 —— 前后偏移与左右无关)。 */
+#define BODY_OFFSET_X_REAR_DEFAULT     -104
+#define BODY_OFFSET_X_MID_DEFAULT      0
+#define BODY_OFFSET_X_FRONT_DEFAULT    104
+#define BODY_OFFSET_Z_REAR_DEFAULT     63
+#define BODY_OFFSET_Z_MID_DEFAULT      79
+#define BODY_OFFSET_Z_FRONT_DEFAULT    63
 
-#define BODY_OFFSET_LR_X    -104
-#define BODY_OFFSET_LR_Z    -63    /* 左后: Z- (镜像) */
-#define BODY_OFFSET_LM_X    0
-#define BODY_OFFSET_LM_Z    -79    /* 左中: Z- (中腿最宽) */
-#define BODY_OFFSET_LF_X    104
-#define BODY_OFFSET_LF_Z    -63    /* 左前: Z- (镜像) */
+#define BODY_OFFSET_RR_X    (g_params.body_offset_x_rear)
+#define BODY_OFFSET_RR_Z    (g_params.body_offset_z_rear)      /* 右后: Z+ */
+#define BODY_OFFSET_RM_X    (g_params.body_offset_x_mid)
+#define BODY_OFFSET_RM_Z    (g_params.body_offset_z_mid)       /* 右中: Z+ (中腿最宽) */
+#define BODY_OFFSET_RF_X    (g_params.body_offset_x_front)
+#define BODY_OFFSET_RF_Z    (g_params.body_offset_z_front)     /* 右前: Z+ */
+
+#define BODY_OFFSET_LR_X    (g_params.body_offset_x_rear)      /* 不镜像 */
+#define BODY_OFFSET_LR_Z    (-(g_params.body_offset_z_rear))   /* 左后: Z- (镜像) */
+#define BODY_OFFSET_LM_X    (g_params.body_offset_x_mid)       /* 不镜像 */
+#define BODY_OFFSET_LM_Z    (-(g_params.body_offset_z_mid))    /* 左中: Z- (中腿最宽) */
+#define BODY_OFFSET_LF_X    (g_params.body_offset_x_front)     /* 不镜像 */
+#define BODY_OFFSET_LF_Z    (-(g_params.body_offset_z_front))  /* 左前: Z- (镜像) */
 
 /* ---- Coxa 舵机安装偏角 (0.1度单位, 900 = 90°) ----
  *
@@ -532,13 +555,19 @@
  *   LR=-135°(后左) LM=-90°(正左) LF=-45°(前左)
  *
  * 这些角度由硬件机械结构决定，不可随意修改。
- * COXA_ANGLE 使 atan4(init_foot) - COXA_ANGLE = 0，即站立时 coxa=0°。 */
-#define COXA_ANGLE_RR       1350    /* 右后: 135° 后方偏右 */
-#define COXA_ANGLE_RM       900     /* 右中:  90° 正右方 */
-#define COXA_ANGLE_RF       450     /* 右前:  45° 前方偏右 */
-#define COXA_ANGLE_LR       -1350   /* 左后: -135° 后方偏左 */
-#define COXA_ANGLE_LM       -900    /* 左中:  -90° 正左方 */
-#define COXA_ANGLE_LF       -450    /* 左前:  -45° 前方偏左 */
+ * COXA_ANGLE 使 atan4(init_foot) - COXA_ANGLE = 0，即站立时 coxa=0°。
+ *
+ * ★ 运行时可改 (网页「几何」页, 重启生效): 按位置给右侧值, 左腿取反。 */
+#define COXA_ANGLE_REAR_DEFAULT     1350
+#define COXA_ANGLE_MID_DEFAULT      900
+#define COXA_ANGLE_FRONT_DEFAULT    450
+
+#define COXA_ANGLE_RR       (g_params.coxa_angle_rear)    /* 右后: 135° 后方偏右 */
+#define COXA_ANGLE_RM       (g_params.coxa_angle_mid)     /* 右中:  90° 正右方 */
+#define COXA_ANGLE_RF       (g_params.coxa_angle_front)   /* 右前:  45° 前方偏右 */
+#define COXA_ANGLE_LR       (-(g_params.coxa_angle_rear))   /* 左后: -135° 后方偏左 */
+#define COXA_ANGLE_LM       (-(g_params.coxa_angle_mid))    /* 左中:  -90° 正左方 */
+#define COXA_ANGLE_LF       (-(g_params.coxa_angle_front))  /* 左前:  -45° 前方偏左 */
 
 /* ---- 方向取反 (CRSF 与 PS2 共用一套) ----
  *
@@ -562,12 +591,13 @@
 
 /* ==================== 模式矩阵 (mode_*) ====================
  *
- * 每个模式 = 一个通道 + 允许的档位, 参数值 = ch<<3 | bits:
- *   ch   = 统一通道 id 0~19 (hexapod_input.h), 31 = 未分配 → 该模式永不激活
- *   bits = 档位掩码: 低=1, 中=2, 高=4 (可多选, 值 0 也算未分配)
+ * 每个模式 = 一个通道 + 允许的档位 + 触发方式, 参数值 = ch<<3 | bits | click<<8:
+ *   ch    = 统一通道 id 0~19 (hexapod_input.h), 31 = 未分配 → 该模式永不激活
+ *   bits  = 档位掩码: 低=1, 中=2, 高=4 (可多选, 值 0 也算未分配)
+ *   click = 1 单击触发 (进档沿动作一次) / 0 按住生效 (停在档内保持)
  * 档位判定用原始值: <792 低 / >1192 高 / 其余中。
  *
- * 默认值复刻改动前的开关行为 (括号里是算出来的值):
+ * 默认值复刻改动前的开关行为 (括号里是算出来的值, click 默认 0):
  *   解锁     = CH5 高位   (4<<3|4 = 36)
  *   平衡模式 = CH8 高位   (7<<3|4 = 60)
  *   步态     = CH6 低/中/高 → 三角6 / 三角8 / 波浪24 (41 / 42 / 44)
@@ -575,8 +605,10 @@
  *   未分配: 波纹12步 (g0) 与快速三角4步 (g4) —— 与改动前一致, CH6 三段
  *   够不着这两个步态; 想用就在网页「模式」页给它们勾上通道与区间。
  *
- * 解锁是**电平**语义 (Betaflight 同款): 开关停在激活区间内才保持解锁,
- * 拨走即上锁。改动前是边沿触发 (拨一下解锁, 再拨一下上锁)。
+ * 默认是**电平**语义 (Betaflight 同款): 开关停在激活区间内才保持解锁,
+ * 拨走即上锁。勾上「单击触发」即复刻更早的边沿行为 (拨一下解锁, 再拨上锁),
+ * 于是同一套矩阵既能接 CRSF 开关, 也能接 PS2 按键 (按一下切换)。
+ * 多行目标 (步态/站位) 若同一通道既有电平又有单击行, 电平优先。
  *
  * ★ 全部运行时可改, 网页「模式」页是矩阵式界面; !CFGW 存 flash 掉电保持。
  *   打包/解包在 hexapod_input.c (mode_unpack), 那里定义了权威常量
@@ -605,15 +637,17 @@
 #define MODE_SP      (g_params.mode_sp)
 #define MODE_SW      (g_params.mode_sw)
 
-/* ==================== PS2 组合键 (combo_*) ====================
+/* ==================== 组合键 (combo_*) ====================
  *
  * PS2 有 16 个按键但没有开关通道, 所以「解锁」「平衡」「切步态」这些
- * 一次性动作用组合键表达。参数值 = btn_a | btn_b<<5:
+ * 动作用组合键表达。参数值 = btn_a | btn_b<<5 | hold<<10:
  *   btn_x = 按键下标 0~15 (位序同 hexapod_ps2.h 的 PSB_*), 16 = 无
- *   btn_b = 无  → 单键: 点 btn_a 触发一次 (边沿)
- *   btn_b ≠ 无  → 和弦: 按住 btn_a, 再点 btn_b 触发一次
+ *   btn_b = 无  → 单键: 点 btn_a (或按住, 见 hold) 动作
+ *   btn_b ≠ 无  → 和弦: 按住 btn_a, 再点 btn_b
+ *   hold  = 1 按住生效 (松开即失效, 一次性动作按住每 400ms 重复一次)
+ *           0 单击触发 (上升沿动作一次 —— 默认, 复刻旧行为)
  *
- * 默认值复刻改动前的硬编码按键 (括号里是算出来的值):
+ * 默认值复刻改动前的硬编码按键 (括号里是算出来的值, hold 默认 0):
  *   START 解锁/上锁 (515)     SELECT 平衡模式 (512)
  *   ↑/↓ 步态上/下一个 (516/518)   ←/→ 站立姿态 窄↔宽 (519/517)
  *   × 按住 + ↑/↓ 抬腿高度 ±5 (142/206)     ○ 急停 (525)
@@ -621,11 +655,13 @@
  * 和弦优先: 和弦触发后两个键的沿都被消耗, 不会再触发同键的单键动作
  * (所以 ×+↑ 不会同时切成下一个步态)。
  *
- * 某目标一旦配了组合键, PS2 帧就不再求值该目标的矩阵行 —— 否则默认表下
- * 按 SELECT 会顺带命中 CH7 (矩阵里的步态通道)。把组合键设为「无」(16)
- * 就能把该目标交回模式矩阵 (比如用某个按键当解锁开关, 按住=解锁)。
+ * ★ 两种遥控都生效: PS2 上按键就是按键; CRSF 上按键 = 通道 CH5~CH16
+ *   (值 >1192 算按下, 即开关拨到高位), 于是组合键也能用遥控器开关表达。
+ *   某目标一旦配了组合键, PS2 帧就不再求值该目标的矩阵行; 反过来 CRSF 帧上
+ *   某目标矩阵行已分配时, 该目标的组合键让位 (矩阵优先) —— 默认表下两协议
+ *   行为都不变。把组合键设为「无」(16) 就能把该目标交回模式矩阵。
  *
- * ★ 全部运行时可改, 网页「模式」页; 组合键只对 PS2 生效。
+ * ★ 全部运行时可改, 网页「模式」页。
  *   打包/解包在 hexapod_input.c (combo_unpack), 权威常量 HEXINP_COMBO_NONE。 */
 #define COMBO_NONE           16   /* 参数值里的"无按键" */
 #define COMBO_KEY_START      3
@@ -647,7 +683,7 @@
 #define COMBO_LDN_DEFAULT    (COMBO_KEY_CROSS  | (COMBO_KEY_DOWN << 5))  /* × + ↓ */
 #define COMBO_ESTOP_DEFAULT  (COMBO_KEY_CIRCLE | (COMBO_NONE << 5))   /* ○ */
 
-/* 运行时的值 (唯一真源 = g_params), 只在 PS2 帧上求值, 见 hexapod_input.c */
+/* 运行时的值 (唯一真源 = g_params), 两协议都求值, 见 hexapod_input.c */
 #define COMBO_ARM     (g_params.combo_arm)
 #define COMBO_BAL     (g_params.combo_bal)
 #define COMBO_GNEXT   (g_params.combo_gnext)
@@ -687,30 +723,42 @@
  * 机身高度调节**不在此处**叠加; body_pos.y 由 IK 层施加:
  *   init_pos_y = INIT_Y
  *   ik.c: relative_pos.y = target_foot.y + body_pos.y
- * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±90mm)。 */
-#define INIT_Y               50
+ * BODY_HEIGHT_RANGE_MM 决定油门杆能调多远 (±90mm)。
+ * ★ 运行时可改 (网页「几何」页, 重启生效): 六腿同值。 */
+#define INIT_Y_DEFAULT       50
+#define INIT_Y               (g_params.init_height_mm)
 
 /* 足端在 coxa 基座坐标系中的站立位置
  *
  * 由硬件出射角 (RR=135°, RM=90°, RF=45°) 和腿长计算。
- * 这些值决定 atan4 零点，与 COXA_ANGLE 配套。 */
-#define FOOT_DX_RR     -113     /* RR: 110×cos135° */
-#define FOOT_DZ_RR      113     /* RR: 110×sin135° */
+ * 这些值决定 atan4 零点，与 COXA_ANGLE 配套。
+ *
+ * ★ 运行时可改 (网页「几何」页, 重启生效): 按位置给右侧值。
+ *   DZ 左腿取反; DX **不镜像** (前后坐标与左右无关)。 */
+#define FOOT_DX_REAR_DEFAULT    -113
+#define FOOT_DX_MID_DEFAULT     0
+#define FOOT_DX_FRONT_DEFAULT   113
+#define FOOT_DZ_REAR_DEFAULT    113
+#define FOOT_DZ_MID_DEFAULT     160
+#define FOOT_DZ_FRONT_DEFAULT   113
 
-#define FOOT_DX_RM       0     /* RM: 110×cos90° */
-#define FOOT_DZ_RM     160     /* RM: 110×sin90° */
+#define FOOT_DX_RR     (g_params.foot_dx_rear)     /* RR: 110×cos135° */
+#define FOOT_DZ_RR     (g_params.foot_dz_rear)     /* RR: 110×sin135° */
 
-#define FOOT_DX_RF      113     /* RF: 110×cos45° */
-#define FOOT_DZ_RF      113     /* RF: 110×sin45° */
+#define FOOT_DX_RM     (g_params.foot_dx_mid)      /* RM: 110×cos90° */
+#define FOOT_DZ_RM     (g_params.foot_dz_mid)      /* RM: 110×sin90° */
 
-#define FOOT_DX_LR     -113     /* LR: 镜像 */
-#define FOOT_DZ_LR     -113  
+#define FOOT_DX_RF     (g_params.foot_dx_front)    /* RF: 110×cos45° */
+#define FOOT_DZ_RF     (g_params.foot_dz_front)    /* RF: 110×sin45° */
 
-#define FOOT_DX_LM       0     /* LM: 镜像 */
-#define FOOT_DZ_LM    -160
+#define FOOT_DX_LR     (g_params.foot_dx_rear)     /* LR: 不镜像 */
+#define FOOT_DZ_LR     (-(g_params.foot_dz_rear))
 
-#define FOOT_DX_LF      113     /* LF: 镜像 */
-#define FOOT_DZ_LF     -113
+#define FOOT_DX_LM     (g_params.foot_dx_mid)      /* LM: 不镜像 */
+#define FOOT_DZ_LM     (-(g_params.foot_dz_mid))
+
+#define FOOT_DX_LF     (g_params.foot_dx_front)    /* LF: 不镜像 */
+#define FOOT_DZ_LF     (-(g_params.foot_dz_front))
 
 /* ==================== 舵机参数配置 ==================== */
 

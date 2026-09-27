@@ -216,6 +216,9 @@ INDEX_HTML = os.path.join(HERE, "index.html")
 RE_TABLE_ROW = re.compile(
     r'^\s*\{\s*"([a-z0-9_]+)"\s*,\s*&g_params\.(\w+)[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,\s*"(\w+)"',
     re.M)
+# 同上, 但把 min/max 数字也捕获出来 (名字-max 校验用; 只认同行写数字的行)
+RE_TABLE_ROW_MAX = re.compile(
+    r'^\s*\{\s*"([a-z0-9_]+)"\s*,\s*&g_params\.\w+\s*,\s*(-?\d+)\s*,\s*(-?\d+)\s*,', re.M)
 RE_NAME_LEN = re.compile(r"#define\s+STORE_PARAM_NAME_LEN\s+(\d+)u")
 RE_PARAMS_MAX = re.compile(r"#define\s+STORE_PARAMS_MAX\s+(\d+)u")
 # 前端用来认「刚存盘成功」的那条固件回显 (捕获括号里就是文案本身)
@@ -223,8 +226,8 @@ RE_SAVE_ACK = re.compile(r"if \(/\\\[STORE\\\] ([^/]+)/\.test\(ev\.line\)\)")
 
 # 网页的分页表 (index.html 的 PAGES) 必须覆盖固件里出现的每一个分组,
 # 否则那组参数在网页上无处可去 —— 加参数时忘了配页面就会静默丢一个组。
-WEB_GROUPS = {"batt", "motion", "stance", "tune", "dir", "imu", "chan", "per", "sys",
-              "modes"}
+WEB_GROUPS = {"batt", "motion", "stance", "geo", "tune", "dir", "imu", "chan", "per",
+              "sys", "modes"}
 
 
 def test_firmware_contract():
@@ -267,6 +270,19 @@ def test_firmware_contract():
     missing = [f for _, f, _ in rows if f"g_params.{f}" not in cfg]
     check("每个参数都有 config.h 宏指向它 (否则改了没人读)",
           not missing, "缺: " + ", ".join(missing))
+
+    # 模式/组合键参数的取值范围必须容得下打包的全部位 (click 在 bit8 → 511,
+    # hold 在 bit10 → 2047)。表里的 max 小于页面拼出来的值时, !CFG 会被
+    # 静默夹掉高位 —— 勾了单击, 存下去变成按住, 全程无报错。
+    pk_max = {n: int(hi) for n, _lo, hi in RE_TABLE_ROW_MAX.findall(src)
+              if n.startswith(("mode_", "combo_"))}
+    bad_max = [n for n, hi in pk_max.items()
+               if (n.startswith("mode_") and hi != 511)
+               or (n.startswith("combo_") and hi != 2047)]
+    check("mode_* max=511 / combo_* max=2047 (装得下 click/hold 高位)",
+          len(pk_max) == 19 and not bad_max,
+          "越界: " + ", ".join(f"{n}={pk_max[n]}" for n in bad_max)
+          + (" 漏解析" if len(pk_max) != 19 else ""))
 
     # ---- 状态行契约 ----
     # 解析样本 ([1]) 是从固件 printf 抄来的; 这里反过来钉住固件那几行。固件改了
@@ -321,8 +337,10 @@ FAKE_PARAMS = {
     "imu_roll_sign": [-1,   -1,   1,    -1,   "",   "imu"],
     # 模式页的两个打包参数 (mode_arm = CH5 高, combo_arm = START 单击):
     # 它们在页面上是下拉框 + 勾选框, 但走的仍是同一套 参数帧 / set 通道
-    "mode_arm":      [36,   0,    255,  36,   "",   "modes"],
-    "combo_arm":     [515,  0,    528,  515,  "",   "modes"],
+    "mode_arm":      [36,   0,    511,  36,   "",   "modes"],
+    "combo_arm":     [515,  0,    2047, 515,  "",   "modes"],
+    # 几何页的一个普通滑条参数 (带单位, 只为覆盖页面生成)
+    "leg_coxa_mm":   [45,   20,   80,   45,   "mm", "geo"],
 }
 
 
@@ -1189,7 +1207,8 @@ def main():
 
     # 参数分页: 每页一个 tab 按钮 + 一个卡片宿主。页面本身由 JS 按 PAGES 生成,
     # 所以断言生成器的输入 (PAGES 里的 id) 与 HTML 里的 tab 按钮两边都在。
-    for pid in ("gait", "stance", "radio", "modes", "power", "balance", "per", "ctrl"):
+    for pid in ("gait", "stance", "geo", "radio", "modes", "power", "balance", "per",
+                "ctrl"):
         check(f"页面含参数分页 tab: {pid}",
               f'data-tab="{pid}"' in raw_page and f'id: "{pid}"' in raw_page)
     check("分页的组覆盖固件全部分组",
@@ -1249,18 +1268,31 @@ def main():
               ("combo_arm", "combo_bal", "combo_gnext", "combo_gprev", "combo_snext",
                "combo_sprev", "combo_lup", "combo_ldn", "combo_estop"))
           and 'id="cb-a-${key}"' in raw_page and 'id="cb-b-${key}"' in raw_page)
-    # 打包格式必须与固件 hexapod_input.h 一致: ch<<3|bits 与 btn_a|btn_b<<5
-    check("矩阵值按 ch<<3|bits 打包 (ch=31 未分配)",
+    # 单击触发勾选框: 两张表每行一个 (mode → bit8, combo → 勾=单击=hold 清 0)
+    check("矩阵与组合键每行都有「单击触发」勾选框",
+          'id="md-ck-${key}"' in raw_page and 'id="cb-ck-${key}"' in raw_page
+          and "单击触发" in raw_page)
+    # 打包格式必须与固件 hexapod_input.h 一致: ch<<3|bits|click<<8 / a|b<<5|hold<<10
+    check("矩阵值按 ch<<3|bits|click<<8 打包 (ch=31 未分配, click 在 bit8)",
           "MODE_NONE << 3" in raw_page and "(ch << 3) | bits" in raw_page
-          and "const MODE_NONE = 31" in raw_page)
-    check("组合键按 btn_a|btn_b<<5 打包 (16 = 无)",
-          "a | (b << 5)" in raw_page and "const COMBO_NONE = 16" in raw_page)
+          and "(click << 8)" in raw_page and "const MODE_NONE = 31" in raw_page)
+    check("组合键按 a|b<<5|hold<<10 打包 (16 = 无, 勾单击 = hold 0)",
+          "a | (b << 5)" in raw_page and "(hold << 10)" in raw_page
+          and "const COMBO_NONE = 16" in raw_page)
+    check("回显先掩低 8 位再拆 ch (click 位不渗进通道号)",
+          "p.val & 0xFF" in raw_page and "const lo = p.val & 0xFF" in raw_page)
     check("模式页实时徽标 (解锁/步态/平衡/站姿/高度/输入源)",
           all(f'id="mds-{i}"' in raw_page
               for i in ("arm", "gait", "bal", "st", "hi", "in"))
           and "function renderModes()" in raw_page)
     check("高度积分开关有专门的解释 (与线性模式的区别)",
           "height_integrate:" in raw_page and "回中保持" in raw_page)
+    # 几何页: 21 项走通用滑条 (无自定义控件), 关键是「重启后生效」的说明 ——
+    # 快照模板默认给每页追加「改完即时生效」, geo 页必须显式关掉 (instant: false)
+    check("几何页存在且注明重启后生效",
+          'data-tab="geo"' in raw_page and 'id: "geo"' in raw_page
+          and "重启后生效" in raw_page and 'instant: false' in raw_page
+          and 'pg.instant === false ? "" :' in raw_page)
     check("输入源按钮按固件回报的模式点亮 (不是按点击)",
           'id="ch-btn-crsf"' in raw_page and 'classList.toggle("on"' in raw_page)
 

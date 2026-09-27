@@ -280,10 +280,11 @@ void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state)
     ch[HEXINP_CH_HGT]  = analog ? ps2_stick_to_raw(state->joy_ly, state->center_ly) : mid;
     ch[HEXINP_CH_TURN] = analog ? ps2_stick_to_raw(state->joy_lx, state->center_lx) : mid;
 
-    /* 16 键 → 统一通道 4~19, 位序同 PSB_*; 原始帧里按下 = 0, 这里翻过来 */
+    /* 16 键 → 统一通道 4~19, 位序同 PSB_*; 原始帧里按下 = 0 (低有效),
+     * 统一约定是按下 = 高位, 所以这里翻过来 */
     for (uint8_t i = 0; i < 16; i++) {
         ch[HEXINP_CH_BTN_BASE + i] = (state->buttons & (1u << i))
-            ? CRSF_CH_VALUE_MAX : CRSF_CH_VALUE_MIN;
+            ? CRSF_CH_VALUE_MIN : CRSF_CH_VALUE_MAX;
     }
 
     hexapod_input_apply(HEXINP_PROTO_PS2, ch, (uint16_t)~state->buttons, ctrl_state);

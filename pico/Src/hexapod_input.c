@@ -90,12 +90,14 @@ static int16_t expo_curve(int16_t x, int32_t mix)
 typedef struct {
     uint8_t ch;      /* 统一通道 id; HEXINP_MODE_CH_UNASSIGNED = 未分配 */
     uint8_t bits;    /* 激活档位掩码 (LOW|MID|HIGH); 0 = 未分配 */
+    bool    click;   /* true = 单击触发 (进档沿一次); false = 按住生效 */
 } mode_t;
 
 /** 解包后的组合键 */
 typedef struct {
     uint8_t a;       /* 主键下标 0~15; HEXINP_COMBO_NONE = 无 */
     uint8_t b;       /* 副键下标 0~15; HEXINP_COMBO_NONE = 单键 */
+    bool    hold;    /* true = 按住生效 (一次性动作连发); false = 单击触发 */
 } combo_t;
 
 /* 参数表里的值可能被 !CFG 直接写成任意整数, 越界一律当"未分配"处理,
@@ -103,11 +105,15 @@ typedef struct {
 static mode_t mode_unpack(int32_t v)
 {
     mode_t m;
-    m.ch   = (uint8_t)((v >> 3) & 0x1F);
-    m.bits = (uint8_t)(v & 0x7);
+    /* click 在 bit8, 必须先掩低 8 位再取 ch —— 否则它渗进 ch 的高位 */
+    int32_t lo = v & 0xFF;
+    m.ch    = (uint8_t)((lo >> 3) & 0x1F);
+    m.bits  = (uint8_t)(lo & 0x7);
+    m.click = ((v >> 8) & 1) != 0;
     if (m.ch >= HEXINP_CH_COUNT) {
-        m.ch   = HEXINP_MODE_CH_UNASSIGNED;
-        m.bits = 0;
+        m.ch    = HEXINP_MODE_CH_UNASSIGNED;
+        m.bits  = 0;
+        m.click = false;
     }
     return m;
 }
@@ -115,8 +121,9 @@ static mode_t mode_unpack(int32_t v)
 static combo_t combo_unpack(int32_t v)
 {
     combo_t c;
-    c.a = (uint8_t)(v & 0x1F);
-    c.b = (uint8_t)((v >> 5) & 0x1F);
+    c.a    = (uint8_t)(v & 0x1F);
+    c.b    = (uint8_t)((v >> 5) & 0x1F);
+    c.hold = ((v >> 10) & 1) != 0;
     if (c.a > 15) c.a = HEXINP_COMBO_NONE;
     if (c.b > 15) c.b = HEXINP_COMBO_NONE;
     return c;
@@ -144,6 +151,12 @@ static bool mode_active(mode_t m, const uint16_t *channels)
 
 /* ==================== 跨帧状态 ==================== */
 
+/* 组合键参数表的固定顺序 (与 mode 目标的对应关系写死在下面的效果段) */
+enum {
+    C_ARM = 0, C_BAL, C_GNEXT, C_GPREV, C_SNEXT, C_SPREV, C_LUP, C_LDN, C_ESTOP,
+    C_COUNT
+};
+
 /* 高度积分器: 定点 1/64 —— 满行程 (±500) 每帧累积, 16ms 帧下满量程约 2 秒;
  * 小幅度 = 缓慢变化, 天然滤除手持微抖。实际控制量 = 积分值 / 64。 */
 #define HEIGHT_INTEGRAL_SCALE  64
@@ -151,8 +164,17 @@ static int32_t s_height_integral   = 0;
 static int8_t  s_prev_integrate    = -1;   /* -1 = 尚未求值过 (首次调用不算跳变) */
 static int16_t s_last_height_ctrl  = 0;    /* 上一帧实际使用的高度控制量 */
 
-/* 按键沿状态: 组合键全部走边沿, 按住不重复触发 */
+/* 按键沿状态: 单击组合键靠它算上升沿 (按住型不用, 但统一维护) */
 static uint16_t s_prev_buttons = 0;
+
+/* 模式行"上一帧是否激活", 顺序 = s_mode_all (arm, bal, g0..g4, sn, sp, sw);
+ * 单击行靠它算进入沿。不放在组合键跳过门里 —— 否则改配置后残留假沿。 */
+static uint8_t s_mode_active_prev[10] = { 0 };
+
+/* 组合键按住计时: 只对 hold=1 生效。激活沿起表 (s_combo_held=1),
+ * 条件消失清零 —— 于是中途改配置不会残留"按住"状态。 */
+static uint32_t s_combo_last_ms[C_COUNT] = { 0 };
+static uint8_t  s_combo_held[C_COUNT]    = { 0 };
 
 void hexapod_input_reset(void)
 {
@@ -160,15 +182,14 @@ void hexapod_input_reset(void)
     s_prev_integrate   = -1;
     s_last_height_ctrl = 0;
     s_prev_buttons     = 0;
+    for (int i = 0; i < 10; i++) s_mode_active_prev[i] = 0;
+    for (int i = 0; i < C_COUNT; i++) {
+        s_combo_last_ms[i] = 0;
+        s_combo_held[i]    = 0;
+    }
 }
 
 /* ==================== 组合键 ==================== */
-
-/* 组合键参数表的固定顺序 (与 mode 目标的对应关系写死在下面的效果段) */
-enum {
-    C_ARM = 0, C_BAL, C_GNEXT, C_GPREV, C_SNEXT, C_SPREV, C_LUP, C_LDN, C_ESTOP,
-    C_COUNT
-};
 
 static const int32_t *const s_combo[C_COUNT] = {
     &COMBO_ARM,   &COMBO_BAL,
@@ -186,6 +207,21 @@ static const int32_t *const s_mode_stance[3] = {
     &MODE_SN, &MODE_SP, &MODE_SW,
 };
 static const int8_t s_stance_value[3] = { -1, 0, 1 };
+
+/* 全部模式行, 顺序与 s_mode_active_prev 一致 —— 每帧末尾无条件整表刷新沿状态 */
+static const int32_t *const s_mode_all[10] = {
+    &MODE_ARM, &MODE_BAL,
+    &MODE_G0, &MODE_G1, &MODE_G2, &MODE_G3, &MODE_G4,
+    &MODE_SN, &MODE_SP, &MODE_SW,
+};
+
+/** 进入平衡模式时蜂鸣一声 (单击翻转与按住上升沿共用) */
+static void balance_beep(void)
+{
+    static const uint16_t tone[]  = {1500};
+    static const uint16_t tdur[]  = {80};
+    hal_play_sound(1, tone, tdur);
+}
 
 /** 在"已分配的步态"之间循环 (dir=+1 下一个 / -1 上一个) */
 static void gait_cycle(control_state_t *cs, int8_t dir)
@@ -225,46 +261,102 @@ static void stance_step(control_state_t *cs, int8_t dir)
     cs->stance_mode = s;
 }
 
+/** 组合键的"按住条件": 单键 = 该键按下; 和弦 = 两键都按下 */
+static bool combo_level(uint16_t buttons, uint16_t mask_a, uint16_t mask_b)
+{
+    if (!(buttons & mask_a)) return false;
+    return (mask_b == 0) || ((buttons & mask_b) != 0);
+}
+
 /**
- * @brief 求值全部组合键 (仅 PS2 帧)
+ * @brief 求值全部组合键 (两协议: PS2 真按键 / CRSF 从通道派生的掩码)
+ * @param skip_mask  位 i = 1 → 跳过组合键 i (该目标在 CRSF 上由矩阵行接管)
  *
  * 两遍扫描: 先和弦 (btn_b ≠ 无), 后单键。和弦触发后消耗两个键的沿,
  * 单键不会再跟着触发 —— 否则 CROSS+UP 会同时命中「抬腿 +」和「步态切换」。
+ *
+ * hold=0 (单击, 默认): 上升沿触发一次, 与旧行为一致。
+ * hold=1 (按住): 解锁/平衡按住期间保持; 一次性动作按下即触发, 继续按住
+ * 每 HEXINP_COMBO_HOLD_REPEAT_MS 重复一次 (用 hal 毫秒时间戳计时, 与
+ * loop_ms / 帧率解耦)。s_combo_held 由激活沿置位、条件消失清零, 于是
+ * 中途改配置不会残留"按住"状态。
  */
-static void combos_apply(uint16_t buttons, control_state_t *cs)
+static void combos_apply(uint16_t buttons, control_state_t *cs, uint32_t skip_mask)
 {
+    const uint32_t now = hal_get_tick_ms();
     uint16_t edges = (uint16_t)(buttons & ~s_prev_buttons);   /* 本帧上升沿 */
     uint16_t consumed = 0;
     bool fired[C_COUNT] = { false };
 
+    combo_t  combos[C_COUNT];
+    uint16_t maska[C_COUNT];
+    uint16_t maskb[C_COUNT];
+    uint8_t  prev_held[C_COUNT];
     for (int i = 0; i < C_COUNT; i++) {
-        combo_t c = combo_unpack(*s_combo[i]);
-        if (c.a == HEXINP_COMBO_NONE || c.b == HEXINP_COMBO_NONE) continue;
-        uint16_t mask_a = (uint16_t)(1u << c.a);
-        uint16_t mask_b = (uint16_t)(1u << c.b);
-        if ((buttons & mask_a) && (edges & mask_b)) {   /* 按住 A, 点 B */
+        combos[i]  = combo_unpack(*s_combo[i]);
+        maska[i]   = (combos[i].a != HEXINP_COMBO_NONE) ? (uint16_t)(1u << combos[i].a) : 0;
+        maskb[i]   = (combos[i].b != HEXINP_COMBO_NONE) ? (uint16_t)(1u << combos[i].b) : 0;
+        prev_held[i] = s_combo_held[i];
+    }
+
+    for (int i = 0; i < C_COUNT; i++) {          /* 第一遍: 和弦 */
+        if (maska[i] == 0 || maskb[i] == 0) continue;
+        if (skip_mask & (1u << i)) { s_combo_held[i] = 0; continue; }
+        if ((buttons & maska[i]) && (edges & maskb[i])) {   /* 按住 A, 点 B */
             fired[i] = true;
-            consumed |= (uint16_t)(mask_a | mask_b);
+            consumed |= (uint16_t)(maska[i] | maskb[i]);
+            s_combo_last_ms[i] = now;
+            s_combo_held[i] = 1;
+        } else if (combos[i].hold && (buttons & maska[i]) && (buttons & maskb[i])) {
+            if (s_combo_held[i] &&
+                (uint32_t)(now - s_combo_last_ms[i]) >= HEXINP_COMBO_HOLD_REPEAT_MS) {
+                fired[i] = true;
+                s_combo_last_ms[i] = now;
+            }
+        } else {
+            s_combo_held[i] = 0;
         }
     }
 
-    for (int i = 0; i < C_COUNT; i++) {
-        if (fired[i]) continue;
-        combo_t c = combo_unpack(*s_combo[i]);
-        if (c.a == HEXINP_COMBO_NONE || c.b != HEXINP_COMBO_NONE) continue;
-        uint16_t mask_a = (uint16_t)(1u << c.a);
-        if (edges & mask_a & ~consumed) fired[i] = true;
+    for (int i = 0; i < C_COUNT; i++) {          /* 第二遍: 单键 */
+        if (maska[i] == 0 || maskb[i] != 0) continue;
+        if (skip_mask & (1u << i)) { s_combo_held[i] = 0; continue; }
+        if (edges & maska[i] & ~consumed) {
+            fired[i] = true;
+            s_combo_last_ms[i] = now;
+            s_combo_held[i] = 1;
+        } else if (combos[i].hold && (buttons & maska[i])) {
+            if (s_combo_held[i] &&
+                (uint32_t)(now - s_combo_last_ms[i]) >= HEXINP_COMBO_HOLD_REPEAT_MS) {
+                fired[i] = true;
+                s_combo_last_ms[i] = now;
+            }
+        } else {
+            s_combo_held[i] = 0;
+        }
     }
 
-    /* ---- 效果 ---- */
-    if (fired[C_ARM]) cs->robot_on = !cs->robot_on;
+    /* ---- 效果 ----
+     * hold 组合键被跳过时连电平都不写 —— 该目标这一帧由矩阵行负责。 */
+    if (maska[C_ARM]) {
+        if (combos[C_ARM].hold) {
+            if (!(skip_mask & (1u << C_ARM)))
+                cs->robot_on = combo_level(buttons, maska[C_ARM], maskb[C_ARM]);
+        } else if (fired[C_ARM]) {
+            cs->robot_on = !cs->robot_on;
+        }
+    }
 
-    if (fired[C_BAL]) {
-        cs->balance_mode = !cs->balance_mode;
-        if (cs->balance_mode) {          /* 进入平衡模式: 蜂鸣一声 */
-            static const uint16_t tone[] = {1500};
-            static const uint16_t tdur[] = {80};
-            hal_play_sound(1, tone, tdur);
+    if (maska[C_BAL]) {
+        if (combos[C_BAL].hold) {
+            if (!(skip_mask & (1u << C_BAL))) {
+                bool on = combo_level(buttons, maska[C_BAL], maskb[C_BAL]);
+                cs->balance_mode = on;
+                if (on && !prev_held[C_BAL]) balance_beep();   /* 进入平衡: 蜂鸣一声 */
+            }
+        } else if (fired[C_BAL]) {
+            cs->balance_mode = !cs->balance_mode;
+            if (cs->balance_mode) balance_beep();
         }
     }
 
@@ -283,14 +375,19 @@ static void combos_apply(uint16_t buttons, control_state_t *cs)
     }
 
     /* 急停放在行程/姿态求值之后执行, 否则清掉的量会被本帧的摇杆映射写回来 */
-    if (fired[C_ESTOP]) {
-        cs->robot_on = false;
-        cs->travel_length.x = 0;
-        cs->travel_length.y = 0;
-        cs->travel_length.z = 0;
-        cs->body_rot.x = 0;
-        cs->body_rot.y = 0;
-        cs->body_rot.z = 0;
+    if (maska[C_ESTOP]) {
+        bool estop = fired[C_ESTOP];
+        if (combos[C_ESTOP].hold && !(skip_mask & (1u << C_ESTOP)))
+            estop = combo_level(buttons, maska[C_ESTOP], maskb[C_ESTOP]);
+        if (estop) {
+            cs->robot_on = false;
+            cs->travel_length.x = 0;
+            cs->travel_length.y = 0;
+            cs->travel_length.z = 0;
+            cs->body_rot.x = 0;
+            cs->body_rot.y = 0;
+            cs->body_rot.z = 0;
+        }
     }
 
     s_prev_buttons = buttons;
@@ -311,23 +408,76 @@ void hexapod_input_apply(uint8_t proto, const uint16_t *channels,
     const bool combo_stance_assigned = is_ps2 && ((combo_unpack(COMBO_SNEXT).a != HEXINP_COMBO_NONE) ||
                                                   (combo_unpack(COMBO_SPREV).a != HEXINP_COMBO_NONE));
 
+    /* CRSF 帧的组合键让位表: 某目标矩阵行已分配 → 该目标的组合键跳过
+     * (矩阵优先)。默认 CH5~CH8 都走矩阵, 组合键不抢; 把矩阵行设成
+     * 「未分配」即把该目标交给组合键。PS2 帧方向相反, 由上面的
+     * combo_*_assigned 在矩阵一侧处理。 */
+    uint32_t combo_skip = 0;
+    if (!is_ps2) {
+        if (mode_assigned(mode_unpack(MODE_ARM))) combo_skip |= 1u << C_ARM;
+        if (mode_assigned(mode_unpack(MODE_BAL))) combo_skip |= 1u << C_BAL;
+        for (int i = 0; i < 5; i++) {
+            if (mode_assigned(mode_unpack(*s_mode_gait[i]))) {
+                combo_skip |= (1u << C_GNEXT) | (1u << C_GPREV);
+                break;
+            }
+        }
+        for (int i = 0; i < 3; i++) {
+            if (mode_assigned(mode_unpack(*s_mode_stance[i]))) {
+                combo_skip |= (1u << C_SNEXT) | (1u << C_SPREV);
+                break;
+            }
+        }
+    }
+
     /* ---- ① 模式矩阵 ----
      * 目标已配组合键 (仅 PS2) → 该目标的矩阵行让位, 否则默认表下
-     * PS2 按键会顺带命中矩阵行里的 CRSF 通道号。 */
+     * PS2 按键会顺带命中矩阵行里的 CRSF 通道号。
+     * 行内 click=1 为单击触发: 只在进入激活区间的沿动作一次;
+     * 多行目标 (步态/站位) 电平优先 —— 有任一行按住型激活就不理单击行。 */
     if (!combo_arm_assigned) {
         mode_t m = mode_unpack(MODE_ARM);
-        if (mode_assigned(m)) ctrl_state->robot_on = mode_active(m, channels);
+        if (mode_assigned(m)) {
+            if (m.click) {
+                if (mode_active(m, channels) && !s_mode_active_prev[0])
+                    ctrl_state->robot_on = !ctrl_state->robot_on;
+            } else {
+                ctrl_state->robot_on = mode_active(m, channels);
+            }
+        }
     }
 
     if (!combo_bal_assigned) {
         mode_t m = mode_unpack(MODE_BAL);
-        if (mode_assigned(m)) ctrl_state->balance_mode = mode_active(m, channels);
+        if (mode_assigned(m)) {
+            if (m.click) {
+                if (mode_active(m, channels) && !s_mode_active_prev[1]) {
+                    ctrl_state->balance_mode = !ctrl_state->balance_mode;
+                    if (ctrl_state->balance_mode) balance_beep();
+                }
+            } else {
+                ctrl_state->balance_mode = mode_active(m, channels);
+            }
+        }
     }
 
     if (!combo_gait_assigned) {
-        int8_t want = -1;   /* 表序迭代, 最后一个激活的行生效 */
+        int8_t want = -1;           /* 表序迭代, 最后一个激活的行生效 */
+        bool level_active = false;
         for (int i = 0; i < 5; i++) {
-            if (mode_active(mode_unpack(*s_mode_gait[i]), channels)) want = (int8_t)i;
+            mode_t m = mode_unpack(*s_mode_gait[i]);
+            if (!m.click && mode_active(m, channels)) {
+                want = (int8_t)i;
+                level_active = true;
+            }
+        }
+        if (!level_active) {        /* 无电平行激活时才看单击行 (进档沿选一次) */
+            for (int i = 0; i < 5; i++) {
+                mode_t m = mode_unpack(*s_mode_gait[i]);
+                if (m.click && mode_active(m, channels) && !s_mode_active_prev[2 + i]) {
+                    want = (int8_t)i;
+                }
+            }
         }
         if (want >= 0 && ctrl_state->gait_type != (uint8_t)want) {
             ctrl_state->gait_type = (uint8_t)want;
@@ -338,15 +488,33 @@ void hexapod_input_apply(uint8_t proto, const uint16_t *channels,
     if (!combo_stance_assigned) {
         int8_t want = 0;
         bool found = false;
+        bool level_active = false;
         for (int i = 0; i < 3; i++) {
-            if (mode_active(mode_unpack(*s_mode_stance[i]), channels)) {
+            mode_t m = mode_unpack(*s_mode_stance[i]);
+            if (!m.click && mode_active(m, channels)) {
                 want = s_stance_value[i];
                 found = true;
+                level_active = true;
+            }
+        }
+        if (!level_active) {
+            for (int i = 0; i < 3; i++) {
+                mode_t m = mode_unpack(*s_mode_stance[i]);
+                if (m.click && mode_active(m, channels) && !s_mode_active_prev[7 + i]) {
+                    want = s_stance_value[i];
+                    found = true;
+                }
             }
         }
         if (found && ctrl_state->stance_mode != want) {
             ctrl_state->stance_mode = want;   /* 主循环随后调 hexapod_apply_stance() */
         }
+    }
+
+    /* 沿状态整表刷新: 无条件执行 (不经组合键跳过门) —— 否则改配置后
+     * 矩阵行恢复求值的那一帧会拿旧值算出假沿。 */
+    for (int i = 0; i < 10; i++) {
+        s_mode_active_prev[i] = mode_active(mode_unpack(*s_mode_all[i]), channels) ? 1 : 0;
     }
 
     /* ---- ② 摇杆: 映射 → 死区 → expo → 取反 ---- */
@@ -433,10 +601,8 @@ void hexapod_input_apply(uint8_t proto, const uint16_t *channels,
         }
     }
 
-    /* ---- ⑤ 组合键 (仅 PS2; CRSF 没有按键) ---- */
-    if (is_ps2) {
-        combos_apply(buttons, ctrl_state);
-    }
+    /* ---- ⑤ 组合键 (两协议; CRSF 上该目标有矩阵行时已由 combo_skip 让位) ---- */
+    combos_apply(buttons, ctrl_state, combo_skip);
 
     /* ---- ⑥ 抬腿高度边界钳位 ---- */
     if (ctrl_state->leg_lift_height > LIFT_HEIGHT_MAX_MM)
