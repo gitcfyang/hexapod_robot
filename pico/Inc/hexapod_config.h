@@ -2,12 +2,27 @@
  * @file hexapod_config.h
  * @brief 六足机器人配置文件
  * @note 用户应根据实际机器人参数修改此文件
+ *
+ * ★ 两类参数, 改法不同:
+ *
+ *   1. 硬件/机械常量 (引脚、腿节长度、舵机零位、安装角、舵机 ID 映射)
+ *      —— 直接改下面的数字。改了要重新编译烧录。
+ *
+ *   2. 运行时可调参数 (电池阈值、步长、死区、方向取反、功能开关…)
+ *      —— 形如 `#define X (g_params.x)`, 实际值存在 RAM 里, 可用
+ *          !CFG / !CFGR / !CFGW 串口改, 或在网页 Configurator 里拖滑块。
+ *          它们各自的默认值写在同一行的 `X_DEFAULT` 宏里 ——
+ *          换板/换机架时改那个值即可, 复位后即为新默认。
+ *          详见 hexapod_params.h。
+ *
+ *   两类都以 `_DEFAULT` 结尾的宏 = 上面第 2 类的"出厂默认值"。
  */
 
 #ifndef HEXAPOD_CONFIG_H
 #define HEXAPOD_CONFIG_H
 
 #include "hexapod_types.h"
+#include "hexapod_params.h"   /* 运行时参数实体 g_params (见文件头说明) */
 
 /* ==================== 机械参数配置 ==================== */
 
@@ -73,6 +88,7 @@
  * ⚠️ 新 PCB (2026-08) 已将 ADC 改至 GP28 (绕开旧板损坏的 GP26) +
  *   VBAT 入口 TVS + ADC 输入齐纳钳位, 分压电路待新板实测正常后改回 1 */
 #define BATTERY_CHECK_ENABLED   0   /* ★ 待新 PCB 实测分压电路后启用 */
+#define BATTERY_CHECK_ENABLED_DEFAULT   0   /* ★ 待新 PCB 实测分压电路后启用 */
 
 /* ==================== 电池检测配置 (GP28 ADC2, 2S 18650) ==================== */
 
@@ -89,6 +105,7 @@
 #define ADC_REF_VOLTAGE         3300
 #define ADC_RESOLUTION          4095
 #define BATTERY_DIVIDER_RATIO   8.021f    /* 377/47, 2S 18650 */
+#define BATTERY_DIVIDER_RATIO_DEFAULT   8.134f    /* 标定值 (理论 377/47 = 8.021) */
 
 /* 2S 18650 电压阈值 (mV)
  *   8.4V = 充满 (4.2V/节)
@@ -104,6 +121,12 @@
 
 /* 电压监测间隔 (ms) */
 #define BATTERY_CHECK_INTERVAL_MS   1000
+#define BATTERY_OVERVOLTAGE_MV_DEFAULT  8800
+#define BATTERY_WARNING_MV_DEFAULT      7000
+#define BATTERY_CUTOFF_MV_DEFAULT       6600
+#define BATTERY_RECOVERY_MV_DEFAULT     7300    /* 回升到此值以上才重新接通舵机供电 */
+#define BATTERY_CHECK_INTERVAL_MS_DEFAULT   1000
+#define BATTERY_ABSENT_MV_DEFAULT           3000
 
 /* ==================== IMU 姿态传感器配置 ==================== */
 
@@ -111,6 +134,7 @@
  * 启用后 I2C 总线上必须有 BNO055。
  * 若传感器未检测到，固件会打印警告并继续运行 (无补偿)。 */
 #define IMU_ENABLED             0   
+#define IMU_ENABLED_DEFAULT     0
 
 /* BNO055 I2C 地址 (7-bit)
  *   COM3 接 GND → 0x28 (默认)
@@ -130,6 +154,8 @@
  *   若补偿加剧倾斜 (正反馈) → 取反对应符号 */
 #define IMU_ROLL_SIGN           -1
 #define IMU_PITCH_SIGN          +1
+#define IMU_ROLL_SIGN_DEFAULT   -1
+#define IMU_PITCH_SIGN_DEFAULT  +1
 
 /* ==================== IMU BOOT/INT 引脚 ==================== */
 
@@ -145,6 +171,7 @@
  * 增益 < 10 → 欠补偿 (响应平缓, 适合高速运动)
  * 增益 > 10 → 过补偿 (可能振荡, 需要调参) */
 #define IMU_COMPENSATION_GAIN   10
+#define IMU_COMPENSATION_GAIN_DEFAULT   10
 
 /* ==================== 调试配置 ==================== */
 
@@ -165,6 +192,14 @@
  * 一块板子同时接上 ELRS 和 PS2 接收器后, 无需焊接/插拔即可用 !MODE 切换输入源 */
 #define INPUT_CONTROL_MODE      1   /* ★ 0=CRSF, 1=PS2, 2=USB */
 
+/* 上电默认输入源 (运行时参数 input_mode, 可被 flash 里的记录覆盖)。
+ * !MODE crsf|ps2 会同时写这个参数, 所以 !CFGW 后重启跟随上次的选择。
+ * USB 构建 (INPUT_CONTROL_MODE==2) 没有遥控器, 参数保留但初始化时不读。 */
+#if INPUT_CONTROL_MODE == 1
+#define INPUT_MODE_DEFAULT      1   /* 双模构建默认 PS2, 与改动前一致 */
+#else
+#define INPUT_MODE_DEFAULT      0   /* CRSF/USB 构建 */
+#endif
 /* 无舵机调试模式：PRODUCTION=0 要求舵机硬件就绪才启动 */
 #define HEADLESS_MODE           0   /* ★ PS2 测试: 舵机/I2C 已死仍进入主循环 (测完改回 0) */
 
@@ -225,20 +260,33 @@
 #define CRSF_CHANNEL_BALANCE      7   // CH8: 平衡模式 (二段开关)
 
 /* ---- 站立姿态缩放 (CH7) ---- */
+#define CRSF_CHANNEL_FORWARD_DEFAULT      1   // CH2: 正常=前进/后退, 平衡=俯仰
+#define CRSF_CHANNEL_STRAFE_DEFAULT       0   // CH1: 正常=左右平移, 平衡=横滚
+#define CRSF_CHANNEL_TURN_DEFAULT         3   // CH4: 正常=原地旋转, 平衡=偏航
+#define CRSF_CHANNEL_HEIGHT_DEFAULT       2   // CH3: 正常=机身高度, 平衡=机身高度
+#define CRSF_CHANNEL_ARM_DEFAULT          4   // CH5: 解锁 (二段开关)
+#define CRSF_CHANNEL_GAIT_DEFAULT         5   // CH6: 步态 (三段开关)
+#define CRSF_CHANNEL_SPEED_DEFAULT        6   // CH7: 站立姿态 (三段: -1=窄80%, 0=正常100%, +1=宽120%)
+#define CRSF_CHANNEL_BALANCE_DEFAULT      7   // CH8: 平衡模式 (二段开关)
 #define STANCE_DEFAULT_MODE       -1   /* 上电默认: -1=窄, 0=正常, +1=宽 */
-#define STANCE_SCALE_NARROW      80   /* 窄姿态: 80% (足端靠近机身) */
-#define STANCE_SCALE_NORMAL     100   /* 正常姿态: 100% */
-#define STANCE_SCALE_WIDE       120   /* 宽姿态: 120% (足端远离机身) */
+#define STANCE_SCALE_NARROW_DEFAULT      80   /* 窄姿态: 80% (足端靠近机身) */
+#define STANCE_SCALE_NORMAL_DEFAULT     100   /* 正常姿态: 100% */
+#define STANCE_SCALE_WIDE_DEFAULT       120   /* 宽姿态: 120% (足端远离机身) */
+#define STANCE_SCALE_NARROW      (g_params.stance_narrow)
+#define STANCE_SCALE_NORMAL      (g_params.stance_normal)
+#define STANCE_SCALE_WIDE        (g_params.stance_wide)
 
 /* 姿态切换过渡速度 (×100 单位/控制周期, 10ms)
  * 值越小越平滑。30×100/10ms → 极值切换需 ~1.3s，
  * 确保每条腿在步态抬腿期间逐步挪到新位置，避免擦地。 */
-#define STANCE_TRANSITION_SPEED  30
+#define STANCE_TRANSITION_SPEED_DEFAULT  30
+#define STANCE_TRANSITION_SPEED          (g_params.stance_speed)
 
 /* 单腿每周期最大位移 (mm)，防止着地后首次抬起时骤跳。
  * 设太小 → 切换慢；设太大 → 空中骤跳。
  * 2mm/周期 = 200mm/s，足够跟踪 STANCE_TRANSITION_SPEED=30 的节奏。 */
-#define STANCE_MAX_STEP_MM        2
+#define STANCE_MAX_STEP_MM_DEFAULT        2
+#define STANCE_MAX_STEP_MM                (g_params.stance_step_mm)
 
 /* ---- CRSF 死区参数 ----
  *
@@ -255,9 +303,13 @@
  *     默认 ±15/500 = ±3%，过滤映射后的微小残余。
  *
  *   两级串联效果：摇杆需偏离中位足够远才会产生运动，
- *   消除摇杆抖动、中位漂移和机械虚位引起的误动作。 */
-#define CRSF_CH_VALUE_DEADBAND    40     /* 原始通道死区 (CRSF units)，±40 约 ±2.4% */
-#define CONTROL_DEADBAND          5     /* 控制量死区 (-500~+500)，±15 约 ±3% */
+ *   消除摇杆抖动、中位漂移和机械虚位引起的误动作。
+ *
+ * ★ 两个死区运行时可改 (!CFG crsf_deadband / deadband) */
+#define CRSF_CH_VALUE_DEADBAND_DEFAULT    40   /* 原始通道死区 (CRSF units)，±40 约 ±2.4% */
+#define CONTROL_DEADBAND_DEFAULT          5    /* 控制量死区 (-500~+500)，±15 约 ±3% */
+#define CRSF_CH_VALUE_DEADBAND    (g_params.crsf_deadband)
+#define CONTROL_DEADBAND          (g_params.deadband)
 
 /* 高度控制阈值：油门杆须偏离中位超过此值才开始改变抬腿高度。
  * 因为高度是积分控制（每周期累积），阈值需比运动通道的死区更大。
@@ -268,21 +320,31 @@
  * 摇杆满量程 (±500) 映射到的机身高度偏移。
  * body_pos.y = stick * BODY_HEIGHT_RANGE_MM / 500
  * 正值抬升机身 (腿向下伸展), 负值降低机身 (腿向上收缩) */
-#define BODY_HEIGHT_RANGE_MM      90
+#define BODY_HEIGHT_RANGE_MM_DEFAULT      90
+#define BODY_HEIGHT_RANGE_MM      (g_params.body_h_range_mm)
 
 /* 机身姿态旋转范围 (0.1° 单位)
  * 摇杆满量程 (±500) 映射到的机身旋转角。
  * body_rot = stick * BODY_ROTATION_MAX / 500
  * 400 = 40.0°, 即摇杆推到底时机身倾斜 40° */
-#define BODY_ROTATION_MAX         400
+#define BODY_ROTATION_MAX_DEFAULT         400
+#define BODY_ROTATION_MAX         (g_params.body_rot_max)
 
 /* ---- CRSF 摇杆→控制量 缩放参数 ----
- * 摇杆范围 -500~+500, 映射到实际运动参数 */
-#define TRAVEL_MAX_FORWARD_MM   150     /* 满杆步长 (mm)，约体长1/3 */
-#define TRAVEL_MAX_STRAFE_MM     110     /* 满杆平移步长 (mm) */
-#define TRAVEL_MAX_TURN_MM       70    /* 满杆旋转步长 (mm) */
-#define LIFT_HEIGHT_MIN_MM      5      /* 最低抬腿高度 (mm) */
-#define LIFT_HEIGHT_MAX_MM      60     /* 最高抬腿高度 (mm) */
+ * 摇杆范围 -500~+500, 映射到实际运动参数
+ * ★ 全部运行时可改, 网页「参数 → 运动」页有滑块。
+ *   调步长时注意: 满杆位移超过腿的可达范围会让 IK 解算失败 (腿伸不直),
+ *   表现为该腿抖动或停在原地。改大后先在悬空状态试。 */
+#define TRAVEL_MAX_FORWARD_MM_DEFAULT   150   /* 满杆步长 (mm)，约体长1/3 */
+#define TRAVEL_MAX_STRAFE_MM_DEFAULT    110   /* 满杆平移步长 (mm) */
+#define TRAVEL_MAX_TURN_MM_DEFAULT       70   /* 满杆旋转步长 (mm) */
+#define LIFT_HEIGHT_MIN_MM_DEFAULT        5   /* 最低抬腿高度 (mm) */
+#define LIFT_HEIGHT_MAX_MM_DEFAULT       60   /* 最高抬腿高度 (mm) */
+#define TRAVEL_MAX_FORWARD_MM    (g_params.travel_fwd_mm)
+#define TRAVEL_MAX_STRAFE_MM     (g_params.travel_str_mm)
+#define TRAVEL_MAX_TURN_MM       (g_params.travel_turn_mm)
+#define LIFT_HEIGHT_MIN_MM       (g_params.lift_min_mm)
+#define LIFT_HEIGHT_MAX_MM       (g_params.lift_max_mm)
 
 /* ---- 仿生连续变速 ----
  *
@@ -298,9 +360,13 @@
  * 注意: 步长 (travel_length) 也随摇杆线性变化。
  *       低摇杆 = 短步长 + 低频率 → 精细缓动
  *       高摇杆 = 大步长 + 高频率 → 快速行进
- *       两者叠加产生自然的加速度曲线。 */
-#define GAIT_PERIOD_MAX_MS      190    /* 微动: 最慢步频 */
-#define GAIT_PERIOD_MIN_MS       50    /* 满杆: 最快步频 */
+ *       两者叠加产生自然的加速度曲线。
+ *
+ * ★ 运行时 !CFG gait_min_ms / gait_max_ms */
+#define GAIT_PERIOD_MAX_MS_DEFAULT      190    /* 微动: 最慢步频 */
+#define GAIT_PERIOD_MIN_MS_DEFAULT       50    /* 满杆: 最快步频 */
+#define GAIT_PERIOD_MAX_MS       (g_params.gait_max_ms)
+#define GAIT_PERIOD_MIN_MS       (g_params.gait_min_ms)
 
 /* CH7 通道保留 (CRSF_CHANNEL_SPEED)，暂不参与控制。
  * 连续变速由摇杆幅度自动映射，无需开关干预。 */
@@ -375,42 +441,58 @@
 /* 前进方向取反开关 (CH2)
  * 如果推摇杆前进时机体后退，设为 1 翻转前进/后退方向。
  * 原因：某些遥控器的 CH2 (Pitch) 输出极性相反 (拉杆=高位, 推杆=低位)。
- * 不要通过翻转 coxa_invert 来修正方向——那会同时破坏转动方向。 */
-#define FORWARD_DIRECTION_INVERT   0
+ * 不要通过翻转 coxa_invert 来修正方向——那会同时破坏转动方向。
+ * ★ 四个取反开关运行时可改 (!CFG inv_fwd / inv_str / inv_h / inv_turn),
+ *   网页「参数 → 方向取反」页做成开关, 遥控器换机/换固件后不用重烧。 */
+#define FORWARD_DIRECTION_INVERT_DEFAULT   0
+#define STRAFE_DIRECTION_INVERT_DEFAULT    1
+#define HEIGHT_DIRECTION_INVERT_DEFAULT    0
+#define TURN_DIRECTION_INVERT_DEFAULT      0
+#define FORWARD_DIRECTION_INVERT   (g_params.inv_fwd)
 
 /* 平移方向取反开关 (CH1)
  * 摇杆左推→右平移 / 右推→左平移 时，设为 1 翻转。 */
-#define STRAFE_DIRECTION_INVERT    1
+#define STRAFE_DIRECTION_INVERT    (g_params.inv_str)
 
 /* 高度方向取反开关 (CH3)
  * 摇杆推高→机身下降 / 拉低→机身抬升 时，设为 1 翻转。 */
-#define HEIGHT_DIRECTION_INVERT    0
+#define HEIGHT_DIRECTION_INVERT    (g_params.inv_h)
 
 /* 旋转方向取反开关 (CH4)
  * 摇杆左推→顺时针转 / 右推→逆时针转 时，设为 1 翻转。 */
-#define TURN_DIRECTION_INVERT      0
+#define TURN_DIRECTION_INVERT      (g_params.inv_turn)
 
 /* ==================== PS2 手柄方向取反开关 ====================
  * 独立于 CRSF (两者摇杆极性约定不同, 校准互不影响)。
  * 默认值按 PS2 标准直觉: 推上=前进, 推左=左移, 推右=右转, 推上=机身升高。
- * 实测哪个轴方向反了就翻转对应宏 (0↔1)。 */
-#define PS2_FORWARD_DIRECTION_INVERT   1
-#define PS2_STRAFE_DIRECTION_INVERT    1
-#define PS2_HEIGHT_DIRECTION_INVERT    1
-#define PS2_TURN_DIRECTION_INVERT      0
+ * 实测哪个轴方向反了就翻转对应宏 (0↔1)。
+ * ★ 四个开关运行时可改 (!CFG ps2_inv_fwd / ps2_inv_str / ps2_inv_h /
+ *   ps2_inv_turn), 网页「参数 → 方向取反」页做成开关。 */
+#define PS2_FORWARD_DIRECTION_INVERT_DEFAULT   1
+#define PS2_STRAFE_DIRECTION_INVERT_DEFAULT    1
+#define PS2_HEIGHT_DIRECTION_INVERT_DEFAULT    1
+#define PS2_TURN_DIRECTION_INVERT_DEFAULT      0
+#define PS2_FORWARD_DIRECTION_INVERT   (g_params.ps2_inv_fwd)
+#define PS2_STRAFE_DIRECTION_INVERT    (g_params.ps2_inv_str)
+#define PS2_HEIGHT_DIRECTION_INVERT    (g_params.ps2_inv_h)
+#define PS2_TURN_DIRECTION_INVERT      (g_params.ps2_inv_turn)
 
 /* PS2 高度轴 (LY) 专用死区 (±25/500 = ±5%):
  * 高度为积分控制 (LY 弹簧摇杆 = 速率输入, 回中=高度保持),
- * 死区用于抑制中心抖动造成的积分漂移, 无需太大 */
-#define PS2_HEIGHT_DEADZONE            25
+ * 死区用于抑制中心抖动造成的积分漂移, 无需太大
+ * ★ 运行时 !CFG ps2_h_deadzone */
+#define PS2_HEIGHT_DEADZONE_DEFAULT    25
+#define PS2_HEIGHT_DEADZONE            (g_params.ps2_h_deadzone)
 
 /* PS2 摇杆指数曲线 (expo) 混合比例 0~100:
  * 0 = 纯线性 (禁用); 100 = 纯三次方曲线 (初段最钝)
  * PS2 电位器摇杆仅 8 位分辨率 (一格≈0.79% 指令) 且带机械旷量与噪声,
  * 中位附近难以精细控制 — expo 压缩初段灵敏度、放大末段,
  * 满杆输出恒为 ±500, 最大行程不受影响。
- * 仅作用于 PS2 路径 (ps2_expo), 与 CRSF/USB 控制解耦 */
-#define PS2_STICK_EXPO                50
+ * 仅作用于 PS2 路径 (ps2_expo), 与 CRSF/USB 控制解耦
+ * ★ 运行时 !CFG ps2_expo, 网页「参数 → 手感」页拖滑块即时感受 */
+#define PS2_STICK_EXPO_DEFAULT        50
+#define PS2_STICK_EXPO                (g_params.ps2_expo)
 
 /* ---- 初始足端位置 (站立时足端在腿基座坐标系中的坐标) ----
  *
@@ -564,6 +646,98 @@
 #define SERVO_LR_COXA       9     /* 左后 Coxa  */
 #define SERVO_LM_COXA       12    /* 左中 Coxa  */
 #define SERVO_LF_COXA       15    /* 左前 Coxa  */
+
+/* ==================== 预留外设 (PCB 已布线, 暂未接线) ====================
+ *
+ * 这些器件都在 PCB 上留了接口但没有实际接负载, 所以固件默认全部关闭
+ * (led_* 除外, 那两个是既有的状态灯)。开关都是运行时参数, 网页「外设」页
+ * 直接可调, 无需重烧。
+ *
+ * ⚠️ 所有权: led_heartbeat / led_alarm 置 0 之前, 主循环每 1~2s 会覆盖写
+ *    对应的 LED —— 想用 !LED g 1 手动控制, 必须先把那一位关掉, 否则手动
+ *    设置会在下一个状态块被冲掉。
+ */
+
+/* ---- 蜂鸣器 (GP13, 无源, PWM 方波驱动) ----
+ * 无源蜂鸣器靠改变 PWM 频率发声, 所以频率下限由 16 位 wrap 决定:
+ *   时钟 125MHz/16 = 7.8125MHz, 最低频率 200Hz → wrap = 39062 (仍在 16 位内)
+ * !BUZZ 命令和网页外设页都用这个下限夹取值, 不要只改一处。 */
+#define BUZZER_PIN                      13      /* GP13 (PWM6B) */
+#define BUZZER_PWM_CLKDIV               16.0f   /* 125MHz / 16 = 7.8125MHz */
+#define BUZZER_MIN_FREQ_HZ              200     /* 最低频率 (16-bit wrap 上限约束) */
+#define BUZZER_MAX_FREQ_HZ              10000   /* 上限: 再高只是刺耳, 且 wrap 只剩个位数 */
+#define BUZZER_MAX_MS                   2000    /* 单次蜂鸣时长上限 (阻塞命令) */
+
+/* ---- 状态灯所有权 (0 = 交还给手动控制) ---- */
+#define LED_HEARTBEAT_ENABLED_DEFAULT   1   /* 绿灯心跳 (2s 状态块) */
+#define LED_ALARM_ENABLED_DEFAULT       1   /* 红灯报警 (1s 电池块) */
+#define LED_HEARTBEAT_ENABLED           (g_params.led_heartbeat)
+#define LED_ALARM_ENABLED               (g_params.led_alarm)
+
+/* ---- 外部 UART0 (GP0=TX, GP1=RX) ----
+ * 与 CRSF 用的 UART1 (GP4/GP5) 相互独立, 可同时工作。典型用途: 接一个
+ * 串口模块 (GPS / 上位机 / 第二个接收机)。收到的一行原样转发到 USB 调试口
+ * ([U0] 前缀), 发出去用 !UART0T <text>。
+ * 波特率改动由主循环 20ms 轮询检测并重新 uart_init。 */
+#define EXT_UART0_TX_PIN                0
+#define EXT_UART0_RX_PIN                1
+#define UART0_ENABLED_DEFAULT           0
+#define UART0_BAUD_DEFAULT              115200
+#define UART0_ENABLED                   (g_params.uart0_en)
+#define UART0_BAUD                      (g_params.uart0_baud)
+
+/* ---- 外部 I2C / ADC 排针 (GP26, GP27) ----
+ * ⚠️ RP2040 的 GPIO 功能表: GP26/27 只映射到 I2C1, 而 i2c1 已经被
+ *    GP14/15 上的 PCA9685 + BNO055 占用 (I2C0 只能到 GP28/29, 其中
+ *    GP28 是电池 ADC)。所以这里**不能用硬件 I2C 控制器** —— 用 i2c1
+ *    驱动 GP26/27 会让外部排针与内部舵机总线电性相连, 悬空的外部引脚
+ *    会把整条内部总线拖死。
+ *
+ *    改用软件位翻转 (bit-bang) 实现, 是真正独立的第二路总线:
+ *    速率低 (约 50kHz), 扫描/读写寄存器够用。
+ *
+ * 模式 (ext_i2c_mode):
+ *   0 = 关闭        (引脚保持上次状态, 不驱动)
+ *   1 = 软件 I2C    (GP26=SDA, GP27=SCL, 开漏 + 内部上拉)
+ *   2 = ADC         (GP26=ADC0, GP27=ADC1, 12 位单端)
+ *
+ * ⚠️ 内部上拉约 50kΩ, 只能应付短线低速。接实际器件时排针上仍应有
+ *    4.7kΩ 外部上拉 —— !I2C2 扫不到设备时先查这个, 别怀疑固件。
+ *
+ * ⚠️ 旧板 (2026-08 之前) GP26 的 ADC 通道曾被打坏 (见 STATUS 事件 3),
+ *    现板电池 ADC 已改到 GP28 绕开它。!ADC2 读数异常时先怀疑硬件。 */
+#define EXT_I2C_SDA_PIN                 26
+#define EXT_I2C_SCL_PIN                 27
+#define EXT_ADC0_PIN                    26
+#define EXT_ADC1_PIN                    27
+#define EXT_ADC0_INPUT                  0
+#define EXT_ADC1_INPUT                  1
+#define EXT_I2C_BIT_DELAY_US            5    /* 半周期延时: 5µs → ~100kHz 方波, SCL ≈ 50kHz */
+#define EXT_I2C_MODE_OFF                0
+#define EXT_I2C_MODE_I2C                1
+#define EXT_I2C_MODE_ADC                2
+#define EXT_I2C_MODE_DEFAULT            EXT_I2C_MODE_OFF
+/* 当前模式 (参数是唯一真源)。故意不叫 EXT_I2C_MODE —— 与取值 EXT_I2C_MODE_I2C
+ * 只差一个后缀, 写成 if (EXT_I2C_MODE_I2C) 恒真而编译器一声不吭。 */
+#define EXT_PIN_MODE                    (g_params.ext_i2c_mode)
+
+/* ---- 空闲 PWM 通道 (2× PCA9685 共 32 路, 舵机占 18 路) ----
+ * 剩下 14 路做通用 PWM 输出 (测试工具语义: 值只在 RAM, 断电不保持)。
+ *
+ * 编号约定 (!PWM <idx>, 网页外设页同):
+ *   idx 0~6  = 左板 0x40 的 LED0~LED6
+ *   idx 7~13 = 右板 0x41 的 LED9~LED15
+ * 这两段正好是各自板子上没被舵机占用的通道 (见 pca9685_servo_to_channel)。
+ *
+ * ⚠️ 必须合并进 hal_servo_flush 的同一批 16 通道整写里: 那批每 ~20ms
+ *    发一次, 只写自己那几路的话空闲通道会被一起清零。 */
+#define FREE_PWM_COUNT                  14
+#define FREE_PWM_LEFT_FIRST             0
+#define FREE_PWM_LEFT_LAST              6
+#define FREE_PWM_RIGHT_FIRST            7
+#define FREE_PWM_RIGHT_LAST             13
+#define FREE_PWM_LEFT_CH_BASE           0    /* 左板空闲段起始物理通道 */
+#define FREE_PWM_RIGHT_CH_BASE          9    /* 右板空闲段起始物理通道 */
 
 /* ==================== 配置数据结构 ==================== */
 

@@ -664,6 +664,11 @@ bool hal_input_init(input_type_t type)
  *   !W<id>           舵机扫摆测试 (例: !W0 → 舵机0 来回扫摆)
  *   !Z               所有舵机回中位 (900=90度)
  *   !A               打印 18 路舵机当前角度
+ * 运行时参数 (网页 Configurator 的串口侧接口):
+ *   !CFG [<name> [<value>]]  列出 / 查询 / 设置参数
+ *   !CFGR [<name>]    恢复默认 (无参 = 全部)
+ *   !CFGW             参数存 flash (掉电保持, 需未解锁)
+ *   !BATT / !I2C / !IMU / !LOG / !LOGC  诊断与日志
  */
 static int16_t parse_int(const uint8_t *buf, uint8_t start, uint8_t len)
 {
@@ -874,6 +879,50 @@ static void ps2_state_print(void)
 }
 #endif /* PS2_ENABLED */
 
+/* ==================== 串口命令行接收 ==================== */
+
+/* 命令行缓冲区长度的唯一出处。
+ * 最长的一条是 "!CFG " + 参数名(≤19) + " " + 值 ≈ 36 字节; 留余量到 48。
+ * 改这里必须同步 tools/serial_console.py 的 MAX_CMD_LEN。 */
+#define SERIAL_CMD_BUF 48
+
+typedef struct {
+    uint8_t buf[SERIAL_CMD_BUF];
+    uint8_t len;
+    bool    overflow;
+} cmd_line_t;
+
+/**
+ * @brief 喂一个字符, 凑齐一整行就返回该行长度 (0 = 还没凑齐)
+ *
+ * 超长命令整条丢弃并报错, 而不是截断: 截断后的名字可能正好撞上另一个
+ * 参数名, 变成"静默改错参数"。旧版 16 字节缓冲会把
+ * "!CFG batt_interval_ms 5000" 悄悄切掉尾巴, 表现就是"改了没反应"。
+ */
+static uint8_t cmd_line_push(cmd_line_t *cl, int ch)
+{
+    if (ch == '\n' || ch == '\r') {
+        uint8_t n = cl->len;
+        if (cl->overflow) {
+            cl->buf[cl->len] = '\0';        /* len ≤ SERIAL_CMD_BUF-1, 不越界 */
+            hal_debug_printf("[CMD] FAIL 命令过长 (上限 %d 字节), 已丢弃: %s\r\n",
+                             (int)(SERIAL_CMD_BUF - 1), (char *)cl->buf);
+            cl->len = 0;
+            cl->overflow = false;
+            return 0;
+        }
+        cl->len = 0;
+        return n;                            /* 内容已交给调用方, 缓冲即可复用 */
+    }
+
+    if (cl->len < SERIAL_CMD_BUF - 1) {
+        cl->buf[cl->len++] = (uint8_t)ch;
+    } else {
+        cl->overflow = true;
+    }
+    return 0;
+}
+
 static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint8_t len)
 {
     if (len < 2 || buf[0] != '!') return false;
@@ -913,6 +962,54 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             }
         } else {
             store_dump_log();
+        }
+        return true;
+    }
+
+    /* ---- 运行时参数 (!CFG / !CFGR / !CFGW) ----
+     * 位置: ctrl_state 判空之前 —— 启动失败 / 电池检测卡住时正是最需要
+     * 改参数的场合 (那两个等待循环里也只能靠 !CFG batt_check 0 脱身)。
+     * ⚠️ 必须拦截在 switch 之前: !C 已被校准模式占用 (calib_enter),
+     *   靠第 3、4 个字符 'F','G' 区分。
+     *
+     *   !CFG                   列出全部参数
+     *   !CFG <name>            查询单个 (例: !CFG travel_fwd_mm)
+     *   !CFG <name> <value>    设置 (超范围自动夹住并回显实际值)
+     *   !CFGR [name]           恢复默认 (无参 = 全部)
+     *   !CFGW                   保存到 flash (需未解锁, 同 !SAVE) */
+    if ((buf[1] == 'C' || buf[1] == 'c') && len >= 4 &&
+        (buf[2] == 'F' || buf[2] == 'f') && (buf[3] == 'G' || buf[3] == 'g')) {
+
+        /* !CFGW — 存盘 */
+        if (len >= 5 && (buf[4] == 'W' || buf[4] == 'w')) {
+            bool safe = (!ctrl_state || !ctrl_state->robot_on ||
+                         hal_is_calibration_active() || hal_is_period_calib_active());
+            params_cmd_save(safe);
+            return true;
+        }
+
+        /* !CFGR — 恢复默认 (buf[4] == 'R'), 其余走 !CFG */
+        bool is_reset = (len >= 5 && (buf[4] == 'R' || buf[4] == 'r'));
+        uint8_t start = is_reset ? 5 : 4;
+
+        /* 参数文本传给 params.c 解析。buf 是 USB 行缓冲, 不保证 NUL 结尾 */
+        char args[64];
+        uint8_t n = 0;
+        for (uint8_t i = start; i < len && n < sizeof(args) - 1; i++) {
+            args[n++] = (char)buf[i];
+        }
+        args[n] = '\0';
+
+        if (is_reset) {
+            params_cmd_reset(args);
+        } else {
+            params_cmd_config(args);
+
+            /* IMU 开关即时生效: 打开时补做一次初始化, 免得为试一次姿态
+             * 补偿而重启 (关闭方向无需处理 —— hal_imu_read 自己会停) */
+            if (IMU_ENABLED && !hal_imu_is_available()) {
+                hal_imu_init();
+            }
         }
         return true;
     }
@@ -1103,19 +1200,14 @@ bool hal_input_update(control_state_t *ctrl_state)
      * 仅通过 USB 虚拟串口接收命令，无 UART1 硬件参与。
      * 非阻塞轮询：getchar_timeout_us(0) 无数据立即返回。 */
     {
-        static uint8_t usb_buf[16];
-        static uint8_t usb_len = 0;
+        static cmd_line_t cl;
 
         int ch = getchar_timeout_us(0);
         while (ch != PICO_ERROR_TIMEOUT) {
-            if (ch == '\n' || ch == '\r') {
-                if (usb_len > 0) {
-                    parse_serial_command(ctrl_state, usb_buf, usb_len);
-                    usb_len = 0;
-                    return true;
-                }
-            } else if (usb_len < sizeof(usb_buf)) {
-                usb_buf[usb_len++] = (uint8_t)ch;
+            uint8_t n = cmd_line_push(&cl, ch);
+            if (n) {
+                parse_serial_command(ctrl_state, cl.buf, n);
+                return true;
             }
             ch = getchar_timeout_us(0);
         }
@@ -1132,19 +1224,12 @@ bool hal_input_update(control_state_t *ctrl_state)
      * 非阻塞轮询：getchar_timeout_us(0) 无数据立即返回。
      * 无论在 CRSF 还是串口命令模式下，USB 命令都可用。 */
     {
-        static uint8_t usb_buf[16];
-        static uint8_t usb_len = 0;
+        static cmd_line_t cl;
 
         int ch = getchar_timeout_us(0);
         while (ch != PICO_ERROR_TIMEOUT) {
-            if (ch == '\n' || ch == '\r') {
-                if (usb_len > 0) {
-                    parse_serial_command(ctrl_state, usb_buf, usb_len);
-                    usb_len = 0;
-                }
-            } else if (usb_len < sizeof(usb_buf)) {
-                usb_buf[usb_len++] = (uint8_t)ch;
-            }
+            uint8_t n = cmd_line_push(&cl, ch);
+            if (n) parse_serial_command(ctrl_state, cl.buf, n);
             ch = getchar_timeout_us(0);
         }
     }
@@ -1225,27 +1310,19 @@ bool hal_input_update(control_state_t *ctrl_state)
 
         return false;
     } else {
-        /* ========== 串口命令模式 ========== */
-        uint8_t cmd_buf[16];
-        uint8_t cmd_len = 0;
-        bool cmd_ready = false;
+        /* ========== 串口命令模式 (UART1) ========== */
+        static cmd_line_t cl;               /* static: 跨调用保留半条命令 */
+        uint8_t n = 0;
 
         while (input_rx_head != input_rx_tail) {
             uint8_t byte = input_rx_buf[input_rx_tail];
             input_rx_tail = (input_rx_tail + 1) % INPUT_BUF_SIZE;
-
-            if (byte == '\n' || byte == '\r') {
-                if (cmd_len > 0) {
-                    cmd_ready = true;
-                    break;
-                }
-            } else if (cmd_len < sizeof(cmd_buf)) {
-                cmd_buf[cmd_len++] = byte;
-            }
+            n = cmd_line_push(&cl, byte);
+            if (n) break;
         }
 
-        if (cmd_ready) {
-            return parse_serial_command(ctrl_state, cmd_buf, cmd_len);
+        if (n) {
+            return parse_serial_command(ctrl_state, cl.buf, n);
         }
     }
 
@@ -1255,19 +1332,14 @@ bool hal_input_update(control_state_t *ctrl_state)
 
 bool hal_poll_usb_commands(control_state_t *ctrl_state)
 {
-    static uint8_t usb_buf[16];
-    static uint8_t usb_len = 0;
+    static cmd_line_t cl;
 
     int ch = getchar_timeout_us(0);
     while (ch != PICO_ERROR_TIMEOUT) {
-        if (ch == '\n' || ch == '\r') {
-            if (usb_len > 0) {
-                parse_serial_command(ctrl_state, usb_buf, usb_len);
-                usb_len = 0;
-                return true;
-            }
-        } else if (usb_len < sizeof(usb_buf)) {
-            usb_buf[usb_len++] = (uint8_t)ch;
+        uint8_t n = cmd_line_push(&cl, ch);
+        if (n) {
+            parse_serial_command(ctrl_state, cl.buf, n);
+            return true;
         }
         ch = getchar_timeout_us(0);
     }
@@ -1327,9 +1399,8 @@ void hal_debug_printf(const char *format, ...)
  *   最低频率 200Hz → wrap = 39062 (16-bit 上限内)
  */
 
-#define BUZZER_PIN              13      /* GP13 (PWM6B), 无源蜂鸣器 */
-#define BUZZER_PWM_CLKDIV       16.0f   /* 125MHz / 16 = 7.8125MHz */
-#define BUZZER_MIN_FREQ_HZ      200     /* 最低频率 (16-bit wrap 上限约束) */
+/* BUZZER_PIN / BUZZER_PWM_CLKDIV / BUZZER_MIN_FREQ_HZ 见 hexapod_config.h ——
+ * 频率下限同时也是 !BUZZ 的参数下限, 命令层要用, 故放在公共头文件里。 */
 
 static bool buzzer_initialized = false;
 
@@ -1708,6 +1779,19 @@ static bool g_imu_available = false;
 static imu_data_t g_imu_last;           /* 最近一次有效读数 (调试用) */
 #endif
 
+/** @brief 查询 IMU 是否已初始化成功 (供 !CFG imu_enabled 即时重试) */
+bool hal_imu_is_available(void)
+{
+    return g_imu_available;
+}
+
+/**
+ * @brief 初始化 BNO055
+ *
+ * IMU_ENABLED 是运行时参数 (默认见 hexapod_config.h), 关闭时本函数立刻
+ * 返回 false —— 与旧的编译期开关行为一致 (不碰 I2C, 不占启动时间)。
+ * 想在不重启的情况下试 IMU: !CFG imu_enabled 1 (命令层会立刻重跑本函数)。
+ */
 bool hal_imu_init(void)
 {
 #if IMU_ENABLED

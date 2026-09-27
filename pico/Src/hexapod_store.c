@@ -80,19 +80,27 @@ static void __no_inline_not_in_flash_func(store_feed_watchdog)(void)
 }
 
 /**
- * @brief 整扇区擦除 + 编程首页 (仅安全上下文调用)
+ * @brief 整扇区擦除 + 编程前 len 字节 (仅安全上下文调用)
  * @param offset   Flash 偏移 (XIP 基址 0x10000000 之上, 此处传裸偏移)
- * @param page_buf 256 字节数据
+ * @param buf      RAM 缓冲
+ * @param len      编程长度, 必须是 256 的整数倍 (SDK 要求)
  */
-static void __no_inline_not_in_flash_func(store_flash_erase_program)(
-        uint32_t offset, const uint8_t *page_buf)
+static void __no_inline_not_in_flash_func(store_flash_erase_program_n)(
+        uint32_t offset, const uint8_t *buf, uint32_t len)
 {
     uint32_t irq = save_and_disable_interrupts();
     store_feed_watchdog();
     flash_range_erase(offset, STORE_SECTOR_SIZE);
     store_feed_watchdog();
-    flash_range_program(offset, page_buf, STORE_PAGE_SIZE);
+    flash_range_program(offset, buf, len);
     restore_interrupts(irq);
+}
+
+/** @brief 整扇区擦除 + 编程首页 (256B) */
+static void __no_inline_not_in_flash_func(store_flash_erase_program)(
+        uint32_t offset, const uint8_t *page_buf)
+{
+    store_flash_erase_program_n(offset, page_buf, STORE_PAGE_SIZE);
 }
 
 /** @brief 仅页编程 (无擦除), 用于日志追加 */
@@ -310,6 +318,89 @@ bool store_save_calib(bool safe_context)
     return false;
 }
 
+/* ==================== 运行时参数持久化 ==================== */
+
+/* 记录 ~780B, 按 4 页 1024B 写入。缓冲一律 static 而非局部:
+ * PICO_STACK_SIZE 默认仅 4KB, 两个近 1KB 的局部结构体会把栈顶穿。 */
+static store_params_record_t s_params_rec;
+static uint8_t               s_params_page[STORE_PARAMS_RECORD_BYTES];
+
+bool store_save_params(const store_param_entry_t *entries, uint16_t count,
+                       bool safe_context)
+{
+    if (!safe_context) {
+        hal_debug_printf("[STORE] Refuse: robot is armed, disarm first (!S)\r\n");
+        return false;
+    }
+    if (count > STORE_PARAMS_MAX) count = STORE_PARAMS_MAX;
+
+    memset(&s_params_rec, 0, sizeof(s_params_rec));
+    s_params_rec.magic   = STORE_PARAMS_MAGIC;
+    s_params_rec.version = STORE_PARAMS_VERSION;
+    s_params_rec.count   = count;
+    if (count) {
+        memcpy(s_params_rec.entries, entries,
+               (size_t)count * sizeof(store_param_entry_t));
+    }
+    s_params_rec.crc32 = store_crc32((const uint8_t *)&s_params_rec,
+                                     (uint32_t)((const uint8_t *)&s_params_rec.crc32
+                                                - (const uint8_t *)&s_params_rec));
+
+    /* 编程区必须整页对齐, 尾部以 0xFF 填充 (擦除态) */
+    memset(s_params_page, 0xFF, sizeof(s_params_page));
+    memcpy(s_params_page, &s_params_rec, sizeof(s_params_rec));
+
+    for (int attempt = 0; attempt < 2; attempt++) {
+        store_flash_erase_program_n(STORE_PARAMS_FLASH_OFFSET, s_params_page,
+                                    sizeof(s_params_page));
+
+        /* 回读校验 (SDK 在编程后已 flush cache, XIP 读取一致) */
+        store_params_record_t back;
+        store_flash_read(STORE_PARAMS_FLASH_OFFSET, &back, sizeof(back));
+        if (back.magic == s_params_rec.magic &&
+            back.version == s_params_rec.version &&
+            back.count == s_params_rec.count &&
+            back.crc32 == s_params_rec.crc32) {
+            hal_debug_printf("[STORE] Params saved OK (%u 项, CRC 0x%08X)\r\n",
+                             (unsigned)count, s_params_rec.crc32);
+            store_log_event(STORE_EVT_PARAM_SAVED, count);
+            store_flush_pending(true);
+            return true;
+        }
+    }
+
+    hal_debug_printf("[STORE] Params save FAILED (verify mismatch)\r\n");
+    return false;
+}
+
+uint16_t store_load_params(store_param_entry_t *out, uint16_t max)
+{
+    if (!out || max == 0) return 0;
+
+    store_flash_read(STORE_PARAMS_FLASH_OFFSET, &s_params_rec, sizeof(s_params_rec));
+
+    if (s_params_rec.magic != STORE_PARAMS_MAGIC) return 0;
+    if (s_params_rec.version != STORE_PARAMS_VERSION) return 0;
+    if (s_params_rec.count > STORE_PARAMS_MAX) return 0;
+
+    uint32_t crc_calc = store_crc32((const uint8_t *)&s_params_rec,
+                                    (uint32_t)((const uint8_t *)&s_params_rec.crc32
+                                               - (const uint8_t *)&s_params_rec));
+    if (crc_calc != s_params_rec.crc32) return 0;
+
+    uint16_t n = s_params_rec.count;
+    if (n > max) n = max;
+
+    /* 名字必须 NUL 结尾 —— 否则是记录损坏, 直接整体丢弃,
+     * 不让 params_find 去 strcmp 一段越界的字节 */
+    for (uint16_t i = 0; i < n; i++) {
+        if (s_params_rec.entries[i].name[STORE_PARAM_NAME_LEN - 1] != '\0') return 0;
+    }
+
+    memcpy(out, s_params_rec.entries, (size_t)n * sizeof(store_param_entry_t));
+    return n;
+}
+
 void store_log_event(uint8_t type, uint16_t data)
 {
     /* 仅进 RAM 缓冲: 行走中写 Flash 会因 XIP 停摆导致 CRSF 丢帧 */
@@ -353,7 +444,7 @@ void store_dump_log(void)
 
     static const char *names[] = {
         "?", "BOOT", "BATT_OV", "BATT_CUTOFF", "BATT_WARN",
-        "BATT_RECOVER", "CALIB_SAVED", "LOG_CLEARED"
+        "BATT_RECOVER", "CALIB_SAVED", "LOG_CLEARED", "PARAM_SAVED"
     };
 
     store_log_entry_t e;

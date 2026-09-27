@@ -227,6 +227,12 @@ bool hal_imu_init(void);
  */
 bool hal_imu_read(imu_data_t *data);
 
+/**
+ * @brief 查询 IMU 是否已初始化就绪
+ * @note  供 !CFG imu_enabled 1 的即时重试逻辑用 (见 hal_pico.c 命令层)
+ */
+bool hal_imu_is_available(void);
+
 /* ==================== 足端微动开关接口 ==================== */
 
 /**

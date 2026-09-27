@@ -20,7 +20,7 @@ TCP 桥接数据流与线程安全约定:
     客户端  ──> TCP 线程 ──> tcp_rx 队列 ──自唤醒管道──> 主线程 ──send_line()──> 串口 fd
 
   ★ 串口 fd 只由主线程读写; TCP 线程只碰套接字; 两者仅通过线程安全队列通信。
-    客户端命令复用主线程的 send_line(), 因此截断/前缀/排队语义与控制台输入完全一致。
+    客户端命令复用主线程的 send_line(), 因此长度限制/前缀/排队语义与控制台输入完全一致。
 """
 
 import argparse
@@ -37,7 +37,8 @@ import select
 import threading
 
 DEFAULT_BAUD = termios.B115200
-MAX_CMD_LEN = 15          # 固件命令缓冲区 16 字节，! + 命令 ≤ 15 字节可打印字符
+MAX_CMD_LEN = 47          # 固件命令行缓冲 SERIAL_CMD_BUF-1=47 (hexapod_hal_pico.c)
+                          # 必须 ≥ 最长的一条 "!CFG <参数名 19> <值>" ≈ 36
 SCAN_INTERVAL = 0.5       # 端口扫描周期 (秒)
 STATUS_INTERVAL = 2.0     # 等待状态提示周期 (秒)
 
@@ -322,7 +323,7 @@ def drain_tcp_commands(state, fd):
 
 
 def send_line(text, state, fd):
-    """转换并发送一条命令。返回 'sent' 或 'lost' (写入失败=设备已断开)"""
+    """转换并发送一条命令。返回 'sent' / 'rejected' / 'lost' (写入失败=设备已断开)"""
     out = text if text.startswith("!") else "!P" + text
     if len(out) > MAX_CMD_LEN:
         sys.stdout.write(f"\r\033[KCommand too long ({len(out)}>{MAX_CMD_LEN}), truncated: {out[:MAX_CMD_LEN]}\r\n")

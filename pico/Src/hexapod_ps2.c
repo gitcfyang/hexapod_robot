@@ -462,16 +462,10 @@ void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state)
     int16_t strafe  = state->analog_mode ? ps2_stick_to_control(state->joy_rx, state->center_rx) : 0;
     int16_t turn    = state->analog_mode ? ps2_stick_to_control(state->joy_lx, state->center_lx) : 0;
 
-    /* 方向取反 (PS2 独立宏, 与 CRSF 配置互不影响) */
-#if PS2_STRAFE_DIRECTION_INVERT
-    strafe = -strafe;
-#endif
-#if PS2_FORWARD_DIRECTION_INVERT
-    forward = -forward;
-#endif
-#if PS2_TURN_DIRECTION_INVERT
-    turn = -turn;
-#endif
+    /* 方向取反 (PS2 独立参数, 与 CRSF 配置互不影响; 运行时可改) */
+    if (PS2_STRAFE_DIRECTION_INVERT)  strafe  = -strafe;
+    if (PS2_FORWARD_DIRECTION_INVERT) forward = -forward;
+    if (PS2_TURN_DIRECTION_INVERT)    turn    = -turn;
 
     /* 指数曲线: 初段钝化/末段锐化 — 精细控制集中在摇杆中心区 */
     forward = ps2_expo(forward, PS2_STICK_EXPO);
@@ -487,9 +481,7 @@ void ps2_to_control(const ps2_state_t *state, control_state_t *ctrl_state)
     if (height_rate > -PS2_HEIGHT_DEADZONE && height_rate < PS2_HEIGHT_DEADZONE) {
         height_rate = 0;   /* 中心死区: 防止微抖造成积分漂移 */
     }
-#if PS2_HEIGHT_DIRECTION_INVERT
-    height_rate = -height_rate;
-#endif
+    if (PS2_HEIGHT_DIRECTION_INVERT) height_rate = -height_rate;
     height_rate = ps2_expo(height_rate, PS2_STICK_EXPO);
     static int32_t height_integral = 0;   /* 定点: 实际控制量 = /64 */
     height_integral += height_rate;

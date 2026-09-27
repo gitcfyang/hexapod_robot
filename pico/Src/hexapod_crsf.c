@@ -346,18 +346,11 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         int16_t height_stick = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
         int16_t yaw_stick   = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
 
-#if STRAFE_DIRECTION_INVERT
-        roll_stick = -roll_stick;
-#endif
-#if FORWARD_DIRECTION_INVERT
-        pitch_stick = -pitch_stick;
-#endif
-#if HEIGHT_DIRECTION_INVERT
-        height_stick = -height_stick;
-#endif
-#if TURN_DIRECTION_INVERT
-        yaw_stick = -yaw_stick;
-#endif
+        /* 方向取反: 运行时可改 (!CFG inv_* / 网页参数页), 故用运行时 if */
+        if (STRAFE_DIRECTION_INVERT)  roll_stick   = -roll_stick;
+        if (FORWARD_DIRECTION_INVERT) pitch_stick  = -pitch_stick;
+        if (HEIGHT_DIRECTION_INVERT)  height_stick = -height_stick;
+        if (TURN_DIRECTION_INVERT)    yaw_stick    = -yaw_stick;
 
         /* 机身姿态旋转 (0.1° 单位)
          * body_rot.x = Roll  (绕 X 前进轴, Rx 旋转 YZ 面)
@@ -388,18 +381,10 @@ void crsf_to_control(const crsf_state_t *state, control_state_t *ctrl_state)
         int16_t height_ctrl = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_HEIGHT]));
         int16_t turn    = apply_control_deadband(map_channel_to_control(state->channels[CRSF_CHANNEL_TURN]));
 
-#if STRAFE_DIRECTION_INVERT
-        strafe = -strafe;
-#endif
-#if FORWARD_DIRECTION_INVERT
-        forward = -forward;
-#endif
-#if HEIGHT_DIRECTION_INVERT
-        height_ctrl = -height_ctrl;
-#endif
-#if TURN_DIRECTION_INVERT
-        turn = -turn;
-#endif
+        if (STRAFE_DIRECTION_INVERT)  strafe      = -strafe;
+        if (FORWARD_DIRECTION_INVERT) forward     = -forward;
+        if (HEIGHT_DIRECTION_INVERT)  height_ctrl = -height_ctrl;
+        if (TURN_DIRECTION_INVERT)    turn        = -turn;
 
         /* 步长映射: 摇杆 -500~+500 → 步长 mm */
         ctrl_state->travel_length.x =  (forward * TRAVEL_MAX_FORWARD_MM) / 500;

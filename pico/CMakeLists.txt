@@ -47,6 +47,7 @@ add_executable(hexapod_pico
     Src/hexapod_ps2.c
     Src/bno055.c
     Src/hexapod_store.c
+    Src/hexapod_params.c
 )
 
 pico_set_program_name(hexapod_pico "hexapod_pico")
