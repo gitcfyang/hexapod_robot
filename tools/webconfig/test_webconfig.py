@@ -31,6 +31,9 @@ import server as wc                                     # noqa: E402
 
 PTY_A, PTY_B = "/tmp/wc_fakerobot", "/tmp/wc_robotport"
 BRIDGE_PORT, HTTP_PORT = 7199, 8099
+# 第二套实例: 连接门那组用例要开轮询, 不能和主用例的 --no-poll 挤在一起
+PTY_A2, PTY_B2 = "/tmp/wc_fakerobot2", "/tmp/wc_robotport2"
+BRIDGE_PORT2, HTTP_PORT2 = 7198, 8098
 
 procs = []
 passed, failed = [], []
@@ -109,6 +112,12 @@ S_CH_CRSF = [
 ]
 S_CH_PS2 = [
     "[CH] m=ps2 con=1 btns=65535 lx=128 ly=130 rx=127 ry=126 fc=987",
+]
+
+# 固件版本 (hexapod_hal_pico.c: hal_fw_version_print): 开机横幅 + !VER 共用。
+# 内容是 git describe 的结果, 所以样本取个"长得像"的字符串即可。
+S_VER = [
+    "[VER] Hexapod v0.3.0-16-g8f5b04f-dirty",
 ]
 
 # 外设状态 (hexapod_hal_pico.c: periph_status_print / !PERIPH) —— 一行一节,
@@ -461,6 +470,29 @@ def test_parser():
               wc.parse_line(t, cal) is None)
     check("白名单外的前缀没有污染外设状态", "per" not in t.snapshot(), str(t.snapshot().get("per")))
 
+    # 固件版本 ([VER] 横幅/!VER): 开始页在"连接"之前就靠它显示板上固件
+    t = wc.Telemetry()
+    r = wc.parse_line(t, S_VER[0])
+    check("[VER] 解析为 ver 帧", r is not None and r[0] == "ver", str(r))
+    check("[VER] 版本原文整行保留 (含 git 哈希/dirty 标记)",
+          r and r[1].get("text") == "Hexapod v0.3.0-16-g8f5b04f-dirty", str(r[1]))
+
+    # 设备在线状态行 ([TCP] dev ...) 由 serial_console 发布, 走的是桥接路径
+    # (on_line 里最先判定) —— 这里只验正则本身认哪些、不认哪些
+    check("[TCP] dev 行: 在线/占用/离线都认",
+          [bool(wc.RE_DEV.match(l)) for l in
+           ("[TCP] dev on /dev/ttyACM0", "[TCP] dev busy /dev/ttyACM0",
+            "[TCP] dev off")] == [True, True, True])
+    m = wc.RE_DEV.match("[TCP] dev on /dev/ttyACM0")
+    check("[TCP] dev 行: 解析出状态与端口",
+          (m.group(1), m.group(2)) == ("on", "/dev/ttyACM0"), str(m.groups()))
+    check("[TCP] dev 行: 端口可缺省 (dev off 不带端口)",
+          wc.RE_DEV.match("[TCP] dev off").group(2) is None)
+    check("[TCP] dev 行: 不误吞杂项 [TCP] 行",
+          all(wc.RE_DEV.match(l) is None for l in
+              ("[TCP] bridge connected. Type commands, e.g. !A",
+               "[TCP] 客户端接入 127.0.0.1:1234 (共 1)")))
+
     check("未知行不产生事件 (原样进日志)", wc.parse_line(t, "some random debug line") is None)
 
 
@@ -534,6 +566,7 @@ def test_flasher():
 # 空格这条限制同时保证了 !PWMOFF 不会撞上 !PWM (与固件自己的字面量分发一致)。
 REPLAY = {"!BATT": S_BATT, "!I2C": S_I2C, "!I2C q": S_I2C_Q,
           "!IMU": S_IMU, "!A": S_SERVO, "!PERIPH": S_PER, "!UART0T": S_U0,
+          "!VER": S_VER,
           "!MOTOR": ["[PER] motors: m1=500 m2=0"],
           "!LED": ["[PER] leds: g=0 r=0 hb=0 alarm=1"],
           "!PWM": ["[PER] pwm: 3=5000"],
@@ -617,7 +650,7 @@ def cleanup():
             p.kill()
         except Exception:
             pass
-    for path in (PTY_A, PTY_B):
+    for path in (PTY_A, PTY_B, PTY_A2, PTY_B2):
         try:
             os.unlink(path)
         except OSError:
@@ -709,9 +742,12 @@ def val_of(snap, name):
 def test_param_e2e(sse):
     print("\n[3b] /param 端到端 (浏览器 → 服务器 → 串口 → 固件 → SSE)")
 
-    # 订阅建立时服务器会自动拉一次参数表, 前端因此不需要用户点"读取"
+    # 开始页点「连接」是调试页的唯一入口: 服务器此时才拉参数表
+    # (连接前浏览器连参数都不该看见, 更别说改)
+    r = json.loads(http_post("/connect", ""))
+    check("POST /connect 连上 (设备在线)", r.get("ok") is True, str(r))
     snap, _ = wait_params(sse, lambda d: d["count"] == len(FAKE_PARAMS))
-    check("接入即自动拉取参数表", snap is not None,
+    check("连接后自动拉取参数表", snap is not None,
           f"count={snap['count'] if snap else None}")
     check("/state 也带参数快照",
           json.loads(http_get("/state"))["telemetry"]["params"]["count"] == len(FAKE_PARAMS))
@@ -786,6 +822,161 @@ def test_param_e2e(sse):
     check("resetall 生成裸 !CFGR", r.get("ok") and r.get("cmd") == "!CFGR", str(r))
     snap, _ = wait_params(sse, lambda d: d["changed"] == 0 and d["count"] == len(FAKE_PARAMS))
     check("全部恢复默认后 changed=0", snap is not None)
+
+
+# ==================== [4] 连接门 (开始页 → 连接 → 调试页) ====================
+#
+# 第二套实例: 连接门要测的是"轮询有没有在发", 所以这组必须开着轮询,
+# 不能和主用例的 --no-poll 挤在一起。间隔调到 0.5s 让判定快而稳定。
+
+GATE_POLL_IV = 0.5
+
+
+def wait_dev(port, up, timeout=20):
+    """等 /state 里的设备在线状态变成 up"""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            st = json.loads(http_get("/state", port))
+            if bool(st.get("dev", {}).get("up")) is up:
+                return st
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.3)
+    return None
+
+
+def wait_conn(port, want, timeout=5):
+    """等 /state 的连接态变成 want → 状态快照 (超时返回 None)"""
+    end = time.time() + timeout
+    while time.time() < end:
+        try:
+            st = json.loads(http_get("/state", port))
+            if bool(st.get("connected")) is want:
+                return st
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.2)
+    return None
+
+
+def gate_batt_count(sse, seconds, skip=0.0):
+    """一段时间内收到的 batt 帧数量 (轮询在跑就一定 >0)
+
+    skip: 先空转这么久丢掉在途帧。刚发的 !BATT 的应答会晚几十毫秒才到, 断言
+    "停止轮询" 时必须先把它冲掉, 否则数到的是那条命令的回声而不是新命令。
+    空转期间的帧也一并返回 —— 事件断言要能看到 (conn 就常常落在这一窗口里)。"""
+    evs = sse_drain(sse, skip) if skip else []
+    tail = sse_drain(sse, seconds)
+    return sum(1 for e in tail if e.get("t") == "batt"), evs + tail
+
+
+def test_connect_gate():
+    print("\n[4] 连接门: 连接前不轮询 / 连接后轮询 / 掉线自动回开始页")
+
+    for args, log, cwd in [
+        (["socat", "-d", "-d", f"pty,raw,echo=0,link={PTY_A2}",
+          f"pty,raw,echo=0,link={PTY_B2}"], "/tmp/wc_socat2.log", TOOLS),
+        ([sys.executable, __file__, "--replay", PTY_A2], "/tmp/wc_fake2.log", HERE),
+        ([sys.executable, "serial_console.py", PTY_B2, "--port", str(BRIDGE_PORT2)],
+         "/tmp/wc_console2.log", TOOLS),
+        ([sys.executable, "server.py", "--port", str(HTTP_PORT2),
+          "--bridge-port", str(BRIDGE_PORT2),
+          "--batt-interval", str(GATE_POLL_IV), "--imu-interval", str(GATE_POLL_IV),
+          "--servo-interval", str(GATE_POLL_IV), "--i2c-interval", str(GATE_POLL_IV),
+          "--periph-interval", str(GATE_POLL_IV)], "/tmp/wc_server2.log", HERE),
+    ]:
+        spawn(args, log, cwd)
+
+    # 设备状态要一路传到 server: serial_console 打开 pty → 发布 [TCP] dev on
+    # → server 解析成 dev 事件。这条链断了开始页就永远显示"未检测到设备"
+    st = wait_dev(HTTP_PORT2, True)
+    check("设备在线状态经桥接传到网页服务", st is not None,
+          "20s 内 /state 的 dev.up 仍为 false")
+    if st is None:
+        return
+    check("在线的设备带端口号 (开始页要显示)",
+          bool(st["dev"].get("port")), str(st["dev"]))
+
+    dev = json.loads(http_get("/device", HTTP_PORT2))
+    check("GET /device 也带设备在线状态与连接态",
+          dev.get("dev", {}).get("up") is True and dev.get("connected") is False,
+          str({k: dev.get(k) for k in ("dev", "connected")}))
+
+    sse = sse_open(HTTP_PORT2)
+    evs = sse_drain(sse, 0.5)
+    hello = next((e for e in evs if e.get("t") == "hello"), None)
+    check("开场帧带设备状态与连接态 (刷新页面据此选页面)",
+          hello is not None and hello.get("dev", {}).get("up") is True
+          and hello.get("connected") is False, str(hello))
+
+    # ---- 连接之前: 一个轮询命令都不该发 ----
+    n, _ = gate_batt_count(sse, 2.5)
+    check("连接前不轮询 (开始页不打扰串口)", n == 0, f"{n} 个 batt 帧")
+
+    # ---- 点连接 ----
+    r = json.loads(http_post("/connect", "", HTTP_PORT2))
+    check("POST /connect 成功", r.get("ok") is True, str(r))
+    n, evs = gate_batt_count(sse, 3.0)
+    check("连接后开始轮询", n > 0, f"{n} 个 batt 帧")
+    check("连接事件推给所有浏览器 (多标签页一致)",
+          any(e.get("t") == "conn" and e.get("on") is True for e in evs),
+          str([e.get("t") for e in evs][:8]))
+
+    # ---- 断开: 回开始页, 轮询停 ----
+    r = json.loads(http_post("/disconnect", "", HTTP_PORT2))
+    check("POST /disconnect 成功", r.get("ok") is True, str(r))
+    # skip: 断开前刚发的那条 !BATT 的应答还在路上, 先冲掉再数 (它在途, 不是新命令)
+    n, evs = gate_batt_count(sse, 2.5, skip=0.6)
+    check("断开后停止轮询", n == 0, f"{n} 个 batt 帧")
+    check("断开事件推给所有浏览器",
+          any(e.get("t") == "conn" and e.get("on") is False for e in evs),
+          str([e.get("t") for e in evs][:8]))
+
+    # 断开只是不连了, 设备还在线 —— 可以再连回来
+    r = json.loads(http_post("/connect", "", HTTP_PORT2))
+    check("断开后可再次连接 (设备仍在线)", r.get("ok") is True, str(r))
+    n, _ = gate_batt_count(sse, 3.0)
+    check("重新连接后轮询恢复", n > 0, f"{n} 个 batt 帧")
+
+    # ---- 拔线: 设备消失 → 连接态作废, 浏览器自动回开始页 ----
+    socat2 = procs[-4]                      # 本组第一个 spawn 的是 socat
+    assert socat2.args[0] == "socat", socat2.args   # 杀错进程 = 用例前提不成立
+    socat2.kill()
+    evs = sse_drain(sse, 10, stop_when=lambda e: any(
+        x.get("t") == "dev" and x.get("up") is False for x in e))
+    off = next((e for e in evs if e.get("t") == "dev" and e.get("up") is False), None)
+    check("设备掉线推到浏览器 (前端据此跳回开始页)", off is not None)
+    evs += sse_drain(sse, 1.0)      # dev 与 conn 是两个 TCP 分段, 别只看第一段
+    check("设备掉线同时作废连接态",
+          any(e.get("t") == "conn" and e.get("on") is False for e in evs),
+          str([e.get("t") for e in evs][:8]))
+    n, _ = gate_batt_count(sse, 2.5)
+    check("掉线后不再轮询 (命令会被串口端排队)", n == 0, f"{n} 个 batt 帧")
+
+    # ---- 插回来: 设备在线, 但**不会**自动重连 ----
+    # 拔插 = 设备和线一起重新接入: socat 重建的是一对**新的** pty, 只重启 socat
+    # 的话旧假固件还挂在已经作废的那个 pty 上, 新 pty 上没人应答 —— 轮询发出去
+    # 只会石沉大海, 那是"假设备"的假象, 不是服务器的问题。
+    spawn(["socat", "-d", "-d", f"pty,raw,echo=0,link={PTY_A2}",
+           f"pty,raw,echo=0,link={PTY_B2}"], "/tmp/wc_socat3.log", TOOLS)
+    spawn([sys.executable, __file__, "--replay", PTY_A2], "/tmp/wc_fake3.log", HERE)
+    st = wait_dev(HTTP_PORT2, True)
+    check("设备插回后重新在线", st is not None)
+    n, _ = gate_batt_count(sse, 2.5)
+    check("插回后不自动重连 (得用户再点连接)", n == 0, f"{n} 个 batt 帧")
+    check("插回后连接态仍为断开", st is not None and st.get("connected") is False,
+          str(st.get("connected") if st else None))
+
+    r = json.loads(http_post("/connect", "", HTTP_PORT2))
+    check("再次连接成功", r.get("ok") is True, str(r))
+    n, _ = gate_batt_count(sse, 3.0)
+    check("再连后轮询恢复", n > 0, f"{n} 个 batt 帧")
+    sse.close()
+
+    # 最后一个浏览器走了: 连接态作废 (否则重新打开页面时"没人连却在轮询")
+    st = wait_conn(HTTP_PORT2, False)
+    check("最后一个浏览器离开后连接态复位", st is not None, "5s 内未复位")
 
 
 def main():
@@ -984,11 +1175,13 @@ def main():
         r = json.loads(http_post("/flash", json.dumps({"uf2": bad})))
         check(f"POST /flash 拒绝{why}", r.get("ok") is False and r.get("err"), str(r))
 
-    # 参数页另开一路 SSE (上一路已关闭) —— 接入时服务器会自动下发一次 !CFG
+    # 参数页另开一路 SSE (上一路已关闭) —— 连接时服务器会下发一次 !CFG
     sse2 = sse_open()
     time.sleep(0.3)
     test_param_e2e(sse2)
     sse2.close()
+
+    test_connect_gate()
 
     print(f"\n{len(passed)} 项通过, {len(failed)} 项失败")
     if failed:

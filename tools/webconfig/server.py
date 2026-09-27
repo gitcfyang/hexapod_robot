@@ -15,10 +15,12 @@
     # 浏览器打开 http://127.0.0.1:8080
     # (浏览器在 Windows 上时, 用 VSCode 的端口转发把 8080 转过去)
 
-上行三个入口 (信任级别递增):
-    POST /poll   暂停/恢复自动轮询
-    POST /param  结构化参数指令 (set/reset/resetall/save/dump), 名字与值都校验
-    POST /cmd    任意串口命令原文 —— 与直接敲串口等价, 不做任何过滤
+上行入口 (信任级别递增):
+    POST /poll       暂停/恢复自动轮询
+    POST /connect    会话连接: 要求桥接 + 设备都在线, 之后才开始轮询/拉参数表
+    POST /disconnect 断开连接 (回开始页; 设备通常仍在线, 可再连)
+    POST /param      结构化参数指令 (set/reset/resetall/save/dump), 名字与值都校验
+    POST /cmd        任意串口命令原文 —— 与直接敲串口等价, 不做任何过滤
 
 设计取舍 (改架构前请先读这段):
   - 不用 WebSocket: 纯标准库实现需手写握手+分帧, 否则要引入 pip 依赖;
@@ -32,9 +34,12 @@
   - 参数按名字传输 (不是索引): 固件升级增删参数不会让前端错位。旧名字在
     固件侧查不到时返回 FAIL, 前端只提示不改值。
 
-轮询仅在"有浏览器连接且未暂停"时进行, 空闲时不打扰串口。
-参数表只在「首个浏览器接入 / 桥接重连 / 用户主动刷新」时拉取 ——
-它不会自己变, 没必要进轮询。
+连接语义 (Betaflight 式): 页面打开先是「开始页」—— 只看得到硬件是否在线、固件
+版本、可烧录固件, 改不了任何参数; 设备在线时点「连接」才进调试页。连接态按
+"桥接在线 + 设备在线"判定, 设备掉线或桥接断开即作废, 浏览器据此跳回开始页。
+
+轮询仅在"有浏览器 + 已连接 + 未暂停"时进行, 空闲时不打扰串口。
+参数表只在「点连接 / 桥接重连 / 用户主动刷新」时拉取 —— 它不会自己变, 不必进轮询。
 """
 
 import argparse
@@ -42,6 +47,7 @@ import copy
 import json
 import queue
 import re
+import select
 import socket
 import sys
 import threading
@@ -128,6 +134,16 @@ RE_PARAM_KV = re.compile(r"(\w+)=(\S+)")
 # 放宽只是让非法名字走到固件去吃 FAIL, 收紧则会拒掉合法参数。
 PARAM_NAME_OK = re.compile(r"^[a-z][a-z0-9_]{0,18}$")
 
+# 固件版本 (开机横幅 + !VER 命令共用一行):
+#   [VER] Hexapod v0.3.0-16-g8f5b04f-dirty
+RE_VER = re.compile(r"^\[VER\] (.*)$")
+
+# 设备在线状态 —— 由 serial_console.py 发布 (桥接连着 ≠ 机器人在线):
+#   [TCP] dev on /dev/ttyACM0    设备已打开
+#   [TCP] dev busy /dev/ttyACM0  端口在但打不开 (多为被别的程序占用)
+#   [TCP] dev off                设备不在
+RE_DEV = re.compile(r"^\[TCP\] dev (on|off|busy)(?: (\S+))?$")
+
 
 class Telemetry:
     """各子系统的最新状态。每次解析更新后整体推给前端 (前端只渲染最后一份)。"""
@@ -142,6 +158,7 @@ class Telemetry:
             "ch": {},
             "per": {},
             "params": {"list": {}, "count": 0, "changed": 0},
+            "ver": {},
         }
 
     def update(self, key, fields):
@@ -193,6 +210,10 @@ def parse_line(telem, line):
             st["changed"] = sum(1 for x in st["list"].values() if x["chg"])
             snap = copy.deepcopy(st)
         return "params", snap
+
+    m = RE_VER.match(line)
+    if m:
+        return "ver", telem.update("ver", {"text": m.group(1)})
 
     m = RE_BATT_RAW.match(line)
     if m:
@@ -449,6 +470,37 @@ _subs_lock = threading.Lock()
 _poll_paused = threading.Event()
 _stats = {"lines": 0, "started": time.time()}
 
+# ---- 设备在线状态 (由 serial_console 的 [TCP] dev 行驱动) ----
+# ⚠️ 桥接连着 ≠ 机器人在线。而且设备不在时 serial_console 会把命令**排队**等
+#    设备回来重放 —— 所以"连接"必须同时要求桥接在线 + 设备在线, 否则拔插一次
+#    就会等来一堆积压命令。
+_dev_lock = threading.Lock()
+_dev = {"up": False, "port": None, "busy": False}
+
+# ---- 会话连接状态 (开始页点「连接」后为真) ----
+# 一台机器人 + 一条上游串口 = 全局一个连接态, 多浏览器共享: 轮询与参数表只在
+# 连接后下发; 任一浏览器断开则都回开始页 (简单, 且不会互相打架)。
+_connected = threading.Event()
+
+
+def dev_state():
+    with _dev_lock:
+        return dict(_dev)
+
+
+def set_dev(state, port=None):
+    """设备在线状态变化 (来自 serial_console 的 [TCP] dev 行)"""
+    up = (state == "on")
+    with _dev_lock:
+        _dev.update(up=up, port=port, busy=(state == "busy"))
+        snap = dict(_dev)
+    broadcast({"t": "dev", **snap})
+    if not up and _connected.is_set():
+        # 设备没了: 连接态作废, 轮询立即停 —— 否则命令会被排队, 重插时洪水
+        _connected.clear()
+        broadcast({"t": "conn", "on": False, "msg": "设备已断开"})
+    return up
+
 
 def broadcast(event):
     """向所有浏览器非阻塞广播一帧。慢客户端直接丢弃该帧, 绝不阻塞桥接线程。"""
@@ -535,7 +587,7 @@ def handle_flash(body):
 
 
 def device_info():
-    """设备/固件现状 —— 前端「连接设备」按这个渲染"""
+    """设备/固件现状 —— 开始页与烧录面板按这个渲染"""
     return {
         "bridge": bool(BRIDGE and BRIDGE.connected),
         "bridge_host": BRIDGE.host if BRIDGE else None,
@@ -543,7 +595,34 @@ def device_info():
         "picotool": flasher.find_picotool(),
         "devices": flasher.usb_devices(),
         "firmware": flasher.list_firmware(),
+        "dev": dev_state(),
+        "connected": _connected.is_set(),
     }
+
+
+def handle_connect():
+    """
+    开始页点「连接」: 桥接与设备**都在线**才放行, 并拉一次参数表。
+
+    这是 UI 层的门 (开始页在连接前不显示任何参数/命令), 不是权限层 ——
+    HTTP 只绑本机, 与 POST /cmd 的信任模型一致 (能开本机端口的人本来就能
+    直接发命令)。加这道门是为了不让"没插机器人"时误改参数、误发命令。
+    """
+    if not (BRIDGE and BRIDGE.connected):
+        return {"ok": False, "err": "串口桥接未连接 (serial_console.py 没在跑?)"}
+    if not dev_state()["up"]:
+        return {"ok": False, "err": "机器人未在线"}
+    _connected.set()
+    BRIDGE.send("!CFG")           # 参数表随连接拉一次, 调试页首屏要用
+    broadcast({"t": "conn", "on": True})
+    return {"ok": True, **dev_state()}
+
+
+def handle_disconnect():
+    """调试页点「断开连接」: 停轮询, 回开始页 (设备仍在线, 可再连)"""
+    _connected.clear()
+    broadcast({"t": "conn", "on": False, "msg": "已断开连接"})
+    return {"ok": True}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -584,18 +663,36 @@ class Handler(BaseHTTPRequestHandler):
                              "bridge": BRIDGE.connected if BRIDGE else False,
                              "paused": _poll_paused.is_set(),
                              "flash": flash_state(),
-                             "stats": _stats})
+                             "stats": _stats,
+                             "dev": dev_state(),
+                             "connected": _connected.is_set()})
         else:
             self.send_error(404)
+
+    def _client_gone(self):
+        """
+        浏览器是否已经关掉这个 SSE 连接。
+
+        SSE 是单向下发, 对端关页时不会通知我们 —— 只有 socket 变成可读且读到
+        EOF 才知道。不主动查的话, 得等下面 keepalive 写失败 (最长 15 秒) 才发
+        现, 连接态与轮询就会多挂十几秒 ("没人连却在轮询")。
+        """
+        try:
+            if not select.select([self.connection], [], [], 0)[0]:
+                return False
+            return not self.connection.recv(1)      # b"" = 对端发了 FIN
+        except OSError:
+            return True
 
     def _serve_sse(self):
         """SSE: 长期保持的响应, 每条事件一个 data: 帧"""
         q = queue.Queue(maxsize=256)
         with _subs_lock:
-            first = not _subscribers           # 首个浏览器 → 拉一次参数表
+            first = not _subscribers
             _subscribers.add(q)
-        if first and BRIDGE and BRIDGE.connected:
-            BRIDGE.send("!CFG")
+        # 首个浏览器只要设备在线就补一次版本 —— 开始页在"连接"之前也要显示固件版本
+        if first and BRIDGE and BRIDGE.connected and dev_state()["up"]:
+            BRIDGE.send("!VER")
         try:
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream; charset=utf-8")
@@ -605,27 +702,40 @@ class Handler(BaseHTTPRequestHandler):
 
             # 开场: 当前快照 + 状态, 让刷新页面后不是空白
             hello = {"t": "hello", "bridge": BRIDGE.connected if BRIDGE else False,
-                     "paused": _poll_paused.is_set()}
+                     "paused": _poll_paused.is_set(),
+                     "connected": _connected.is_set(), "dev": dev_state()}
             self.wfile.write(f"data: {json.dumps(hello, ensure_ascii=False)}\n\n".encode())
             for key, snap in TELEM.snapshot().items():
                 ev = json.dumps({"t": key, "d": snap}, ensure_ascii=False)
                 self.wfile.write(f"data: {ev}\n\n".encode())
             self.wfile.flush()
 
+            last_write = time.monotonic()
             while True:
                 try:
-                    payload = q.get(timeout=15)
+                    payload = q.get(timeout=0.5)
                 except queue.Empty:
-                    self.wfile.write(b": keepalive\n\n")   # SSE 注释帧, 保活
-                    self.wfile.flush()
+                    payload = None
+                if self._client_gone():
+                    break
+                if payload is None:
+                    if time.monotonic() - last_write >= 15:
+                        self.wfile.write(b": keepalive\n\n")   # SSE 注释帧, 保活
+                        self.wfile.flush()
+                        last_write = time.monotonic()
                     continue
                 self.wfile.write(f"data: {payload}\n\n".encode())
                 self.wfile.flush()
+                last_write = time.monotonic()
         except (BrokenPipeError, ConnectionResetError, OSError):
             pass          # 浏览器关页/断网, 正常路径
         finally:
             with _subs_lock:
                 _subscribers.discard(q)
+                last = not _subscribers
+            if last:
+                # 最后一个浏览器走了: 没有调试页了, 连接态作废 (轮询随之停)
+                _connected.clear()
 
     MAX_UPLOAD = 8 * 1024 * 1024
 
@@ -670,6 +780,10 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 _poll_paused.clear()
             self._send_json({"ok": True, "paused": _poll_paused.is_set()})
+        elif self.path == "/connect":
+            self._send_json(handle_connect())
+        elif self.path == "/disconnect":
+            self._send_json(handle_disconnect())
         else:
             self.send_error(404)
 
@@ -744,8 +858,11 @@ def handle_param(body):
 
 def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0):
     """
-    定时下发只读命令喂仪表盘。仅在"有浏览器 + 未暂停 + 桥接在线"时发,
-    空闲时完全不打扰串口 (否则会污染同时在用的串口终端)。
+    定时下发只读命令喂仪表盘。仅在"有浏览器 + 已连接 + 未暂停 + 桥接在线"时发,
+    其余时候完全不打扰串口 (否则会污染同时在用的串口终端)。
+
+    已连接 (开始页点过「连接」) 是必要条件: 设备不在时 serial_console 会把命令
+    排队, 攒下的 !BATT/!A 会在设备回来的瞬间一股脑灌给刚上电的机器人。
 
     I2C 用 `!I2C q` (仅定向检测) 而非 `!I2C` —— 后者含 128 地址全总线扫描。
     健康总线上两者都是 ~20ms, 但命令处理在固件的 20ms 控制循环内 (= 舵机停更
@@ -756,7 +873,8 @@ def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0):
         time.sleep(0.1)
         with _subs_lock:
             has_client = bool(_subscribers)
-        if not has_client or _poll_paused.is_set() or not (BRIDGE and BRIDGE.connected):
+        if (not has_client or not _connected.is_set()
+                or _poll_paused.is_set() or not (BRIDGE and BRIDGE.connected)):
             continue
         now = time.monotonic()
         if batt_iv > 0 and now >= next_batt:
@@ -807,6 +925,11 @@ def main():
 
     def on_line(line):
         _stats["lines"] += 1
+        m = RE_DEV.match(line)
+        if m:
+            set_dev(m.group(1), m.group(2))
+            broadcast({"t": "bridge", "msg": line})   # 仍进日志面板
+            return
         if line.startswith("[TCP]"):
             broadcast({"t": "bridge", "msg": line})
             return
@@ -822,11 +945,21 @@ def main():
 
     def on_state(up, msg):
         broadcast({"t": "link", "up": up, "msg": msg})
-        # 桥接(重)连上时补一次参数表 —— 否则断线期间改的参数看不到
-        if up and BRIDGE:
-            with _subs_lock:
-                if _subscribers:
-                    BRIDGE.send("!CFG")
+        if not (up and BRIDGE):
+            # 桥接断了: 设备状态无从得知 (serial_console 重连后会自己补发),
+            # 连接态与轮询先停 —— 命令只会被排队, 攒着等设备回来重放
+            if _connected.is_set():
+                _connected.clear()
+                broadcast({"t": "conn", "on": False, "msg": "桥接已断开"})
+            return
+        with _subs_lock:
+            has_client = bool(_subscribers)
+        if not has_client:
+            return
+        if _connected.is_set():
+            BRIDGE.send("!CFG")      # 桥接(重)连后补参数表, 否则断线期间改的看不到
+        elif dev_state()["up"]:
+            BRIDGE.send("!VER")      # 未连接时只需刷新开始页的版本行
 
     BRIDGE = BridgeClient(args.bridge_host, args.bridge_port, on_line, on_state)
     threading.Thread(target=BRIDGE.run, daemon=True, name="bridge").start()
