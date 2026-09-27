@@ -856,7 +856,9 @@ def sse_open(port=HTTP_PORT, path="/events"):
     return s
 
 
-def sse_drain(s, seconds, stop_when=None):
+def sse_drain(s, seconds, stop_when=None, stamps=None):
+    """收 seconds 秒的 SSE 事件。stamps 非空时, 逐个追加到达时刻
+    (time.time()), 与 events 一一对应 —— 只有时延类断言需要它。"""
     events, buf = [], ""
     deadline = time.time() + seconds
     while time.time() < deadline:
@@ -875,6 +877,8 @@ def sse_drain(s, seconds, stop_when=None):
                 if line.startswith("data: "):
                     try:
                         events.append(json.loads(line[6:]))
+                        if stamps is not None:
+                            stamps.append(time.time())
                     except json.JSONDecodeError:
                         pass
         if stop_when and stop_when(events):
@@ -899,6 +903,43 @@ def wait_params(sse, pred, timeout=6):
 
 def val_of(snap, name):
     return (snap or {}).get("list", {}).get(name, {}).get("val")
+
+
+def test_bridge_latency(sse):
+    print("\n[3c] 桥接转发时延 (TCP 线程 0.5s 批处理回归)")
+
+    # 假固件以 20Hz 推 [CH] (间隔 50ms)。TCP 线程的 select 只等"客户端可读 /
+    # 新连接", 空闲链路上没有任何事件 —— 曾经它要睡满 0.5s 超时才刷发送队列,
+    # 于是 20Hz 的流被压成 500ms 一批, 所有遥测与命令应答被押后 0~500ms
+    # (端到端实测 500ms, 而固件侧只有 ~10ms; 网页"反应慢"的根因)。
+    # 判据直接用到达间隔: 批处理会留下一个 ~500ms 的空档。
+    stamps = []
+    evs = sse_drain(sse, 2.5, stamps=stamps)
+    ch_t = [t for t, e in zip(stamps, evs) if e.get("t") == "ch"]
+    gaps = [b - a for a, b in zip(ch_t, ch_t[1:])]
+    mx = max(gaps) if gaps else None
+    check("桥接随到随转: 20Hz 遥测最大到达间隔 < 250ms",
+          len(ch_t) >= 20 and mx is not None and mx < 0.25,
+          f"{len(ch_t)} 帧, 最大间隔 {mx*1000:.0f}ms" if mx else f"只收到 {len(ch_t)} 帧")
+
+    # 命令全链路往返 (浏览器 POST → 桥接 → 假固件 → 回 SSE): 批处理时代中位
+    # ≈250ms (相位随机), 修好后十几毫秒
+    lat = []
+    for _ in range(4):
+        t0 = time.time()
+        http_post("/cmd", "!VER")
+        st2 = []
+        evs2 = sse_drain(sse, 0.6, stamps=st2,
+                         stop_when=lambda e: any(x.get("t") == "raw"
+                                                 and "[VER]" in x.get("line", "") for x in e))
+        hit = next((t for t, e in zip(st2, evs2)
+                    if e.get("t") == "raw" and "[VER]" in e.get("line", "")), None)
+        if hit is not None:
+            lat.append(hit - t0)
+    med = sorted(lat)[len(lat) // 2] if lat else None
+    check("命令往返中位 < 150ms (批处理时代 ≈250ms)",
+          len(lat) == 4 and med is not None and med < 0.15,
+          f"中位 {med*1000:.0f}ms ({len(lat)}/4 次应答)" if med else "没收到应答")
 
 
 def test_param_e2e(sse):
@@ -1517,6 +1558,12 @@ def main():
                      ("nope.uf2", "文件不存在")]:
         r = json.loads(http_post("/flash", json.dumps({"uf2": bad})))
         check(f"POST /flash 拒绝{why}", r.get("ok") is False and r.get("err"), str(r))
+
+    # 桥接转发时延: 另开一路 SSE 量"固件输出 → 浏览器"的到达节拍
+    sse_lat = sse_open()
+    time.sleep(0.3)
+    test_bridge_latency(sse_lat)
+    sse_lat.close()
 
     # 参数页另开一路 SSE (上一路已关闭) —— 连接时服务器会下发一次 !CFG
     sse2 = sse_open()

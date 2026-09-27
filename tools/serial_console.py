@@ -16,8 +16,11 @@
     (配合 tools/tcp_monitor.py 使用; --no-tcp 可禁用)
 
 TCP 桥接数据流与线程安全约定:
-    串口 fd  ──读──>  主线程 ──bridge_publish()──> tcp_tx 队列 ──> TCP 线程 ──> 各客户端
+    串口 fd  ──读──>  主线程 ──bridge_publish()──> tcp_tx 队列 ──自唤醒管道──> TCP 线程 ──> 各客户端
     客户端  ──> TCP 线程 ──> tcp_rx 队列 ──自唤醒管道──> 主线程 ──send_line()──> 串口 fd
+
+  ★ 两个方向各有一根自唤醒管道: TCP 线程的 select 空闲时要睡满 0.5s 超时,
+    没有管道叫醒它, 队列里的数据就要等到超时才转发 (遥测/命令应答被押后 0~500ms)。
 
   ★ 串口 fd 只由主线程读写; TCP 线程只碰套接字; 两者仅通过线程安全队列通信。
     客户端命令复用主线程的 send_line(), 因此长度限制/前缀/排队语义与控制台输入完全一致。
@@ -63,6 +66,12 @@ _clients = {}                        # conn -> bytearray (待发送积压)
 _wake_r, _wake_w = os.pipe()         # 自唤醒管道: TCP 线程通知主 select 立即返回
 os.set_blocking(_wake_r, False)
 os.set_blocking(_wake_w, False)
+# 反向自唤醒: 主线程入队后叫醒 TCP 线程立即转发。TCP 线程的 select 只等
+# "客户端可读 / 新连接", 空闲链路上没有任何事件 —— 没有这根管道它要睡满
+# 0.5s 超时才刷发送队列, 遥测与命令应答因此被押后 0~500ms (网页"反应慢")。
+_tx_wake_r, _tx_wake_w = os.pipe()
+os.set_blocking(_tx_wake_r, False)
+os.set_blocking(_tx_wake_w, False)
 _tcp_server = None
 _listener = None
 _dev_state = "[TCP] dev off"         # 最近一次设备状态行 (主线程写, TCP 线程读来补发)
@@ -177,6 +186,11 @@ def bridge_publish(data):
         tcp_tx.put(bytes(_tcp_linebuf) + b"\n")
         _tcp_linebuf.clear()
 
+    try:
+        os.write(_tx_wake_w, b"\x00")    # 别让数据在队列里等 TCP 线程的 0.5s 超时
+    except (BlockingIOError, OSError):
+        pass    # 管道满 = TCP 线程必然已醒 (它下次循环会看到队列), 忽略
+
 
 def publish_dev_state(state, port=None):
     """
@@ -214,11 +228,23 @@ def tcp_server_thread():
 
     while True:
         with _clients_lock:
-            fds = [_listener] + list(_clients.keys())
+            fds = [_listener, _tx_wake_r] + list(_clients.keys())
         try:
             r, _, _ = select.select(fds, [], [], 0.5)
         except (OSError, ValueError):
             continue
+
+        # ---- 广播唤醒 (主线程刚入队, 见 bridge_publish) ----
+        # 排空管道里的唤醒字节; 数据本身在 tcp_tx 队列里, 下面照常收集
+        if _tx_wake_r in r:
+            try:
+                while True:
+                    if not os.read(_tx_wake_r, 4096):
+                        break
+            except (BlockingIOError, InterruptedError):
+                pass
+            except OSError:
+                pass
 
         # ---- 接受新连接 ----
         if _listener in r:
@@ -245,7 +271,8 @@ def tcp_server_thread():
                 break
 
         # ---- 接收客户端命令 ----
-        for conn in [c for c in r if c is not _listener]:
+        # 排除唤醒管道: 它是 fd 不是套接字, 混进来会在 recv() 上炸
+        for conn in [c for c in r if c is not _listener and c is not _tx_wake_r]:
             try:
                 data = conn.recv(4096)
             except (BlockingIOError, InterruptedError):
