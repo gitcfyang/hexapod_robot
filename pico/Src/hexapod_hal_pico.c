@@ -29,6 +29,7 @@
 #include "hardware/sync.h"
 #include "hardware/uart.h"
 #include "hardware/pwm.h"
+#include "hardware/watchdog.h"
 #include "pico/time.h"
 
 /* ==================== 舵机控制实现 ==================== */
@@ -1044,13 +1045,17 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             uint8_t sid = (uint8_t)parse_int(buf, 2, len);
             if (sid >= 18) { hal_debug_printf("Invalid servo id\r\n"); break; }
             hal_debug_printf("Sweep test servo %u: 300→1500→300\r\n", sid);
+            /* 全程 ~3.8s: 必须喂狗, 否则扫到一半被 1.5s 看门狗复位 ——
+             * 现象是"扫摆做一半板子重启", 很容易误判成舵机/电源问题 */
             for (int16_t a = 300; a <= 1500; a += 50) {
                 pca9685_set_servo_pulse(sid, pca9685_angle_to_pulse(a));
                 sleep_ms(80);
+                watchdog_update();
             }
             for (int16_t a = 1500; a >= 300; a -= 50) {
                 pca9685_set_servo_pulse(sid, pca9685_angle_to_pulse(a));
                 sleep_ms(80);
+                watchdog_update();
             }
             pca9685_set_servo_pulse(sid, pca9685_angle_to_pulse(0));
             hal_debug_printf("Sweep test done\r\n");
