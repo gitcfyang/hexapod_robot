@@ -259,6 +259,15 @@ uint8_t store_apply_to_robot(hexapod_t *robot)
         }
     }
 
+    /* 回放到 HAL 的运行时真源: 网页 (!HO) 与串口走查 (!C) 共用这一份, 少了这步
+     * 开机后只标一个舵机再 !SAVE 会丢掉记录里其余 17 路 (真源初始为空 →
+     * !SAVE 只存得下本次会话标过的)。
+     * 先拷到本地数组: 记录结构体是 packed, 直接取成员地址会踩
+     * -Waddress-of-packed-member (对齐未保证)。 */
+    int16_t offsets[18];
+    memcpy(offsets, s_calib.horn_offsets, sizeof(offsets));
+    hal_calib_import(offsets, s_calib.done_mask);
+
     /* PWM 周期: 纯 RAM 写入 (PRE_SCALE 与周期值无关), 无 I2C 流量。
      * 舵机供电在解锁前关闭, 此处写入时序安全。
      * 上限取 min(板数, 记录容量) 防越界 (记录仅容纳 2 块板)。 */
@@ -283,7 +292,8 @@ bool store_save_calib(bool safe_context)
     uint32_t done_mask = hal_calib_export(offsets);
 
     if (done_mask == 0u) {
-        hal_debug_printf("[STORE] Refuse: no calibration data (run !C first)\r\n");
+        hal_debug_printf("[STORE] Refuse: no calibration data "
+                         "(run !C or set centers on the web first)\r\n");
         return false;
     }
 

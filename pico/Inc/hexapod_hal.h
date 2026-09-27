@@ -383,7 +383,27 @@ void periph_status_print(void);
  * @brief 导出当前校准数据 (供非易失存储模块保存)
  * @param offsets_out 输出 18 路舵盘偏移 (0.1°), ID = leg*3 + joint; 传 NULL 仅取掩码
  * @return done_mask, bit i 置位表示第 i 个舵机已完成校准
+ *
+ * 取的是运行时真源, 由两条路共同写入: !C 串口走查的 !S/!N, 以及 !HO (网页
+ * 校准页)。两条路都落进同一份 g_horn_offsets/done_mask, 所以 !SAVE 存的是
+ * 它们的并集, 不存在"网页调完再 !SAVE 把走查结果冲掉"这种事。
  */
 uint32_t hal_calib_export(int16_t offsets_out[18]);
+
+/* hexapod_t 前置声明: core.h 反过来包含本头文件, 不能互相包含 */
+struct hexapod;
+
+/**
+ * @brief 绑定机器人实例 —— !HO 要直接写 leg_configs 里的 horn_offset (立即生效)
+ * @note 在 robot_init() 之后调用一次; 未绑定前 !HO 只更新运行时真源
+ */
+void hal_calib_bind_robot(struct hexapod *robot);
+
+/**
+ * @brief 回放 flash 里的校准记录到运行时真源 (boot 时由 store_apply_to_robot 调用)
+ * @note 少了这一步, 网页只标一个舵机再 !SAVE 就会把其余 17 路存量偏移丢掉 ——
+ *       done_mask 非空才允许保存, 而真源初始为空
+ */
+void hal_calib_import(const int16_t offsets[18], uint32_t done_mask);
 
 #endif /* HEXAPOD_HAL_H */

@@ -151,6 +151,11 @@ S_PER = [
     "[PER] pwm: 0=0 1=1500 2=0 3=5000 4=0 5=0 6=0 7=0 8=0 9=0 10=0 11=0 12=0 13=0",
     "[PER] pwmperiod: l=9500 r=9500",
 ]
+# 舵盘机械中心偏移 (固件 hal_pico.c: calib_horn_print_all / calib_horn_record)。
+# 18 行逐字取自固件格式; 值是 config.h 里各腿的默认偏移。
+S_HO = [f"[HO] id={i} off={v}" for i, v in enumerate(
+    [-10, 55, 8, 12, 85, 68, 0, 40, 30, -25, 60, 70, 15, 35, 45, 5, 20, 25])]
+
 # 外部 UART0 的收发 ([U0TX] 是 !UART0T 的回执, [U0] 是收到的整行)
 S_U0 = [
     "[U0TX] sent 5 bytes: hello",
@@ -337,6 +342,35 @@ def test_firmware_contract():
           "robot is armed, disarm first (!S)" in hal
           and "ctrl_state && ctrl_state->robot_on" in hal)
 
+    # 舵机机械中心 (!HO 单路 / !HOS 全量): 网页校准页的写入与回读通道。四个易错点
+    # 都只在真机上才现形, 静态钉住:
+    #   ① 角度约定 0=中位 1500µs —— 走查旧码拿 pulse(900) 当"回中位" (实为 2500µs
+    #      端止点), 导出的偏移整体差 900。!PER 修过同款 bug, 这里钉死"回中位一律 0";
+    #   ② 偏移真源只能是 leg_configs 的 horn_offset 字段 (!C 与 !HO 共用
+    #      calib_horn_record) —— 另存一份数组就等着两边不一致;
+    #   ③ !HO 与 !C 走的都是安全路径: armed 时拒绝 (网页上改了也当没改);
+    #   ④ 回读必须经 boot 回放种子 (hal_calib_import) —— 不然 boot 后网页只标一路
+    #      再 !SAVE 就把其余 17 路存量偏移抹掉。
+    re_ho = getattr(wc, "RE_HO", None)   # 缺失时按"不认"处理, 不炸整段契约
+    check("server 与固件对 [HO] 行的格式约定一致",
+          '"[HO] id=%u off=%d' in hal and re_ho is not None
+          and all(re_ho.match(l) is not None for l in S_HO))
+    check("固件「回中位」一律用 0 (=1500µs), 无 pulse(900) 残留",
+          "pca9685_angle_to_pulse(0)" in hal
+          and "pca9685_angle_to_pulse(900)" not in hal)
+    check("!HO 的偏移真源就是 leg_configs 的 horn_offset 字段 (与 !C 共用)",
+          "static void calib_horn_record(uint8_t id, int16_t angle)" in hal
+          and hal.count("calib_horn_record(") >= 3
+          and "&cfg->coxa_horn_offset" in hal
+          and "g_calib_robot->leg_configs[id / 3]" in hal)
+    check("!HO 在 armed 时拒绝 (与 !SAVE 同一判据)",
+          "[HO] Refuse: robot is armed, disarm first (!S)" in hal)
+    check("boot 回放把校准记录种回真源 (hal_calib_import)",
+          "hal_calib_import(" in hal
+          and "hal_calib_import(" in open(STORE_C, encoding="utf-8").read())
+    check("机器人指针在 robot_init 之后绑定 (hal_calib_bind_robot)",
+          "hal_calib_bind_robot(&g_robot);" in pico)
+
     # 保存按钮的基线靠这句固件回显重建 (网页认回显而不是「点了按钮」, 手敲 !CFGW
     # 和被固件拒绝的情况才都能正确)。改文案而不同步前端 → 保存后按钮一直亮着。
     m = RE_SAVE_ACK.search(open(INDEX_HTML, encoding="utf-8").read())
@@ -344,6 +378,18 @@ def test_firmware_contract():
     if m:
         store_c = open(STORE_C, encoding="utf-8").read()
         check(f"固件确实回显 {m.group(1)!r}", m.group(1) in store_c)
+
+    # 校准页的逐舵机面板: 前端写 !HO、后端认 [HO] 行, 两边的名字与语法对不上时
+    # 页面上没有任何报错 (点「设为中心」静默无效)。这里钉住接线的两端。
+    html = open(INDEX_HTML, encoding="utf-8").read()
+    check("校准页有逐舵机面板 (选中格 → 滑条 → 设为中心)",
+          'id="cal-edit"' in html and 'id="cal-ang"' in html
+          and 'id="cal-center"' in html and "设为中心" in html)
+    check("「设为中心」下发 !HO <id> <angle>", "`!HO ${CAL.sel} ${v}`" in html)
+    check("面板滑条转动走 !P (与调试页同一命令)",
+          "`!P ${CAL.sel} ${v}`" in html)
+    check("页码缓存 ho 帧并挂到 SSE 分发上",
+          'case "ho": renderHo(ev.d); break;' in html)
 
 
 # ==================== [3] 端到端 ====================
@@ -546,6 +592,24 @@ def test_parser():
           per2["motors"] == {"m1": 0, "m2": 0} and per2["uart0"]["baud"] == 115200,
           str(sorted(per2)))
 
+    # 舵盘偏移: 18 行累积成 {id: 偏移}, 单路回执与全量同一格式
+    t = wc.Telemetry()
+    kinds = [wc.parse_line(t, l) for l in S_HO]
+    check("舵盘偏移: 18 行各产生一帧 ho", [k[0] if k else None for k in kinds] == ["ho"] * 18)
+    # 缺 "ho" 状态键时按空表处理 —— 让上面那条 FAIL 说明问题, 而不是在后面
+    # KeyError 把整段测试打断 (契约段就再也跑不到了)
+    ho = t.snapshot().get("ho", {}).get("offs", {})
+    check("舵盘偏移: 18 路齐全且带负值",
+          len(ho) == 18 and ho.get(0) == -10 and ho.get(3) == 12 and ho.get(9) == -25,
+          str(sorted(ho.items())[:3]))
+    # 单路回执只动那一路 (校准页点一次「设为中心」就靠这个即时更新)
+    r = wc.parse_line(t, "[HO] id=3 off=-77")
+    ho = t.snapshot().get("ho", {}).get("offs", {})
+    check("舵盘偏移: 单路回执并入同一张表",
+          r and r[0] == "ho" and ho.get(3) == -77 and ho.get(0) == -10, str(r))
+    check("舵盘偏移: 非法行不产生帧 (id 越界/别的 [H] 前缀)",
+          wc.parse_line(wc.Telemetry(), "[HO] Invalid: id=99 (0..17)") is None)
+
     # 外部 UART0: 回执 + 收行。收行留在环形缓冲里累积 (不是整份覆盖)
     t = wc.Telemetry()
     kinds = [wc.parse_line(t, l) for l in S_U0]
@@ -706,6 +770,7 @@ def test_flasher():
 # 空格这条限制同时保证了 !PWMOFF 不会撞上 !PWM (与固件自己的字面量分发一致)。
 REPLAY = {"!BATT": S_BATT, "!I2C": S_I2C, "!I2C q": S_I2C_Q,
           "!IMU": S_IMU, "!A": S_SERVO, "!PERIPH": S_PER, "!UART0T": S_U0,
+          "!HOS": S_HO,
           "!VER": S_VER,
           "!MOTOR": ["[PER] motors: m1=500 m2=0"],
           "!LED": ["[PER] leds: g=0 r=0 hb=0 alarm=1"],
@@ -722,6 +787,9 @@ FAKE_ROBOT = {"locked": False, "on": False}
 def fake_response(cmd):
     if cmd.startswith("!CFG"):          # !CFG / !CFGR / !CFGW
         return fake_cfg(cmd)
+    if cmd.startswith("!HO "):          # 设中心: 回显 "偏移 = 该角度" (0=中位约定)
+        sid, _, ang = cmd[4:].partition(" ")
+        return [f"[HO] id={int(sid)} off={int(ang)}"]
     # 两个"有状态"的命令: 应答取决于之前收到过什么, 否则"锁没锁上/供没供电"
     # 在测试里看不出区别 (回放假固件只做回声时最容易漏掉的一类)
     if cmd == "!RC" or cmd.startswith("!RC "):      # 无参 = 锁, 有参 = 按参数
@@ -1558,6 +1626,39 @@ def main():
     rx = next((e["d"].get("u0_rx") for e in evs if e.get("t") == "per"
                and "u0_rx" in e.get("d", {})), None)
     check("带参数的外设命令也能过 (命令头前缀匹配)", rx == ["hello"], str(rx))
+
+    # ---- 舵机机械中心: !HOS 全量回读 / !HO <id> <angle> 单路写入 ----
+    # 两路都汇进同一条 "ho" 帧 (页面靠它刷格子里的偏移)。服务端用 --no-poll 起的,
+    # 所以这一帧只可能来自下面这两条 POST。
+    sse_p = sse_open()
+    time.sleep(0.3)
+    r = json.loads(http_post("/cmd", "!HOS"))
+    check("POST /cmd 下发 !HOS", r.get("ok") is True, str(r))
+    evs = sse_drain(sse_p, 3, stop_when=lambda e: any(
+        len(x.get("d", {}).get("offs", {})) == 18 for x in e if x.get("t") == "ho"))
+    offs = next((e["d"]["offs"] for e in reversed(evs)
+                 if e.get("t") == "ho" and len(e.get("d", {}).get("offs", {})) == 18),
+                None)
+    check("SSE 收到 !HOS 的 18 路偏移帧", offs is not None, str(evs[:4]))
+    if offs:
+        want = [int(l.split("off=")[1]) for l in S_HO]
+        # JSON 把 int 键变成字符串 (SSE 线上如此, 前端拿到的就是 str 键)
+        check("偏移值与固件回显逐路一致 (含负值)",
+              [offs.get(str(i)) for i in range(18)] == want, str(offs))
+
+    # 单路写入: 两个参数都要过 (id 与角度), 回执后再看同一张表里那一路
+    http_post("/cmd", "!HO 0 12")
+    evs = sse_drain(sse_p, 3, stop_when=lambda e: any(
+        x.get("d", {}).get("offs", {}).get("0") == 12 for x in e if x.get("t") == "ho"))
+    sse_p.close()
+    check("!HO <id> <angle> 写回同一路 (id 与角度都没被吃掉)",
+          any(e.get("d", {}).get("offs", {}).get("0") == 12
+              for e in evs if e.get("t") == "ho"),
+          str([e for e in evs if e.get("t") == "ho"][:2]))
+    check("[HO] 行不进日志面板 (18 行一条, 每轮询会把日志冲掉)",
+          not any(e.get("t") == "raw" and wc.RE_HO.match(e.get("line", ""))
+                  for e in evs),
+          str([e.get("line") for e in evs if e.get("t") == "raw"][:3]))
 
     r = json.loads(http_post("/poll", "off"))
     check("POST /poll 暂停轮询", r.get("paused") is True, str(r))

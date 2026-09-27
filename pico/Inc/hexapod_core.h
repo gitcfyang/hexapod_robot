@@ -23,7 +23,7 @@
 
 /* ==================== 机器人实例 ==================== */
 
-typedef struct {
+typedef struct hexapod {                        // tag: HAL 侧要前置声明这个类型
     control_state_t  state;                     // 控制状态
     leg_config_t     leg_configs[CNT_LEGS];     // 腿部配置
     bool             initialized;               // 初始化标志

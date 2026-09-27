@@ -164,6 +164,12 @@ RE_RUN_MODE = re.compile(r"Bal:(-?\d+) St:(-?\d+) Hi:(\d+)")
 #   格式严格两单词 (server 只认这一种, 见 hal_pico.c), 不带任何后缀。
 RE_RC = re.compile(r"^\[RC\] (locked|unlocked)$")
 
+# 舵盘机械中心偏移 (固件 hal_pico.c: calib_horn_record / calib_horn_print_all):
+#   [HO] id=0 off=-10
+# 单路回执 (!HO) 与全量 (18 行, !HOS) 同一格式, 前端按 id 逐个累积。
+# 约定是 0 = 舵机中位 1500µs, 偏移即"该舵机停在中位时 IK 该输出的角度"。
+RE_HO = re.compile(r"^\[HO\] id=(\d+) off=(-?\d+)$")
+
 
 class Telemetry:
     """各子系统的最新状态。每次解析更新后整体推给前端 (前端只渲染最后一份)。"""
@@ -180,6 +186,7 @@ class Telemetry:
             "params": {"list": {}, "count": 0, "changed": 0},
             "ver": {},
             "rc": {},          # 遥控门: {"locked": bool}
+            "ho": {},          # 舵盘偏移: {"offs": {id: 0.1°}}
             "run": {},         # 供电/运行: {"on": bool, x/y/z/gait/lift (仅 [RUN] 行带)}
         }
 
@@ -411,6 +418,16 @@ def parse_line(telem, line):
             except ValueError:
                 fields[k] = v
         return "per", telem.update("per", {m.group(1): fields})
+
+    # 舵盘偏移: 单路回执与 18 行全量同一格式, 逐个累积成 {id: 值}
+    m = RE_HO.match(line)
+    if m:
+        with telem.lock:
+            ho = telem.data.setdefault("ho", {})
+            offs = ho.setdefault("offs", {})
+            offs[int(m.group(1))] = int(m.group(2))
+            snap = {"offs": dict(offs)}
+        return "ho", snap
 
     m = RE_U0TX.match(line)
     if m:
@@ -996,6 +1013,7 @@ def poller_thread(batt_iv, imu_iv, servo_iv, i2c_iv, periph_iv=2.0, rc_iv=2.0):
             next_imu = now + imu_iv
         if servo_iv > 0 and now >= next_servo:
             BRIDGE.send("!A")
+            BRIDGE.send("!HOS")     # 舵盘偏移与角度同拍 (校准页要成对显示)
             next_servo = now + servo_iv
         if i2c_iv > 0 and now >= next_i2c:
             BRIDGE.send("!I2C q")
@@ -1051,7 +1069,7 @@ def main():
         # 面板是给"没人认领"的行用的。参数行一次 !CFG 就是几十行; [CH] 是 5Hz
         # 推送; !PERIPH 每 2s 6 行; rc 心跳每 ~2s 一条 —— 都会把日志冲掉。
         # (FAIL/WARN 提示行解析不出来, 仍然照常进日志)
-        if not (parsed and parsed[0] in ("params", "per", "ch", "rc", "run")):
+        if not (parsed and parsed[0] in ("params", "per", "ch", "rc", "run", "ho")):
             broadcast({"t": "raw", "line": line})
         if parsed:
             key, snap = parsed

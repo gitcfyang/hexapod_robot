@@ -128,6 +128,10 @@
   .servo { padding: .3rem .4rem; border-radius: var(--ui-radius); background: var(--surface-200); }
   .servo .id { font-size: 10px; color: var(--surface-800); }
   .servo .ang { font-size: 13px; }
+  /* 校准页的格子可点选 (状态页那份没有 .off 也不响应点击) */
+  .servo .off { font-size: 10px; color: var(--surface-800); }
+  #cal-servos .servo { cursor: pointer; }
+  #cal-servos .servo.sel { background: var(--surface-400); box-shadow: inset 0 0 0 1px var(--primary-500); }
   .servo.L { border-inline-start: 2px solid var(--primary-500); }
   .servo.R { border-inline-start: 2px solid var(--surface-600); }
   /* 通道格子: 16 个, 8 列正好两行; 标注功能名 + 数值 + 条 */
@@ -508,10 +512,12 @@
         <div class="tab_wrapper">
           <div class="tab_title">校准</div>
           <div class="note">
-            三件事都在这页：<b>舵机</b>走查 · <b>电压</b>标定（万用表实测 → 分压比）·
-            <b>IMU</b> 校准（姿态水平 / 加速度六面）。舵机走查与 IMU 复位期间主循环会停摆，
+            三件事都在这页：<b>舵机</b>机械中心 · <b>电压</b>标定（万用表实测 → 分压比）·
+            <b>IMU</b> 校准（姿态水平 / 加速度六面）。舵机调试与 IMU 复位期间主循环会停摆，
             两者都要<b>先把机器人架空或平放好</b>、并确认舵机供电状态符合预期。
-            舵机走查数据的读写只有串口命令，本页只是把命令做成了按钮；输出仍打在日志页。
+            <b>校准舵机</b>就是给每一路定机械中心：点格子选中 → 用滑条/微调把它转到中立位
+            → 按「设为中心」记下这一路的偏移（写入后立即参与 IK，不必重启）
+            → 18 路都调完再按「!SAVE 保存校准」落到 flash。没调过的舵机保留出厂默认偏移。
           </div>
           <div class="box">
             <h2>校准操作</h2>
@@ -525,6 +531,33 @@
           <div class="box wide">
             <h2>舵机角度</h2>
             <div class="servos" id="cal-servos"></div>
+          </div>
+
+          <div class="box wide" id="cal-edit" hidden>
+            <h2>舵机中心</h2>
+            <div class="row"><span>已选</span><span id="cal-sel" class="dim">点上面的格子选一路</span></div>
+            <div class="row"><span>当前偏移</span><span id="cal-off" class="dim">—</span></div>
+            <div class="perrow">
+              <div class="plabel">角度</div>
+              <input type="range" id="cal-ang" min="-900" max="900" step="5" value="0">
+              <input type="number" id="cal-angn" min="-900" max="900" value="0">
+              <div class="punit">0.1° · 0=中位 1500µs</div>
+            </div>
+            <div class="quick">
+              <button class="mini" id="cal-m20">−20</button>
+              <button class="mini" id="cal-m5">−5</button>
+              <button class="mini" id="cal-p5">+5</button>
+              <button class="mini" id="cal-p20">+20</button>
+              <button class="regular-button" id="cal-center">设为中心</button>
+            </div>
+            <div class="note">
+              滑条与微调按钮松手即下发 <code>!P 角度</code>（直接把这一路舵机转过去，绕过 IK）；
+              「设为中心」下发 <code>!HO</code>，把当前角度记成这一路的 horn_offset —— 写完
+              立即生效，之后走路的姿态就按新中心算。角度单位 0.1°，
+              <b>0 = 舵机中位 1500µs</b>，±900 = ±90° 极限位置（板子上的摇臂多半到不了 ±90°，
+              转到顶住就别再往上加，会憋舵机）。机器人须处于锁定状态，解锁时会拒绝。
+              偏移只在本页与固件里各留一份，掉电前记得按「!SAVE 保存校准」。
+            </div>
           </div>
 
           <div class="box wide">
@@ -745,6 +778,11 @@ function drawChart() {
 
 /* ---------------- 状态面板渲染 ---------------- */
 const BATT = {};
+/* 舵机机械中心校准 (校准页): 选中哪一路 + 两边的实时值。
+ *   angles[id] = 当前角度 (!A 帧, 也是滑条的回读源)
+ *   offs[id]   = 当前 horn_offset (!HOS 帧 / !HO 回执)
+ * 声明位置必须在这几个渲染函数之前 (顶层 const 在声明前是 TDZ, 见文件末尾的说明) */
+const CAL = { sel: -1, angles: {}, offs: {} };
 
 function renderBatt(d) {
   Object.assign(BATT, d);
@@ -889,7 +927,8 @@ function renderI2c(d) {
   cal.className = miss || bus !== "空闲" ? "err" : "ok";
 }
 
-/* 舵机格子出现在状态页和校准页两处 —— 两边都要跟着刷新 */
+/* 舵机格子出现在状态页和校准页两处 —— 两边都要跟着刷新。
+ * 校准页那份多一行偏移显示、可点选 (选中后由「舵机中心」面板驱动)。 */
 function renderServo(d) {
   if (!d.boards) return;
   for (const [host, prefix] of [["servos", "sv"], ["cal-servos", "calsv"]]) {
@@ -899,17 +938,21 @@ function renderServo(d) {
       let h = "";
       for (let i = 0; i < 18; i++) {
         const side = i <= 8 ? "R" : "L";
+        const off = prefix === "calsv" ? `<div class="off">偏移 —</div>` : "";
         h += `<div class="servo ${side}" id="${prefix}${i}">` +
-             `<div class="id">#${i} · ${side}</div><div class="ang">—</div></div>`;
+             `<div class="id">#${i} · ${side}</div><div class="ang">—</div>${off}</div>`;
       }
       el.innerHTML = h;
     }
     for (const key in d.boards) {
       const b = d.boards[key];
-      for (const id in b.angles)
+      for (const id in b.angles) {
         el.querySelector(`#${prefix}${id} .ang`).textContent = b.angles[id];
+        if (prefix === "calsv") CAL.angles[id] = b.angles[id];
+      }
     }
   }
+  calSyncPanel();
 }
 
 /* ---------------- 遥控通道实时显示 (遥控页) ----------------
@@ -1785,7 +1828,85 @@ function renderCalibVolt() {
   out.className = over ? "err" : "ok";
 }
 
+/* ---------------- 舵机中心校准 (选中一路 → 转到中位 → 记为该路中心) ----------------
+ * 两半各自下发: 滑条/微调走 !P (绕过 IK 的直接角度命令, 立刻能动舵机),
+ * 「设为中心」走 !HO (把当前角度记成这路的 horn_offset, 立即参与 IK)。
+ * 偏移的回读是 !HOS (与 !A 同拍轮询), 所以格子里的偏移最多滞后一个轮询周期。 */
+
+/* 面板 ← 状态缓存 (值在用户手里编辑时不抢) */
+function calSyncPanel() {
+  const box = $("cal-edit");
+  if (!box || CAL.sel < 0) return;
+  const off = CAL.offs[CAL.sel];
+  $("cal-off").textContent = off === undefined ? "—" : off;
+  const ang = CAL.angles[CAL.sel];
+  const rng = $("cal-ang"), num = $("cal-angn");
+  const busy = document.activeElement === rng || document.activeElement === num;
+  if (ang !== undefined && !busy) { rng.value = ang; num.value = ang; }
+}
+
+function selectCalServo(i) {
+  CAL.sel = i;
+  const box = $("cal-edit");
+  if (box) box.hidden = false;
+  const side = i <= 8 ? "R" : "L";
+  $("cal-sel").textContent = `#${i} · ${side} · ${["coxa", "femur", "tibia"][i % 3]}`;
+  for (const c of document.querySelectorAll("#cal-servos .servo"))
+    c.classList.toggle("sel", c.id === `calsv${i}`);
+  calSyncPanel();
+}
+
+/* !HO 回执与 !HOS 全量: 刷新每格的偏移显示与面板 */
+function renderHo(d) {
+  if (d && d.offs) for (const id in d.offs) CAL.offs[id] = d.offs[id];
+  for (const id in CAL.offs) {
+    const cell = $(`calsv${id}`);
+    const el = cell && cell.querySelector(".off");
+    if (el) el.textContent = `偏移 ${CAL.offs[id]}`;
+  }
+  calSyncPanel();
+}
+
+/* 把选中舵机转到指定角度 (直接命令, 与 !C 走查的 !+/- 同一条路) */
+function calSendAngle(v) {
+  if (CAL.sel < 0) return;
+  v = Math.max(-900, Math.min(900, Math.round(v) || 0));
+  $("cal-ang").value = v;
+  $("cal-angn").value = v;
+  CAL.angles[CAL.sel] = v;      // 乐观更新, 下一个 !A 帧会覆盖成实测值
+  sendCmd(`!P ${CAL.sel} ${v}`);
+}
+
 function initCalibPage() {
+  /* 舵机中心面板: 格子点选 + 滑条/微调 + 设为中心 */
+  const cells = $("cal-servos");
+  if (cells) cells.onclick = (e) => {
+    const cell = e.target.closest(".servo");
+    if (cell && cell.id.startsWith("calsv"))
+      selectCalServo(parseInt(cell.id.slice(5), 10));
+  };
+  const rng = $("cal-ang"), num = $("cal-angn");
+  if (rng && num) {
+    rng.oninput = () => { num.value = rng.value; };
+    rng.onchange = () => calSendAngle(parseInt(rng.value, 10));
+    num.onchange = () => calSendAngle(parseInt(num.value, 10));
+    for (const [bid, dv] of [["cal-m20", -20], ["cal-m5", -5],
+                             ["cal-p5", 5], ["cal-p20", 20]]) {
+      $(bid).onclick = () => {
+        if (CAL.sel < 0) { addLog("[校准] 先点上面的格子选一路舵机", "l-err"); return; }
+        calSendAngle((parseInt(num.value, 10) || 0) + dv);
+      };
+    }
+    $("cal-center").onclick = () => {
+      if (CAL.sel < 0) { addLog("[校准] 先点上面的格子选一路舵机", "l-err"); return; }
+      const v = parseInt(num.value, 10) || 0;
+      sendCmd(`!HO ${CAL.sel} ${v}`);
+      addLog(`[校准] #${CAL.sel} 机械中心 = ${v} (0=中位 1500µs), ` +
+             `立即生效; 掉电保持请按「!SAVE 保存校准」`, "l-cmd");
+    };
+    renderHo({});     // ho 帧可能比 init 先到, 用缓存补一次
+  }
+
   const apply = $("cal-v-apply");
   if (!apply) return;
 
@@ -2309,6 +2430,7 @@ function connect() {
       case "imu": renderImu(ev.d); break;
       case "i2c": renderI2c(ev.d); break;
       case "servo": renderServo(ev.d); break;
+      case "ho": renderHo(ev.d); break;
       case "ch": renderCh(ev.d); break;
       case "per": renderPer(ev.d); break;
       case "run": renderRun(ev.d); break;

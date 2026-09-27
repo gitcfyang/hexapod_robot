@@ -628,12 +628,82 @@ static uint32_t g_mode_switch_time_ms = 0;   /* 进入当前模式的时间 */
 /* ==================== 舵机校准模式 ==================== */
 static bool     g_calib_active = false;
 static uint8_t  g_calib_servo = 0;
-static int16_t  g_calib_angle = 900;
-static int16_t  g_calib_best[18];
-static bool     g_calib_done[18];
+static int16_t  g_calib_angle = 0;
 
 static const char *g_calib_leg_name[6]   = {"RR","RM","RF","LR","LM","LF"};
 static const char *g_calib_joint_name[3] = {"coxa","femur","tibia"};
+
+/* ---- 舵盘偏移的运行时真源 ----
+ * 两条写入路径共用这一份: !C 串口走查 (!S/!N) 与 !HO (网页校准页)。
+ * !SAVE 从这里导出, boot 时由 store_apply_to_robot → hal_calib_import 回放。
+ *
+ * 角度约定 (与 pca9685_angle_to_pulse 一致): 0 = 舵机中位 1500µs, ±900 = ±90° 极限。
+ * horn_offset 就是"舵机停在中位时 IK 该输出多少" —— IK 侧是
+ * `最终角度 = IK角度 + horn_offset` (hexapod_ik.c), 所以把舵机转到物理中位时的
+ * 那个角度值, 原样就是要写的偏移。
+ *
+ * ⚠️ 旧版走查用 0..1800 映射 (900 = 中位) 并在导出时减 900, 是 pre-298b65f
+ * 的遗留: 在现行映射下 calib_enter 的 "回中位 900" 实为 2500µs 端止点,
+ * 且对好中心的舵机导出 ≈-900 的偏移 (!PER 修过同款 bug)。 */
+static struct hexapod *g_calib_robot = NULL;   // hal_calib_bind_robot 绑定
+static int16_t  g_horn_offsets[18];
+static uint32_t g_horn_done_mask = 0;
+
+/* 第 id 路舵机的 horn_offset 字段 (leg*3 + joint); 未绑定时返回 NULL */
+static int16_t *horn_offset_field(uint8_t id)
+{
+    if (!g_calib_robot || id >= 18) return NULL;
+    leg_config_t *cfg = &g_calib_robot->leg_configs[id / 3];
+    switch (id % 3) {
+        case 0:  return &cfg->coxa_horn_offset;
+        case 1:  return &cfg->femur_horn_offset;
+        default: return &cfg->tibia_horn_offset;
+    }
+}
+
+/* 记录/更新一路舵机的机械中心: 偏移 = 该舵机停在物理中位时的角度值 */
+static void calib_horn_record(uint8_t id, int16_t angle)
+{
+    if (id >= 18) {
+        hal_debug_printf("[HO] Invalid: id=%u (0..17)\r\n", id);
+        return;
+    }
+    if (angle < -900 || angle > 900) {
+        hal_debug_printf("[HO] Invalid: angle=%d (限度 ±900 = ±90°)\r\n", angle);
+        return;
+    }
+
+    g_horn_offsets[id] = angle;
+    g_horn_done_mask |= (1u << id);
+
+    /* 立即生效: IK 每周期现读 leg_configs (hexapod_core.c), 写完下一拍就用新值 */
+    int16_t *field = horn_offset_field(id);
+    if (field) *field = angle;
+
+    hal_debug_printf("[HO] id=%u off=%d\r\n", id, angle);
+}
+
+/* 打印全部 18 路偏移 (网页校准页轮询 !HOS 用); 格式与单路回执一致 */
+static void calib_horn_print_all(void)
+{
+    for (uint8_t i = 0; i < 18; i++) {
+        const int16_t *field = horn_offset_field(i);
+        hal_debug_printf("[HO] id=%u off=%d\r\n", i,
+                         field ? *field : g_horn_offsets[i]);
+    }
+}
+
+void hal_calib_bind_robot(struct hexapod *robot)
+{
+    g_calib_robot = robot;
+}
+
+void hal_calib_import(const int16_t offsets[18], uint32_t done_mask)
+{
+    if (!offsets) return;
+    memcpy(g_horn_offsets, offsets, sizeof(g_horn_offsets));
+    g_horn_done_mask = done_mask;
+}
 
 /* 将当前校准角度写入选中舵机 */
 static void calib_apply(void)
@@ -647,7 +717,7 @@ static void calib_print_status(void)
 {
     uint8_t leg   = g_calib_servo / 3;
     uint8_t joint = g_calib_servo % 3;
-    hal_debug_printf("[CAL] Servo %u (%s %s) angle=%d | "
+    hal_debug_printf("[CAL] Servo %u (%s %s) angle=%d (center=0) | "
                      "!+/- fine !++/-- coarse !N next !S save !D dump !Q quit\r\n",
                      g_calib_servo, g_calib_leg_name[leg],
                      g_calib_joint_name[joint], g_calib_angle);
@@ -662,15 +732,12 @@ static void calib_enter(uint8_t start_servo, control_state_t *ctrl_state)
     hal_servo_power_set_all(true);
     hal_delay_ms(100);
 
-    memset(g_calib_best, 0, sizeof(g_calib_best));
-    memset(g_calib_done, 0, sizeof(g_calib_done));
-
     g_calib_active = true;
     g_calib_servo  = (start_servo < 18) ? start_servo : 0;
-    g_calib_angle  = 900;
+    g_calib_angle  = 0;
 
-    /* 所有舵机回中位 */
-    uint16_t pulse = pca9685_angle_to_pulse(900);
+    /* 所有舵机回中位 (0 = 1500µs; 旧版写 900 实为 2500µs 端止点) */
+    uint16_t pulse = pca9685_angle_to_pulse(0);
     for (uint8_t i = 0; i < 18; i++) {
         pca9685_set_servo_pulse(i, pulse);
     }
@@ -683,18 +750,14 @@ static void calib_enter(uint8_t start_servo, control_state_t *ctrl_state)
     calib_print_status();
 }
 
-/* 保存当前舵机的最佳角度 */
+/* 保存当前舵机的最佳角度 (与网页「设为中心」走同一条记录函数) */
 static void calib_save(void)
 {
-    g_calib_best[g_calib_servo]  = g_calib_angle;
-    g_calib_done[g_calib_servo]  = true;
-
-    int16_t offset = g_calib_angle - 900;
     uint8_t leg   = g_calib_servo / 3;
     uint8_t joint = g_calib_servo % 3;
-    hal_debug_printf("[CAL] ✓ Saved: %s %s best=%d → horn_offset=%d\r\n",
-                     g_calib_leg_name[leg], g_calib_joint_name[joint],
-                     g_calib_angle, offset);
+    hal_debug_printf("[CAL] ✓ Saved: %s %s best=%d\r\n",
+                     g_calib_leg_name[leg], g_calib_joint_name[joint], g_calib_angle);
+    calib_horn_record(g_calib_servo, g_calib_angle);   /* 顺带打出 [HO] 行 */
 }
 
 /* 保存并切换到下一个舵机 */
@@ -704,7 +767,7 @@ static void calib_next(void)
 
     if (g_calib_servo < 17) {
         g_calib_servo++;
-        g_calib_angle = 900;
+        g_calib_angle = 0;
         calib_apply();
     } else {
         hal_debug_printf("[CAL] ★ All 18 servos cycled! Use !D to dump, !Q to quit.\r\n");
@@ -716,7 +779,7 @@ static void calib_next(void)
 static void calib_dump(void)
 {
     uint8_t done_cnt = 0;
-    for (uint8_t i = 0; i < 18; i++) { if (g_calib_done[i]) done_cnt++; }
+    for (uint8_t i = 0; i < 18; i++) { if (g_horn_done_mask & (1u << i)) done_cnt++; }
 
     hal_debug_printf("\r\n");
     hal_debug_printf("╔══════════════════════════════════════╗\r\n");
@@ -728,8 +791,9 @@ static void calib_dump(void)
         hal_debug_printf("\r\n  /* %s leg */\r\n", g_calib_leg_name[leg]);
         for (uint8_t j = 0; j < 3; j++) {
             uint8_t id = leg * 3 + j;
-            int16_t offset = g_calib_best[id] - 900;
-            char marker = g_calib_done[id] ? ' ' : '?';  /* ? = 未校准 */
+            const int16_t *field = horn_offset_field(id);
+            int16_t offset = field ? *field : g_horn_offsets[id];
+            char marker = (g_horn_done_mask & (1u << id)) ? ' ' : '?';  /* ? = 未校准 */
             hal_debug_printf("  configs[LEG_%s].%s_horn_offset = %d;%c\r\n",
                              g_calib_leg_name[leg], g_calib_joint_name[j],
                              offset, marker);
@@ -738,15 +802,11 @@ static void calib_dump(void)
     hal_debug_printf("\r\n");
 }
 
-/* 导出校准数据给非易失存储模块 (offset = best - 900) */
+/* 导出校准数据给非易失存储模块 (运行时真源, 见 g_horn_offsets 注释) */
 uint32_t hal_calib_export(int16_t offsets_out[18])
 {
-    uint32_t mask = 0;
-    for (uint8_t i = 0; i < 18; i++) {
-        if (offsets_out) offsets_out[i] = (int16_t)(g_calib_best[i] - 900);
-        if (g_calib_done[i]) mask |= (1u << i);
-    }
-    return mask;
+    if (offsets_out) memcpy(offsets_out, g_horn_offsets, sizeof(g_horn_offsets));
+    return g_horn_done_mask;
 }
 
 /* 退出校准模式 */
@@ -754,13 +814,13 @@ static void calib_quit(void)
 {
     calib_dump();
 
-    uint16_t pulse = pca9685_angle_to_pulse(900);
+    uint16_t pulse = pca9685_angle_to_pulse(0);
     for (uint8_t i = 0; i < 18; i++) {
         pca9685_set_servo_pulse(i, pulse);
     }
 
     g_calib_active = false;
-    hal_debug_printf("[CAL] Calibration exited. All servos → 900.\r\n");
+    hal_debug_printf("[CAL] Calibration exited. All servos → center (0).\r\n");
 }
 
 static void input_uart_irq_handler(void)
@@ -1816,6 +1876,37 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
         return true;
     }
 
+    /* ---- 舵机机械中心 (!HO <id> <angle> / !HOS) ----
+     * 网页校准页走这条: 选中舵机 → !P 转到物理中位 → 把该角度记成 horn_offset
+     * (立即生效, !SAVE 落盘)。与 !C 走查共用真源, 两条路可以混着用。
+     * 位置与 !SAVE 相同: 校准拦截与 ctrl_state 判空之前 —— 校准模式里也要能用。
+     * 'H' 无其它命令前缀冲突。 */
+    if ((buf[1] == 'H' || buf[1] == 'h') && len >= 4 && buf[2] == 'O') {
+        if (buf[3] == 'S' || buf[3] == 's') {
+            calib_horn_print_all();
+            return true;
+        }
+        if (buf[3] == ' ') {
+            uint8_t sid = (uint8_t)parse_int(buf, 3, len);
+            /* 从 id 之后找第二个空格, 角度在它后面; 找不到 = 参数不全 */
+            uint8_t pos = 4;
+            while (pos < len && buf[pos] != ' ') pos++;
+            if (pos >= len) {
+                hal_debug_printf("[HO] Usage: !HO <id> <angle>  (angle 0 = center)\r\n");
+                return true;
+            }
+            int16_t ang = parse_int(buf, (uint8_t)(pos + 1), len);
+            bool safe = (!ctrl_state || !ctrl_state->robot_on ||
+                         hal_is_calibration_active() || hal_is_period_calib_active());
+            if (!safe) {
+                hal_debug_printf("[HO] Refuse: robot is armed, disarm first (!S)\r\n");
+                return true;
+            }
+            calib_horn_record(sid, ang);
+            return true;
+        }
+    }
+
     /* ---- 运行时参数 (!CFG / !CFGR / !CFGW) ----
      * 位置: ctrl_state 判空之前 —— 启动失败 / 电池检测卡住时正是最需要
      * 改参数的场合 (那两个等待循环里也只能靠 !CFG batt_check 0 脱身)。
@@ -2107,9 +2198,9 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
             break;
         }
         case 'Z': {
-            /* 所有舵机回中位 (900 = 90°) */
-            hal_debug_printf("All servos → 90° (900)\r\n");
-            uint16_t pulse = pca9685_angle_to_pulse(900);
+            /* 所有舵机回中位 (0 = 1500µs; 旧版写 900 实为 2500µs 端止点) */
+            hal_debug_printf("All servos → center (0 = 1500µs)\r\n");
+            uint16_t pulse = pca9685_angle_to_pulse(0);
             for (uint8_t i = 0; i < 18; i++) {
                 pca9685_set_servo_pulse(i, pulse);
             }

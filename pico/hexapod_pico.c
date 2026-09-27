@@ -268,6 +268,10 @@ int main(void)
         }
     }
 
+    /* 把机器人实例交给 HAL: !HO (网页校准页设中心) 要直接写 leg_configs 里的
+     * horn_offset, IK 每周期现读该结构体, 写完下一拍即生效 */
+    hal_calib_bind_robot(&g_robot);
+
     /* 非易失校准: 加载并覆盖运行时配置
      * (舵机供电未开, 此时写入 PWM 周期无实际输出, 时序安全) */
     if (store_load()) {
