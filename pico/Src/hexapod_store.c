@@ -239,8 +239,8 @@ uint8_t store_apply_to_robot(hexapod_t *robot)
     if (!robot || !s_calib_valid) return 0;
 
     /* 只套用 done_mask 置位的舵机 —— 记录里的偏移是按"该舵机是否校准过"写的,
-     * 没校准过的位是占位值 (g_calib_best 为 0 → 偏移 -900), 无条件套用会把
-     * config.h 里的默认偏移冲成 -90°, 整条腿错位。
+     * 没校准过的位是导出时的原值 (未标过的路是 0), 无条件套用会把 config.h 里
+     * 的默认偏移冲成 0, 整条腿错位。
      * 校准到一半就保存 (只调了 3 路) 是完全正常的用法, 记录里本就带着
      * done_mask 就是为了这个 —— 载入侧过去一直没读它。 */
     uint8_t applied = 0;
