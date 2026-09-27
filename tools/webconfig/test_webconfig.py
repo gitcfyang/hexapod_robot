@@ -210,6 +210,7 @@ STORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_store.c")
 CORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_core.c")
 I2C_C = os.path.join(ROOT, "pico", "Src", "hexapod_i2c_protocol.c")
 HAL_C = os.path.join(ROOT, "pico", "Src", "hexapod_hal_pico.c")
+BNO_C = os.path.join(ROOT, "pico", "Src", "bno055.c")
 PICO_C = os.path.join(ROOT, "pico", "hexapod_pico.c")
 INDEX_HTML = os.path.join(HERE, "index.html")
 
@@ -315,6 +316,25 @@ def test_firmware_contract():
     check("固件 !PERIPH 的 pwmperiod 行节名在 server 白名单里",
           "[PER] pwmperiod: l=%u r=%u" in hal
           and wc.RE_PER.match("[PER] pwmperiod: l=9500 r=9500") is not None)
+
+    # IMU 校准复位 (!IMUR): 复位 BNO055、清空芯片里的校准值。两个易错点都只在
+    # 真机上才现形, 静态钉住:
+    #   ① 命令分发必须排在 !IMU 状态查询之前 —— 后者只看到 buf[2]=='M' 就认了
+    #      (与 !I2C2/!I2C、!V/!VER 同一类前缀冲突), 排在后面就永远收不到 !IMUR;
+    #   ② 复位后必须重新初始化 —— 融合停在复位前, 姿态读数会一直不动。
+    bno = open(BNO_C, encoding="utf-8").read()
+    check("固件 !IMUR 分发排在 !IMU 状态查询之前 (前缀冲突)",
+          "imu_calib_reset(ctrl_state);" in hal
+          and hal.index("!IMUR: IMU 校准复位") < hal.index("!IMU: IMU 状态"))
+    check("BNO055 复位走 RST_SYS 并作废驱动状态 (读函数立刻失败)",
+          "bool bno055_reset_sys(void)" in bno
+          and "BNO055_REG_SYS_TRIGGER, BNO055_TRIG_RST_SYS" in bno
+          and "g_initialized = false;" in bno)
+    check("!IMUR 复位后重新初始化 (否则融合停在复位前)",
+          "if (hal_imu_init()) {" in hal)
+    check("!IMUR 已解锁时拒绝 (与 !SAVE 的 safe_context 同一判据)",
+          "robot is armed, disarm first (!S)" in hal
+          and "ctrl_state && ctrl_state->robot_on" in hal)
 
     # 保存按钮的基线靠这句固件回显重建 (网页认回显而不是「点了按钮」, 手敲 !CFGW
     # 和被固件拒绝的情况才都能正确)。改文案而不同步前端 → 保存后按钮一直亮着。
@@ -1204,6 +1224,21 @@ def main():
           'data-cmd="!C"' in raw_page and 'data-cmd="!I2C"' in raw_page)
     check("校准页有 18 路舵机格子与 I2C 摘要",
           'id="cal-servos"' in raw_page and 'id="cal-i2c"' in raw_page)
+    # 校准页另外两张卡: 电压标定 (页面侧算分压比) 与 IMU 校准 (显示 + !IMUR 重置)。
+    # 电压卡的几个 id 互相喂数据 (读数/引脚电压来自 !BATT 帧, 分压比来自参数帧),
+    # 任何一个改名都会让卡片停在「—」而全程无报错, 所以逐个钉住。
+    check("校准页有电压标定卡 (读数/引脚/分压比/实测输入/下发)",
+          all(f'id="cal-v-{i}"' in raw_page
+              for i in ("batt", "pin", "ratio", "meas", "apply", "new")))
+    check("电压标定按 实测÷引脚电压 算分压比 (与固件注释同一条式子)",
+          "Math.round(meas / BATT.pin_mv * 1000)" in raw_page
+          and 'sendSet("batt_ratio_milli", nv)' in raw_page)
+    check("校准页有 IMU 校准卡 (在线/姿态/等级) 与 !IMUR 重置按钮",
+          all(f'id="calimu-{i}"' in raw_page for i in ("av", "rp", "calib"))
+          and 'data-cmd="!IMUR"' in raw_page)
+    check("IMU 校准卡复用 !IMU 帧 (等级/姿态与状态页同源)",
+          'const cav = $("calimu-av")' in raw_page
+          and '$("calimu-calib").className = d.fully ? "ok" : "warn"' in raw_page)
 
     # 参数分页: 每页一个 tab 按钮 + 一个卡片宿主。页面本身由 JS 按 PAGES 生成,
     # 所以断言生成器的输入 (PAGES 里的 id) 与 HTML 里的 tab 按钮两边都在。
@@ -1272,6 +1307,18 @@ def main():
     check("矩阵与组合键每行都有「单击触发」勾选框",
           'id="md-ck-${key}"' in raw_page and 'id="cb-ck-${key}"' in raw_page
           and "单击触发" in raw_page)
+    # 勾选框的位置: .mdrow 是 4 列网格 (名字|通道|低中高|单击), 矩阵行与组合键行共用。
+    # 塞进第 3 列 (低/中/高 那格, 本身就要 150px) 会挤爆, 组合键行的第 4 个元素则
+    # 会折到下一行去 —— 两种都只是"看着奇怪"、不报错, 所以在这里钉住。
+    check("矩阵行/组合键行的「单击触发」都在第 4 列 (class=\"ck\", 不在 .lv 里)",
+          raw_page.count('<div class="lv">') == 1
+          and raw_page.count('<label class="ck"><input type="checkbox" id="md-ck-${key}">'
+                             '单击触发</label>') == 1
+          and raw_page.count('<label class="ck"><input type="checkbox" id="cb-ck-${key}">'
+                             '单击触发</label>') == 1
+          and ".mdrow .ck {" in raw_page)
+    check("模式页网格是 4 列 (组合键行不再折到第二行)",
+          "grid-template-columns: 150px 190px 150px auto;" in raw_page)
     # 打包格式必须与固件 hexapod_input.h 一致: ch<<3|bits|click<<8 / a|b<<5|hold<<10
     check("矩阵值按 ch<<3|bits|click<<8 打包 (ch=31 未分配, click 在 bit8)",
           "MODE_NONE << 3" in raw_page and "(ch << 3) | bits" in raw_page

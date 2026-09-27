@@ -191,3 +191,23 @@ bool bno055_get_sw_rev(uint16_t *rev)
     *rev = ((uint16_t)msb << 8) | lsb;
     return true;
 }
+
+bool bno055_reset_sys(void)
+{
+    if (!g_initialized) {
+        return false;   /* 没初始化过 (芯片不在线), 没有可复位的状态 */
+    }
+
+    /* RST_SYS 是自清位: 写 1 立刻开始复位序列 (不依赖当前工作模式),
+     * 期间芯片不响应 I2C —— 之后的 POR 等待由 bno055_init 开头那次
+     * sleep_ms(BNO055_POR_WAIT_MS) 兜住。 */
+    if (!bno055_write_reg(BNO055_REG_SYS_TRIGGER, BNO055_TRIG_RST_SYS)) {
+        return false;   /* 写失败: 芯片可能没收到, 保持原状态 */
+    }
+
+    /* 复位后本驱动的状态全部作废: 融合停了、校准值清了。
+     * 在读函数上立刻生效 (read_euler 会直接失败), 直到重新 init。 */
+    g_initialized = false;
+    g_calib_stat  = 0;
+    return true;
+}

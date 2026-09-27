@@ -200,6 +200,21 @@ bool bno055_get_int_config(uint8_t *en, uint8_t *msk, uint8_t *cntl);
  */
 bool bno055_get_sw_rev(uint16_t *rev);
 
+/**
+ * @brief 系统复位 (SYS_TRIGGER.RST_SYS): 芯片回到上电态
+ *
+ * 校准值 (CALIB_STAT)、工作模式、单位全部清空 —— 用于「重新标定」:
+ * 复位后把机器人平放/缓慢翻六面, NDOF 融合会自己重新收敛。
+ *
+ * ⚠️ 复位序列期间芯片不响应 I2C (约 BNO055_POR_WAIT_MS), 且复位后融合
+ *    不再运行 —— 调用方必须紧接着重新初始化 (bno055_init),
+ *    否则姿态读数永远停在复位前的最后一帧 (bno055_read_euler 会因
+ *    g_initialized 已清而直接失败, 不会报出假的旧值)。
+ *
+ * @return true 复位命令已送达芯片 (此后本驱动进入未初始化态)
+ */
+bool bno055_reset_sys(void);
+
 #ifdef __cplusplus
 }
 #endif

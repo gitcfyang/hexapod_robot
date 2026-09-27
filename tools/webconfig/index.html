@@ -227,15 +227,19 @@
   .perrow .punit { font-size: 11px; color: var(--surface-800); }
 
   /* ---------- 模式页 ---------- */
-  /* 一行一个模式: 名字 | 通道 | 低/中/高。宽度按最长的通道名 (CH16 · R1) 留的 */
+  /* 一行一个模式: 名字 | 通道 | 低/中/高 | 单击触发。宽度按最长的通道名 (CH16 · R1) 留的。
+   * 组合键行是同一套列 (名字 | 键A | 键B | 单击触发) —— 第 4 列留给单击勾选框,
+   * 两种行型因此对齐; 塞进第 3 列会挤爆 (低/中/高 本身就要 150px),
+   * 组合键行多出来的那个元素则会折到下一行去。 */
   .mdrow {
-    display: grid; grid-template-columns: 150px 190px 150px;
+    display: grid; grid-template-columns: 150px 190px 150px auto;
     align-items: center; gap: .5rem; padding: .2rem 0; max-width: 820px;
   }
   .mdrow .plabel { font-size: 12px; color: var(--surface-800); }
   .mdrow select { font-size: 12px; padding: .1rem .2rem; }
   .mdrow .lv { display: flex; gap: .6rem; font-size: 12px; align-items: center; }
   .mdrow .lv label { display: flex; gap: .2rem; align-items: center; cursor: pointer; }
+  .mdrow .ck { display: flex; gap: .2rem; align-items: center; font-size: 12px; cursor: pointer; }
   .mdrow.is-unassigned .plabel { color: var(--surface-600); }
   #per-rx { max-height: 130px; }
   #per-tx { flex: 1; min-width: 8rem; }
@@ -502,11 +506,12 @@
       <!-- ==================== 校准 ==================== -->
       <section class="tabpage" id="tab-calib" hidden>
         <div class="tab_wrapper">
-          <div class="tab_title">舵机校准</div>
+          <div class="tab_title">校准</div>
           <div class="note">
-            校准走查会依次驱动全部 18 路舵机 —— <b>先把机器人架空</b>，并确认舵机供电已开。
-            走查中每条腿按提示调到目标位置，全部走完后按「保存校准」写入 flash（掉电保持）。
-            校准数据的读写只有串口命令，本页只是把命令做成了按钮；输出仍打在日志页。
+            三件事都在这页：<b>舵机</b>走查 · <b>电压</b>标定（万用表实测 → 分压比）·
+            <b>IMU</b> 校准（姿态水平 / 加速度六面）。舵机走查与 IMU 复位期间主循环会停摆，
+            两者都要<b>先把机器人架空或平放好</b>、并确认舵机供电状态符合预期。
+            舵机走查数据的读写只有串口命令，本页只是把命令做成了按钮；输出仍打在日志页。
           </div>
           <div class="box">
             <h2>校准操作</h2>
@@ -520,6 +525,54 @@
           <div class="box wide">
             <h2>舵机角度</h2>
             <div class="servos" id="cal-servos"></div>
+          </div>
+
+          <div class="box wide">
+            <h2>电压标定</h2>
+            <div class="row"><span>固件读数</span><span id="cal-v-batt">—</span></div>
+            <div class="row"><span>ADC 引脚电压</span><span id="cal-v-pin">—</span></div>
+            <div class="row"><span>当前分压比</span><span id="cal-v-ratio">—</span></div>
+            <div class="quick">
+              <span style="font-size:12px">万用表实测电池电压</span>
+              <input id="cal-v-meas" type="number" step="10" min="3000" max="20000"
+                     placeholder="mV" style="width:6rem">
+              <button id="cal-v-apply" class="regular-button">按实测标定</button>
+              <button class="mini" data-cmd="!BATT">刷新读数 (!BATT)</button>
+              <button class="mini" data-cmd="!CFGW">保存到 Flash (!CFGW)</button>
+            </div>
+            <div class="row"><span>将写入</span><span id="cal-v-new" class="dim">—</span></div>
+            <div class="note">
+              单点标定：<b>分压比 = 万用表实测的电池电压 ÷ 此刻的 ADC 引脚电压</b>
+              （引脚电压与分压比无关，是这条式子的基准量；固件读数 = 引脚电压 × 分压比）。
+              填值 → 按「按实测标定」，新比值立即生效（上面的「当前分压比」跟着变，
+              也就是「电源」页的 batt_ratio_milli）；再按「保存到 Flash」掉电保持
+              （须已上锁）。未接电池时读数无效，按钮会被禁用。
+              误差来源是 330k‖47k 的源阻抗、电阻容差与 3.3V 轨偏差 ——
+              换板或换稳压方案后要重标一次。
+            </div>
+          </div>
+
+          <div class="box wide">
+            <h2>IMU 校准</h2>
+            <div class="row"><span>在线</span><span id="calimu-av">—</span></div>
+            <div class="row"><span>Roll / Pitch</span><span id="calimu-rp">—</span></div>
+            <div class="row"><span>校准等级 sys/gyr/acc/mag</span><span id="calimu-calib">—</span></div>
+            <div class="quick">
+              <button class="danger-button" data-cmd="!IMUR">!IMUR 重置传感器校准</button>
+              <button class="mini" data-cmd="!IMU">刷新读数 (!IMU)</button>
+            </div>
+            <div class="note">
+              BNO055 的标定由芯片自己维护（NDOF 融合连续自校准），固件做的是显示与
+              「清空重来」：<br>
+              <b>姿态（水平）</b>：机器人平放几秒，sys/gyr 先到 3 —— 此时显示的
+              Roll/Pitch 就是这台机器的水平零点，平放时读数应 ≈0°，明显不为 0 就该重置
+              重标（或检查机身/传感器是不是装歪了）。<br>
+              <b>加速度（六面）</b>：需要六个面各朝上静止停一会儿，acc 才会从 0 爬到 3；
+              磁力计（mag）得在原地缓慢转几圈。<br>
+              重置 = 整芯片复位 + 重新初始化（约 0.7 秒，清空全部校准值），
+              <b>须处于锁定状态</b>，解锁时会拒绝执行；复位后姿态短暂无效、
+              等级从 0 重新爬升，都属正常。等级每秒刷新一次。
+            </div>
           </div>
         </div>
       </section>
@@ -743,6 +796,9 @@ function renderBatt(d) {
   } else {
     $("batt-bar").style.width = "0";
   }
+
+  /* 校准页的电压标定卡吃同一份读数 (固件读数/引脚电压/能不能标定) */
+  renderCalibVolt();
 }
 
 function renderImu(d) {
@@ -761,6 +817,22 @@ function renderImu(d) {
     $("imu-calib").textContent =
       `${c.sys}/3 ${c.gyr}/3 ${c.acc}/3 ${c.mag}/3` + (d.fully ? " 完整" : "");
     $("imu-calib").className = d.fully ? "ok" : "warn";
+  }
+
+  /* 校准页的同一份读数 (两页共用一次 !IMU 帧, 与舵机格子/总线摘要同一套路) */
+  const cav = $("calimu-av");
+  if (!cav) return;
+  if (d.available !== undefined) {
+    cav.textContent = d.available ? `是 (0x${d.addr.toString(16)})` : "否";
+    cav.className = d.available ? "ok" : "err";
+  }
+  if (d.roll !== undefined)
+    $("calimu-rp").textContent = `${(d.roll / 10).toFixed(1)}° / ${(d.pitch / 10).toFixed(1)}°`;
+  if (d.calib) {
+    const c = d.calib;
+    $("calimu-calib").textContent = `sys ${c.sys} · gyr ${c.gyr} · acc ${c.acc} · mag ${c.mag}` +
+      (d.fully ? " (全部完成)" : " — 未完成");
+    $("calimu-calib").className = d.fully ? "ok" : "warn";
   }
 }
 
@@ -1578,8 +1650,9 @@ function initModesPage() {
         `<label><input type="checkbox" id="md-lo-${key}">低</label>` +
         `<label><input type="checkbox" id="md-md-${key}">中</label>` +
         `<label><input type="checkbox" id="md-hi-${key}">高</label>` +
-        `<label style="margin-left:.8rem"><input type="checkbox" id="md-ck-${key}">单击触发</label>` +
-      `</div>`;
+      `</div>` +
+      /* 单击勾选框独占第 4 列 (见 .mdrow 的列定义) —— 与组合键行同列对齐 */
+      `<label class="ck"><input type="checkbox" id="md-ck-${key}">单击触发</label>`;
     host.appendChild(row);
 
     const push = () => {
@@ -1609,8 +1682,7 @@ function initModesPage() {
       `<div class="plabel">${label}</div>` +
       `<select id="cb-a-${key}">${keyOpts}</select>` +
       `<select id="cb-b-${key}">${keyOpts}</select>` +
-      `<label style="display:flex;gap:.2rem;align-items:center;font-size:12px;cursor:pointer">` +
-        `<input type="checkbox" id="cb-ck-${key}">单击触发</label>`;
+      `<label class="ck"><input type="checkbox" id="cb-ck-${key}">单击触发</label>`;
     cbHost.appendChild(row);
     $("cb-ck-" + key).checked = true;   /* 组合键默认单击; 下一帧回显会按固件值校正 */
 
@@ -1666,6 +1738,71 @@ function renderModesConfig() {
     const ck = $("cb-ck-" + key);
     if (ck && document.activeElement !== ck) ck.checked = hold === 0;
   }
+}
+
+/* ---------------- 校准页: 电压标定 ----------------
+ * 单点标定, 全在页面侧算: 分压比 = 万用表实测电池电压 ÷ ADC 引脚电压。
+ * 引脚电压 (BATT.pin_mv) 与分压比无关 —— 它是 ADC 上真实量到的电压,
+ * 而固件读数 = 引脚电压 × 分压比, 所以这条式子就是把"读数偏低/偏高"的比例
+ * 直接折进分压比 (固件注释记的那次标定就是这么来的: 8370/1029 → 8134)。
+ * 结果写的是 batt_ratio_milli —— 与「电源」页那根滑条同一个参数,
+ * 走同一条 sendSet 通道立即生效; 掉电保持另按「保存到 Flash」(!CFGW, 须已上锁)。 */
+function renderCalibVolt() {
+  const host = $("cal-v-batt");
+  if (!host) return;
+
+  const absent = BATT.state === "ABSENT";
+  if (absent) {
+    host.textContent = "USB 供电 (未接电池)";
+    host.className = "dim";
+  } else if (BATT.batt_mv !== undefined) {
+    host.textContent = BATT.batt_mv + " mV";
+    host.className = "";
+  }
+  if (BATT.pin_mv !== undefined) $("cal-v-pin").textContent = BATT.pin_mv + " mV";
+
+  const p = curParams["batt_ratio_milli"];
+  if (p) {
+    $("cal-v-ratio").textContent = `${p.val} (${(p.val / 1000).toFixed(3)}×)`;
+    $("cal-v-ratio").className = star(p) ? "chg" : "";   /* 与参数页同一套「非默认」高亮 */
+  }
+
+  /* 算不出新比值 (没填实测值 / 没接电池 / 参数表还没读到) 时按钮置灰 ——
+   * 免得点下去发一条没有意义的命令 */
+  const meas = parseInt($("cal-v-meas").value, 10);
+  const out = $("cal-v-new");
+  const ok = meas > 0 && BATT.pin_mv > 0 && !absent && !!p;
+  $("cal-v-apply").disabled = !ok;
+  if (!ok) {
+    out.textContent = !p ? "参数未读取" : (absent ? "未接电池" : "填实测值后可标定");
+    out.className = "dim";
+    return;
+  }
+  const nv = Math.round(meas / BATT.pin_mv * 1000);
+  const over = nv < p.min || nv > p.max;
+  out.textContent = `${nv} (${(nv / 1000).toFixed(3)}×)` +
+    (over ? ` — 超出 ${p.min}~${p.max}, 固件会把这条命令钳掉` : "");
+  out.className = over ? "err" : "ok";
+}
+
+function initCalibPage() {
+  const apply = $("cal-v-apply");
+  if (!apply) return;
+
+  $("cal-v-meas").oninput = renderCalibVolt;
+  $("cal-v-meas").onchange = renderCalibVolt;
+  apply.onclick = async () => {
+    const meas = parseInt($("cal-v-meas").value, 10);
+    if (!(meas > 0) || !(BATT.pin_mv > 0)) {
+      addLog("[校准] 先接上电池、点「刷新读数」, 再填万用表实测值 (mV)", "l-err");
+      return;
+    }
+    const nv = Math.round(meas / BATT.pin_mv * 1000);
+    await sendSet("batt_ratio_milli", nv);
+    addLog(`[校准] 分压比 → ${nv} (${(nv / 1000).toFixed(3)}×)` +
+           ` 〔实测 ${meas}mV ÷ 引脚 ${BATT.pin_mv}mV〕, 掉电保持请按「保存到 Flash」`, "l-cmd");
+  };
+  renderCalibVolt();
 }
 
 /* 实时状态徽标: run 帧给解锁/步态/平衡/站姿/高度开关, ch 帧给输入源 */
@@ -1811,6 +1948,7 @@ buildParamPages();
 initPerPage();                // 外设页的滑条/按钮 (DOM 已由上一步建好)
 initCtrlPage();               // 控制页的 PWM 周期滑条 (同上)
 initModesPage();              // 模式页的矩阵行/组合键行 (同上)
+initCalibPage();              // 校准页的电压标定输入框 (IMU 卡只用 data-cmd, 无需 JS)
 const pRows = {};             // name → {row, range, num} 或 {row, box, state}
 
 /* ---------------- 「有改动未保存」判定 ----------------
@@ -2009,6 +2147,8 @@ function renderParams(d) {
   refreshPageState();
   /* 模式页的控件不是通用滑条, 得自己把参数值回填进下拉框/勾选框 */
   renderModesConfig();
+  /* 校准页的电压卡也吃参数帧 (分压比的现值与「非默认」高亮) */
+  renderCalibVolt();
 }
 
 /* ---------------- 开始页 ↔ 调试页 ----------------

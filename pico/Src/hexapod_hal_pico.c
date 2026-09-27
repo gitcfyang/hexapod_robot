@@ -1098,8 +1098,9 @@ static void i2c_bus_check(bool full_scan)
 
 /* 前置声明: 周期校准命令处理 (定义在本文件后部) */
 static bool period_calib_handle_command(uint8_t *buf, uint8_t len);
-/* 前置声明: IMU 状态打印 (定义在本文件后部) */
+/* 前置声明: IMU 状态打印 / 校准复位 (定义在本文件后部) */
 static void imu_status_print(void);
+static void imu_calib_reset(const control_state_t *ctrl_state);
 
 #if PS2_ENABLED
 /* PS2 状态全通道打印 (!PS2 单次输出 / !PS2DBG 观察模式每秒一次, 共用) */
@@ -1754,6 +1755,14 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
     if (buf[1] == 'I' && len >= 3 && buf[2] == '2') {
         bool quick = (len >= 6 && buf[4] == ' ' && (buf[5] == 'q' || buf[5] == 'Q'));
         i2c_bus_check(!quick);
+        return true;
+    }
+
+    /* ---- !IMUR: IMU 校准复位 (清空 BNO055 内部校准值, 重新自校准) ----
+     * ⚠️ 必须在 !IMU 之前: 下面那条只看到 buf[2]=='M' 就认了, 会把
+     *    "!IMUR" 当成状态查询吃掉 (与 !I2C2/!I2C 同一类前缀冲突)。 */
+    if (buf[1] == 'I' && len >= 5 && buf[2] == 'M' && buf[3] == 'U' && buf[4] == 'R') {
+        imu_calib_reset(ctrl_state);
         return true;
     }
 
@@ -2878,6 +2887,51 @@ bool hal_imu_read(imu_data_t *data)
 
     g_imu_last = *data;   /* 缓存最近读数, 供 !IMU 调试 */
     return true;
+}
+
+/* ==================== IMU 校准复位 (!IMUR) ==================== */
+
+/**
+ * @brief 复位 BNO055, 清掉芯片里的校准值, 让它重新自校准
+ *
+ * 整芯片软复位后**走一遍完整的重新初始化** (hal_imu_init → 含 BOOT 引脚的
+ * 自动恢复重试), 所以芯片没应答时这条命令也能顺手把它拉回来。复位 ~0.7s 里
+ * 主循环停摆 (与 !C 校准走查同理), 因此机器人已解锁时直接拒绝 —— 与 !SAVE
+ * 的 safe_context 判据、文案都对齐。
+ *
+ * 复位后校准等级从 0 重新爬: 机器人平放几秒 sys/gyr 先到 3, 把六个面各朝上
+ * 停一会儿 acc 到 3, 磁力计要转圈才到 3 (网页校准页实时显示这四个数)。
+ */
+static void imu_calib_reset(const control_state_t *ctrl_state)
+{
+    if (!IMU_ENABLED) {
+        hal_debug_printf("[IMUR] IMU 未启用 (imu_enabled=0)\r\n");
+        hal_debug_printf("[IMUR] 开启: !CFG imu_enabled 1  (立即生效, 无需重启)\r\n");
+        return;
+    }
+    if (ctrl_state && ctrl_state->robot_on) {
+        hal_debug_printf("[IMUR] Refuse: robot is armed, disarm first (!S)\r\n");
+        return;
+    }
+
+    hal_debug_printf("[IMUR] 复位 BNO055 (清空校准值, 约 0.7s)...\r\n");
+
+    /* 先标记不可用: 复位后到重新 init 完成之间, hal_imu_read 必须直接失败
+     * (否则主循环会拿复位前缓存的姿态继续调平) */
+    g_imu_available = false;
+    if (!bno055_reset_sys()) {
+        hal_debug_printf("[IMUR] 芯片未应答 0x%02X —— 直接走重新初始化\r\n",
+                         BNO055_I2C_ADDR);
+    }
+    /* 复位成功时 bno055_init 开头那次 POR 等待正好覆盖复位序列时长;
+     * 失败时这里则相当于一次普通的重新探测 */
+    if (hal_imu_init()) {
+        hal_debug_printf("[IMUR] 已复位并重新初始化, 校准值已清空\r\n");
+        hal_debug_printf("[IMUR] 平放 → sys/gyr 先回 3; 六面各停一会儿 → acc 回 3\r\n");
+    } else {
+        hal_debug_printf("[IMUR] 复位后初始化失败 (查 !I2C 与 BOOT 接线)\r\n");
+    }
+    imu_status_print();   /* 复位后的即时状态: 校准等级应回到 0/低 */
 }
 
 /* ==================== IMU 调试状态 (!IMU) ==================== */
