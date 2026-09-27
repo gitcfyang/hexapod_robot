@@ -1224,6 +1224,54 @@ def main():
     check("外设页的 14 路 PWM 滑条按固件编号生成",
           "PER_PWM" in raw_page and "idx ${i} · ${PER_PWM[i]}" in raw_page)
 
+    # 控制页: 主动接管 (供电/行走/遥控门/两块板的 PWM 周期)。命令按钮全是
+    # data-cmd 走通用接线, 没有服务端解析环节 —— 会坏的方式只有被改名/删掉
+    check("控制页有供电按钮与回报徽标",
+          'data-cmd="!O 1"' in raw_page and 'data-cmd="!O 0"' in raw_page
+          and 'id="run-badge"' in raw_page)
+    check("控制页有行走/步态/抬腿按钮",
+          all(f'data-cmd="{c}"' in raw_page
+              for c in ("!F", "!B", "!L", "!R", "!Q", "!E", "!S",
+                        "!G0", "!G1", "!G2", "!G3", "!G4", "!U", "!D")))
+    check("控制页显示固件回报的行程 (只读)",
+          'id="run-travel"' in raw_page and "RUN_DIR" in raw_page)
+    check("控制页有遥控门徽标 (锁没锁以固件回执为准)",
+          'id="rc-badge"' in raw_page and "已锁定 · 遥控器不驱动机器人" in raw_page)
+    check("控制页两块板各一条周期滑条 + 各自 Hz 标签",
+          all(f'id="{i}"' in raw_page
+              for i in ("per-p0", "per-p0n", "per-p0hz",
+                        "per-p1", "per-p1n", "per-p1hz")))
+    check("控制页有 PWM 周期的 !SAVE 按钮",
+          'id="ctrl-persave" data-cmd="!SAVE"' in raw_page)
+
+    # 周期滑条的范围 = 固件 clamp: 超出部分固件会静默夹紧, 那滑条上显示的 Hz
+    # 就不是板上真实频率了 (两个数字分处两边, 改一个忘另一个不会有任何报错)
+    m_rng = _re.search(r'id="per-p0" min="(\d+)" max="(\d+)"', raw_page)
+    i2c_c = open(I2C_C, encoding="utf-8").read()
+    check("周期滑条范围与固件 clamp 一致 (5000~15000µs)",
+          m_rng is not None and m_rng.groups() == ("5000", "15000")
+          and "period_us < 5000" in i2c_c and "period_us > 15000" in i2c_c,
+          str(m_rng.groups() if m_rng else None))
+
+    # 参数名后的「?」: 内容在 HELP 表里, 悬停由 CSS 出气泡。键名拼错的唯一
+    # 表现是那个「?」不出现 —— 静默失效, 所以这里钉住键名都在固件参数表里
+    m_help = _re.search(r"const HELP = \{(.*?)\n\};", raw_page, _re.S)
+    hkeys = set(_re.findall(r"^\s*(\w+):", m_help.group(1), _re.M)) if m_help else set()
+    check("HELP 解释表存在且有多条", len(hkeys) >= 5, str(sorted(hkeys)))
+    check("HELP 的键都是真参数 (防拼错导致「?」静默不出现)",
+          hkeys <= firm, "不存在: " + ", ".join(sorted(hkeys - firm)))
+    check("参数行的「?」由 HELP 表驱动, 悬停出气泡",
+          'q.className = "phelp"' in raw_page and 'q.dataset.tip = HELP[p.name]' in raw_page
+          and ".phelp:hover::after" in raw_page
+          and "content: attr(data-tip)" in raw_page)
+
+    # 开始页的遥控开关: 勾没勾决定连接时锁不锁遥控器 (随 POST /connect 的 body 走)
+    check("开始页有「调试时允许遥控器控制」开关",
+          'id="rc-keep"' in raw_page and "调试时允许遥控器控制" in raw_page)
+    check("连接请求带上开关状态 (不勾 = 锁)",
+          _re.search(r'post\("/connect",\s*JSON\.stringify\(\{\s*radio:', raw_page)
+          is not None)
+
     sse = sse_open()
     time.sleep(0.3)
     r = json.loads(http_post("/cmd", "!BATT"))

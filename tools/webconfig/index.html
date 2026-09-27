@@ -229,6 +229,26 @@
   #per-tx { flex: 1; min-width: 8rem; }
   .perdot { font-size: 11px; }
 
+  /* ---------- 「?」悬停解释 (参数名后面那个小圈) ---------- */
+  /* 纯 CSS 气泡: 不占点击、不弹窗。内容在 data-tip 里 (见 HELP 表) */
+  .phelp {
+    display: inline-block; width: 13px; height: 13px; margin-left: .35rem;
+    line-height: 13px; text-align: center; border-radius: 50%; cursor: help;
+    font-size: 10px; background: var(--surface-400); color: var(--surface-800);
+    position: relative; vertical-align: 1px;
+  }
+  .phelp:hover { background: var(--primary-500); color: var(--surface-100); }
+  .phelp::after {
+    content: attr(data-tip); position: absolute; left: 50%; top: 160%;
+    transform: translateX(-50%); width: max-content; max-width: 280px;
+    padding: .45rem .6rem; border-radius: 6px; z-index: 20;
+    background: var(--surface-900); color: var(--surface-100);
+    font-size: 11px; line-height: 1.55; text-align: left; white-space: normal;
+    opacity: 0; pointer-events: none; transition: opacity .12s;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+  }
+  .phelp:hover::after { opacity: 1; }
+
   /* ---------- 日志页 ---------- */
   /* 日志页撑满视口, 让 #log 自己滚, 命令栏始终可见 */
   #tab-log { display: flex; flex-direction: column; height: 100%; }
@@ -359,6 +379,14 @@
       <div class="actions" style="margin-top:.6rem">
         <button class="mini" id="devbtn">烧录固件…</button>
       </div>
+    </div>
+
+    <label class="ptoggle" style="margin-bottom:.35rem">
+      <input type="checkbox" id="rc-keep">
+      <span class="state">调试时允许遥控器控制</span>
+    </label>
+    <div class="dim" style="font-size:11px;margin-bottom:.7rem">
+      不勾 = 调试页期间遥控器只上报通道值、不驱动机器人（断开连接或关掉本页即恢复）。
     </div>
 
     <button id="connectbtn" class="regular-button" disabled>连接</button>
@@ -1025,6 +1053,58 @@ function initPerPage() {
   }
 }
 
+/* ---------------- 控制页: 供电 / 行走 / 遥控门 ---------------- */
+/* 三块只读显示: 数据都由固件说了算 (按钮只是"请求"), 所以按下之后要等固件回话 */
+let RUN = {};
+const RUN_DIR = [["x", "前进", "后退"], ["z", "左移", "右移"], ["y", "左转", "右转"]];
+const GAIT_NAME = ["波纹 12", "三足 6", "三足 8", "波浪 24", "快三足 4"];
+
+function renderRun(d) {
+  /* 快照是合并的: [RUN] 行带来行程/步态, Robot ON/OFF 行只带 on —— 缺的字段
+     保留上一次的值 (否则每收到一条跳变行, 行程显示就闪成空) */
+  Object.assign(RUN, d || {});
+  const b = $("run-badge");
+  if (b && RUN.on !== undefined) {
+    b.textContent = RUN.on ? "已供电 · 舵机顶住当前站姿" : "未供电 · 舵机无力";
+    b.className = RUN.on ? "warn" : "dim";
+  }
+  const mv = $("run-travel");
+  if (!mv) return;
+  if (RUN.on === undefined) return;
+  if (!RUN.on) { mv.textContent = "停机中"; mv.className = "dim"; return; }
+  const parts = [];
+  for (const [k, pos, neg] of RUN_DIR) {
+    if (RUN[k]) parts.push(`${RUN[k] > 0 ? pos : neg} ${Math.abs(RUN[k])}`);
+  }
+  if (GAIT_NAME[RUN.gait] !== undefined) parts.push(`步态 ${GAIT_NAME[RUN.gait]}`);
+  if (RUN.lift !== undefined) parts.push(`抬腿 ${RUN.lift}mm`);
+  mv.textContent = parts.length ? parts.join(" · ") : "站着不动 (行程已清)";
+  mv.className = parts.length ? "" : "dim";
+}
+
+function renderRc(d) {
+  const el = $("rc-badge");
+  if (!el || !d) return;
+  const locked = d.locked;
+  el.textContent = locked === undefined ? "—"
+    : (locked ? "已锁定 · 遥控器不驱动机器人" : "已放开 · 遥控器可以直接控制");
+  el.className = locked === undefined ? "dim" : (locked ? "ok" : "warn");
+}
+
+/* PWM 周期两只滑条: 范围与固件 clamp 一致 (5000~15000µs)。拖动时顺手把 Hz
+ * 标签改掉, 松手 (change) 才下发 —— 与其它页同理, 拖动中每帧一条会把控制循环淹掉 */
+function initCtrlPage() {
+  for (const [ri, ni, hi] of [["per-p0", "per-p0n", "per-p0hz"],
+                              ["per-p1", "per-p1n", "per-p1hz"]]) {
+    if (!perSlider(ri, ni, v => `!PER${ri.slice(-1)} ${v}`)) continue;
+    const r = $(ri), h = $(hi);
+    const hz = () => { if (h) h.textContent = `~${Math.round(1000000 / r.value)} Hz`; };
+    const syncN = r.oninput;         // perSlider 装的: 滑条 → 数字框
+    r.oninput = () => { syncN(); hz(); };
+    hz();
+  }
+}
+
 function renderPer(d) {
   PER.last = Date.now();
 
@@ -1074,6 +1154,17 @@ function renderPer(d) {
     const i = parseInt(k, 10);
     if (i >= 0 && i < 14) syncPerSlider(`per-pw${i}`, `per-pwn${i}`, p[k]);
   }
+
+  /* 两块板的硬件 PWM 周期 (控制页的滑条, 单位 µs) */
+  const pp = d.pwmperiod;
+  if (pp) {
+    syncPerSlider("per-p0", "per-p0n", pp.l);
+    syncPerSlider("per-p1", "per-p1n", pp.r);
+    for (const [id, us] of [["per-p0hz", pp.l], ["per-p1hz", pp.r]]) {
+      const h = $(id);
+      if (h && us) h.textContent = `~${Math.round(1000000 / us)} Hz`;
+    }
+  }
 }
 
 /* 状态是轮询来的: 轮询被关 (--periph-interval 0)、桥接断了、或服务端没有浏览器
@@ -1093,7 +1184,30 @@ setInterval(() => {
 const GROUP_NAME = {
   batt: "电池", motion: "运动", stance: "站立姿态",
   tune: "手感 / 死区", dir: "方向取反", imu: "IMU", chan: "通道映射",
-  per: "外设开关",
+  per: "外设开关", sys: "系统",
+};
+
+/* 难懂参数的解释 (参数名后面的「?」, 悬停显示)。
+ * 只写"看名字看不出来"的那部分: 单位/范围/默认值行尾和 title 里已经有,
+ * 这里讲语义、方向、以及会踩的坑。键名 = 固件参数名 (hexapod_params.c 的表),
+ * 测试会核对 —— 拼错的表现只是那个「?」不出现, 不会报错。 */
+const HELP = {
+  loop_ms: "控制循环周期 (ms): 舵机刷新与 IK 解算的节拍。5ms 最跟手也最费 CPU " +
+           "(100→200Hz, 先架空试)。它不改走速 (走速由步态周期决定), 但本页与" +
+           "「姿态」页的过渡速度、单周期最大位移都是「每周期」量, 改这里它们的" +
+           "实际快慢会跟着变。",
+  stance_speed: "切换站姿时, 每个控制周期把站姿缩放往目标值挪多少 (千分比/周期)。" +
+                "100 = 一个周期到位; 默认 30 ≈ 三个多周期走完。调大更干脆也更生硬。",
+  stance_step_mm: "站姿过渡时单腿每周期允许的最大位移 (mm), 与 stance_speed 取先到的" +
+                  "那个 —— 它是防骤跳的上限。100Hz 下 2mm/周期 = 200mm/s。",
+  batt_ratio_milli: "电池分压比 (千分比): 板上分压电阻的实际比值。填错会让所有电压阈值" +
+                    "整体偏移 —— 用 !BATT 回的 raw 值和万用表实测电压算比值再填。",
+  crsf_deadband: "摇杆死区: 离中位这么近的动作当作没动 (通道单位)。抖舵或中立点不准时" +
+                 "调大; 调太大则小幅操作会失灵。",
+  ps2_expo: "摇杆指数 (PS2): 0 = 线性; 越大中心附近越柔和、行程末端越猛 —— 兼顾" +
+            "小动作的精细与大动作的速度。",
+  ext_i2c_mode: "GP26/27 两个脚干什么用: 0=关 1=软件 I2C 2=ADC。它们在 RP2040 上" +
+                "走不了硬件 I2C1 (已给两块 PCA9685), 所以 I2C 是位翻转出来的约 50kHz。",
 };
 
 /* 不生成通用滑条的参数 —— 遥控页给了更清楚的输入源按钮 (CRSF / PS2),
@@ -1222,6 +1336,92 @@ const perCustomHTML = `
       </div>
     </div>`;
 
+/* 控制页的手动控制卡片 (sys 组的参数滑条由 PAGES 自动生成在它们下面)。
+ * 固定命令走 data-cmd 的通用接线 —— 与日志页命令框、校准页同一套, 不经过服务端解析。
+ * 方向按钮的名字与固件自己的帮助行一致 (hal_pico.c: !F 前进 !L 左移 !Q 左转 …)。 */
+const ctrlCustomHTML = `
+    <div class="box wide">
+      <h2>舵机供电</h2>
+      <div class="quick">
+        <button class="mini" data-cmd="!O 1">供电 ON</button>
+        <button class="mini" data-cmd="!O 0">断电 OFF</button>
+      </div>
+      <div class="row"><span>固件回报</span><span id="run-badge" class="dim">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        「供电 ON」只给舵机通电、让它顶住当前站姿, <b>不会自己走</b> (要走按下面「行走」)。
+        断电会顺带清掉行程 —— 否则下次上电会接着断电前的动作走。
+        这条与遥控器的解锁键 (CH5 / START) 是两条独立通路。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>行走 (手动接管)</h2>
+      <div class="quick">
+        <button class="mini" data-cmd="!F">前进</button>
+        <button class="mini" data-cmd="!B">后退</button>
+        <button class="mini" data-cmd="!L">左移</button>
+        <button class="mini" data-cmd="!R">右移</button>
+        <button class="mini" data-cmd="!Q">左转</button>
+        <button class="mini" data-cmd="!E">右转</button>
+        <button class="mini" data-cmd="!S">停车</button>
+      </div>
+      <div class="quick">
+        <button class="mini" data-cmd="!G0">波纹 12</button>
+        <button class="mini" data-cmd="!G1">三足 6</button>
+        <button class="mini" data-cmd="!G2">三足 8</button>
+        <button class="mini" data-cmd="!G3">波浪 24</button>
+        <button class="mini" data-cmd="!G4">快三足 4</button>
+      </div>
+      <div class="quick">
+        <button class="mini" data-cmd="!U">抬高 5mm</button>
+        <button class="mini" data-cmd="!D">放低 5mm</button>
+      </div>
+      <div class="row"><span>固件回报</span><span id="run-travel" class="dim">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        <b>点一下就走, 停要按「停车」</b> —— 这些是常速指令不是摇杆。走之前得先
+        「供电 ON」(或遥控器的解锁键开着)。抬腿高度 20~100mm, 每按一次 5mm。
+        「固件回报」是固件每 2 秒自己报的行程/步态: 遥控门放开时它会被遥控器改写,
+        锁定时这里的按钮才说了算。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>遥控门</h2>
+      <div class="row"><span>当前状态</span><span id="rc-badge" class="dim">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        开始页的「调试时允许遥控器控制」决定它锁不锁 (连接时生效, 要改就断开重连)。
+        锁定时遥控器照常上报通道值 (「遥控」页能看), 只是不驱动机器人; 放开时遥控器
+        直接接管, 上面那些按钮会被它每帧覆盖。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>PWM 周期 (每块板独立)</h2>
+      <div class="perrow">
+        <div class="plabel">左板 0x40 · 腿 9~17</div>
+        <input type="range" id="per-p0" min="5000" max="15000" step="50" value="9500">
+        <input type="number" id="per-p0n" min="5000" max="15000" value="9500">
+        <div class="punit" id="per-p0hz">—</div>
+      </div>
+      <div class="perrow">
+        <div class="plabel">右板 0x41 · 腿 0~8</div>
+        <input type="range" id="per-p1" min="5000" max="15000" step="50" value="9500">
+        <input type="number" id="per-p1n" min="5000" max="15000" value="9500">
+        <div class="punit" id="per-p1hz">—</div>
+      </div>
+      <div class="quick">
+        <button class="mini" id="ctrl-persave" data-cmd="!SAVE">保存 PWM 周期</button>
+        <button class="mini" data-cmd="!PERIPH">刷新状态</button>
+      </div>
+      <div class="note" style="margin-top:.4rem">
+        填的是 <b>PWM 周期 (µs)</b> 而不是频率: 5000~15000µs ≈ 200~66Hz, 是两块板各自的
+        硬件刷新频率 (写 PCA9685 的预分频寄存器)。板间振荡器有偏差, 同一份舵机标定在
+        两块板上会差一点, 所以分开调 —— 默认 9500µs (约 105Hz)。
+        脉冲按当前周期换算, 改周期不会让目标角度整体偏移; 但频率太低会抖、太高有些
+        舵机会响。<b>要掉电保持按「保存 PWM 周期」</b>。
+      </div>
+    </div>`;
+
 /* 参数页定义: id 同时是 tab 名和 DOM id 后缀。组顺序 = 页面内卡片顺序。 */
 const PAGES = [
   { id: "gait", title: "步态", groups: ["motion"],
@@ -1262,8 +1462,10 @@ const PAGES = [
   { id: "balance", title: "平衡", groups: ["imu"],
     note: "IMU 姿态补偿的开关、增益和轴符号。符号反了会让机身越调越歪，" +
           "标定时把机器人向一侧倾斜，看补偿方向是否与倾斜方向相反。" },
-  { id: "ctrl", title: "控制", groups: ["sys"],
-    note: "控制循环周期 (loop_ms)：舵机刷新与 IK 解算的节拍，5~20ms（默认 10ms = 100Hz）。" +
+  { id: "ctrl", title: "控制", groups: ["sys"], custom: ctrlCustomHTML,
+    note: "调试页主动接管机器人的地方: 舵机供电、行走、遥控门、两块板的 PWM 周期。" +
+          "下面那组参数是<b>控制循环周期 (loop_ms)</b>：舵机刷新与 IK 解算的节拍，" +
+          "5~20ms（默认 10ms = 100Hz）。" +
           "它<b>不改走速</b>（走速由步态周期决定），只改插值平滑度；" +
           "姿态页的过渡速度与单周期最大位移是「每周期」量，改了这个值它们的实际效果会跟着缩放。" },
   { id: "per", title: "外设", groups: ["per"], custom: perCustomHTML,
@@ -1326,6 +1528,7 @@ function buildParamPages() {
 }
 buildParamPages();
 initPerPage();                // 外设页的滑条/按钮 (DOM 已由上一步建好)
+initCtrlPage();               // 控制页的 PWM 周期滑条 (同上)
 const pRows = {};             // name → {row, range, num} 或 {row, box, state}
 
 /* ---------------- 「有改动未保存」判定 ----------------
@@ -1386,6 +1589,14 @@ function buildParamRow(p) {
   label.className = "pname";
   label.textContent = p.name;
   label.title = `${p.grp} · 默认 ${p.def}${p.unit ? " " + p.unit : ""}`;
+  /* 名字后面挂一个小「?」: 悬停出解释 (纯 CSS 气泡, 内容在 HELP 表里) */
+  if (HELP[p.name]) {
+    const q = document.createElement("span");
+    q.className = "phelp";
+    q.textContent = "?";
+    q.dataset.tip = HELP[p.name];
+    label.append(q);
+  }
 
   let input;
   if (p.min === 0 && p.max === 1) {
@@ -1579,9 +1790,12 @@ function enterDebugUI() {
 }
 
 async function enterDebug() {
-  /* 点「连接」: 服务端重新确认桥接 + 设备都在线, 之后才开始轮询/发命令 */
+  /* 点「连接」: 服务端重新确认桥接 + 设备都在线, 之后才开始轮询/发命令。
+   * radio 开关一起带过去: 服务端据此决定要不要锁遥控器 (!RC), 不勾 = 锁 */
   $("connectbtn").disabled = true;
-  const r = await post("/connect", "");
+  const keep = $("rc-keep");
+  const r = await post("/connect",
+                       JSON.stringify({ radio: !!(keep && keep.checked) }));
   if (!r.ok) { renderWelcome("连接失败：" + (r.err || "未知")); return; }
   enterDebugUI();
 }
@@ -1668,6 +1882,8 @@ function connect() {
       case "servo": renderServo(ev.d); break;
       case "ch": renderCh(ev.d); break;
       case "per": renderPer(ev.d); break;
+      case "run": renderRun(ev.d); break;
+      case "rc": renderRc(ev.d); break;
       case "params": renderParams(ev.d); break;
       case "flash": renderFlash(ev.d); break;
     }
