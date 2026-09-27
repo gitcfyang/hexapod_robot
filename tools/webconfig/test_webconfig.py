@@ -1173,6 +1173,8 @@ def main():
           'id="welcome"' in raw_page and 'id="app" hidden' in raw_page)
     check("开始页三行状态: 网页服务 / 串口桥接 / 机器人设备",
           all(f'id="{i}"' in raw_page for i in ("wel-web", "wel-bridge", "wel-dev")))
+    check("桥接没跑时设备行说「未知」而不是拿旧快照说在线",
+          "未知 · 桥接未运行" in raw_page)
     check("开始页有连接按钮, 且由「桥接+设备都在线」使能",
           'id="connectbtn"' in raw_page
           and "const can = BRIDGE_UP && DEVS.up;" in raw_page

@@ -1532,8 +1532,11 @@ function renderWelcome(msg) {
   $("wel-web").className = SSE_OK ? "ok" : "err";
   $("wel-bridge").textContent = BRIDGE_UP ? "已连接" : "未连接";
   $("wel-bridge").className = BRIDGE_UP ? "ok" : "err";
-  $("wel-dev").textContent = devText(DEVS);
-  $("wel-dev").className = DEVS.up ? "ok" : (DEVS.busy ? "warn" : "dim");
+  /* 桥接是设备状态的唯一来源: 桥接没了就只能说"不知道", 不能拿上一次的快照
+     说"在线" (serial_console 退出时板子确实还插着, 但已经问不到它了) */
+  $("wel-dev").textContent = BRIDGE_UP ? devText(DEVS) : "未知 · 桥接未运行";
+  $("wel-dev").className = BRIDGE_UP
+    ? (DEVS.up ? "ok" : (DEVS.busy ? "warn" : "dim")) : "dim";
   $("wel-ver").textContent = VER_TXT || "—";
   const can = BRIDGE_UP && DEVS.up;
   $("connectbtn").disabled = !can;

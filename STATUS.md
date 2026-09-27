@@ -794,7 +794,7 @@ Pico ──USB CDC──> serial_console.py ──TCP:7100──> webconfig/serv
 - `tools/webconfig/server.py` — 桥接客户端 + SSE 广播 + 静态服务 + 轮询调度
 - `tools/webconfig/flasher.py` — 设备检测 (扫 /sys) + picotool 烧录; 只此一处碰 USB
 - `tools/webconfig/index.html` — 单页应用 (零依赖, 无构建步骤)
-- `tools/webconfig/test_webconfig.py` — 185 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端)
+- `tools/webconfig/test_webconfig.py` — 186 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端)
 
 ```bash
 python3 tools/serial_console.py       # 终端 1: 串口守护 (headless 运行即可)
@@ -837,6 +837,8 @@ python3 tools/webconfig/server.py     # 终端 2: 默认 127.0.0.1:8080
   拉参数表 (调试页首屏要用)。刷新页面不改变连接态。
 - **为什么连接前绝不轮询**: serial_console 在没有设备时会把 TCP 命令**排队**,
   设备回来时重放 —— 没连接还轮询, 插上机器人的那一刻就是积压命令的洪水。
+- **设备状态只有桥接知道**: serial_console 不在时设备行显"未知"而不是"未检测到"
+  —— 此时板子可能还插着, 只是问不到 (桥接重启后会自己补发当前状态)。
 - **进**: 「连接」按钮只在桥接与设备**都在线**时可点 (否则禁用, 并在下面写明是
   哪一环缺: 桥接没跑 / 端口被别的程序占着 (附 `fuser -v` 提示) / 没检测到机器人)。
   点它 → `POST /connect` → 服务端再确认一次 → 进调试页。
