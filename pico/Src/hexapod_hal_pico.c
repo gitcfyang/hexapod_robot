@@ -603,6 +603,12 @@ static bool g_crsf_mode = false;           // true=CRSF模式, false=串口命�
 static uint32_t g_last_crsf_frame_ms = 0;  // 最后CRSF帧时间
 static uint32_t g_last_crsf_frame_count = 0; // 上次查询时的帧计数（调试用）
 
+/* 遥控门 (!RC): 锁定期间遥控输入不应用到机器人 (调试页专用, 见 !RC 命令)。
+ * g_rc_lock_ms = 最近一次 "!RC 锁定" 命令的时刻, 由上位机心跳 (~2s) 刷新;
+ * 超过 RC_LOCK_TIMEOUT_MS 没再收到就自动解锁 (遥控器是安全兜底)。 */
+static bool     g_rc_locked = false;
+static uint32_t g_rc_lock_ms = 0;
+
 /* PS2 状态 (PS2_ENABLED) */
 #if PS2_ENABLED
 ps2_state_t g_ps2_state;          /* 非 static: 供 hexapod_ps2.c extern 引用 */
@@ -1846,6 +1852,7 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
      *    !MOTOR→case 'M'(站立姿态)  !LED→case 'L'(左移)
      *    !BUZZ →case 'B'(后退)      !ADC2→case 'A'(舵机快照)
      *    !UART0T→case 'U'(抬腿)     !PWM/!PERIPH→case 'P'(周期校准)
+     *    !RC   →case 'R'(右移)
      * 靠长度与前几个字符区分, 与 !BATT/!SAVE 同一套路。 */
     if (buf[1] == 'M' && len >= 6 &&
         buf[2] == 'O' && buf[3] == 'T' && buf[4] == 'O' && buf[5] == 'R') {
@@ -1898,6 +1905,28 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
         return true;
     }
 
+    /* !RC [0|1] — 遥控门: 0/无参 = 锁定 (遥控器不再控制机器人), 1 = 解锁。
+     * 位置: ctrl_state 判空之前 —— 锁定是安全功能, 校准模式下也照用。
+     * 锁定期间遥控器照常轮询与遥测上报 (遥控页通道显示不断), 只是不把值
+     * 应用到机器人; USB 命令 (调试页) 全权控制。
+     * 由上位机心跳 (!RC 0, ~2s) 维持, 超时后自动解锁 (见 hal_input_update)。 */
+    if (buf[1] == 'R' && len >= 3 && buf[2] == 'C' &&
+        (len == 3 || buf[3] == ' ' || (buf[3] >= '0' && buf[3] <= '1'))) {
+        bool enabled = (len > 3) && (parse_int(buf, 3, len) != 0);
+        bool was_locked = g_rc_locked;
+        g_rc_locked = !enabled;
+        g_rc_lock_ms = hal_get_tick_ms();
+        /* 只在"未锁→锁"的跳变上清行程 (立即停车)。心跳会反复发 !RC 0,
+         * 不能每次都清 —— 否则锁定期间调试页的 !F 行走每 2s 被打断一次。 */
+        if (!was_locked && g_rc_locked && ctrl_state) {
+            ctrl_state->travel_length.x = 0;
+            ctrl_state->travel_length.y = 0;
+            ctrl_state->travel_length.z = 0;
+        }
+        hal_debug_printf("[RC] %s\r\n", g_rc_locked ? "locked" : "unlocked");
+        return true;
+    }
+
     /* 其余命令需要控制状态 */
     if (!ctrl_state) return false;
 
@@ -1924,10 +1953,21 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
         case 'S': ctrl_state->travel_length.x = 0;   ctrl_state->travel_length.y = 0;   ctrl_state->travel_length.z = 0;  break;
 
         /* ---- 状态控制 ---- */
-        case 'O':
-            ctrl_state->robot_on = !ctrl_state->robot_on;
-            hal_debug_printf("Robot %s\r\n", ctrl_state->robot_on ? "ON" : "OFF");
+        case 'O': {
+            /* !O [0|1]: 无参 = 切换 (兼容老用法); 有参 = 直接置位 (网页控制页
+             * 要确定性)。关电顺带清行程 —— 否则下次开电会立刻续走。非法参数
+             * 解析成 0 → 关电, 是安全方向。 */
+            bool want = !ctrl_state->robot_on;
+            if (len >= 3) want = parse_int(buf, 2, len) != 0;
+            if (!want) {
+                ctrl_state->travel_length.x = 0;
+                ctrl_state->travel_length.y = 0;
+                ctrl_state->travel_length.z = 0;
+            }
+            ctrl_state->robot_on = want;
+            hal_debug_printf("Robot %s\r\n", want ? "ON" : "OFF");
             break;
+        }
         case 'G':
             if (len >= 3 && buf[2] >= '0' && buf[2] < ('0' + GAIT_MAX)) {
                 ctrl_state->gait_type = buf[2] - '0';
@@ -2083,6 +2123,15 @@ bool hal_input_update(control_state_t *ctrl_state)
 {
     if (!ctrl_state) return false;
 
+    /* ---- 遥控门超时自解锁 (配合 !RC) ----
+     * 锁定由上位机心跳 (!RC 0, ~2s) 维持; 心跳断了 (server 崩/网页强退)
+     * 就自动放行 —— 遥控器是安全兜底, 宁可解锁不可锁死。 */
+    if (g_rc_locked &&
+        (uint32_t)(hal_get_tick_ms() - g_rc_lock_ms) >= RC_LOCK_TIMEOUT_MS) {
+        g_rc_locked = false;
+        hal_debug_printf("[RC] unlocked\r\n");
+    }
+
 #if INPUT_CONTROL_MODE == 2
     /* ========== USB CDC 串口模式 ==========
      * 仅通过 USB 虚拟串口接收命令，无 UART1 硬件参与。
@@ -2146,6 +2195,11 @@ bool hal_input_update(control_state_t *ctrl_state)
                     hal_debug_printf("[PS2] Requesting analog mode...\r\n");
                 }
             }
+            /* ---- 遥控门: 锁定期间只轮询不上报机器人 ----
+             * 手柄照常读 (遥控页遥测要活), 但不应用: 既不 ps2_to_control,
+             * 也不做下面调试观察模式的清零 —— 锁定 = 遥控器完全不碰机器人。 */
+            if (g_rc_locked) return true;
+
             /* ---- PS2 调试观察模式: 每秒打印通道值, 机器人不响应 ---- */
             if (g_ps2_debug_active) {
                 static uint32_t last_dbg_print_ms = 0;
@@ -2181,14 +2235,17 @@ bool hal_input_update(control_state_t *ctrl_state)
 
             /* 检查链接状态 */
             if (g_crsf_state.link_connected) {
-                /* 将 CRSF 状态映射到机器人控制 */
-                crsf_to_control(&g_crsf_state, ctrl_state);
+                /* 遥控门: 锁定期间照收帧 (遥控页遥测要活), 但不应用到机器人 */
+                if (!g_rc_locked) {
+                    crsf_to_control(&g_crsf_state, ctrl_state);
+                }
                 return true;
             }
         }
 
-        /* 链接断开处理：如果超过200ms无数据，自动停止 */
-        if (g_last_crsf_frame_ms > 0 && (now - g_last_crsf_frame_ms > 200)) {
+        /* 链接断开处理：如果超过200ms无数据，自动停止
+         * (遥控门锁定期间跳过: 行程归调试页管, 失联不该踩它) */
+        if (!g_rc_locked && g_last_crsf_frame_ms > 0 && (now - g_last_crsf_frame_ms > 200)) {
             if (ctrl_state->robot_on) {
                 ctrl_state->travel_length.x = 0;
                 ctrl_state->travel_length.y = 0;

@@ -262,6 +262,11 @@
 #endif
 #define INPUT_MODE_RUNTIME      (g_params.input_mode)
 
+/* 遥控门 (!RC) 自解锁超时 (毫秒): 锁定由网页 server 心跳 (!RC 0, ~2s) 维持,
+ * 超过这个时间没再收到 !RC 就自动解锁 —— 上位机崩掉后遥控器必须能兜底操控,
+ * 宁可解锁不可锁死。 */
+#define RC_LOCK_TIMEOUT_MS      6000
+
 /* 无舵机调试模式：PRODUCTION=0 要求舵机硬件就绪才启动 */
 #define HEADLESS_MODE           0   /* ★ PS2 测试: 舵机/I2C 已死仍进入主循环 (测完改回 0) */
 
