@@ -1,0 +1,1677 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hexapod Configurator</title>
+<style>
+  /* 设计系统取自 betaflight-configurator (src/css/theme.css + src/css/main.less):
+     琥珀主色 + 中性表面色阶 + 12px 字号 + 20px 紧凑控件 + 侧栏胶囊标签页 */
+  :root {
+    --primary-400: #ffc526; --primary-500: #ffbb00; --primary-600: #e29000;
+    --primary-transparent-1: rgba(255, 187, 0, .10);
+    --primary-transparent-2: rgba(255, 187, 0, .20);
+    --primary-transparent-3: rgba(255, 187, 0, .30);
+    --primary-transparent-4: rgba(255, 187, 0, .40);
+
+    --surface-50: hsl(0, 0%, 4%);   --surface-100: hsl(0, 0%, 8%);
+    --surface-200: hsl(0, 0%, 12%); --surface-300: hsl(0, 0%, 14%);
+    --surface-400: hsl(0, 0%, 20%); --surface-500: hsl(0, 0%, 24%);
+    --surface-600: hsl(0, 0%, 35%); --surface-700: hsl(0, 0%, 45%);
+    --surface-800: hsl(0, 0%, 60%); --surface-900: hsl(0, 0%, 70%);
+    --surface-950: hsl(0, 0%, 80%);
+    --text: hsl(0, 0%, 95%);
+
+    --error-400: #ee2b55; --error-500: #e2123f; --error-600: #c10f36;
+    --error-transparent-1: rgba(226, 18, 63, .10);
+    --success-400: #adf042; --success-500: #96e212; --success-600: #79b210;
+    --warning-400: #ff8533; --warning-500: #ff6600;
+
+    --ui-radius: .35rem;
+    --box-line: hsl(0, 0%, 45%, .30);   /* UiBox 的 border-neutral-500/30 */
+    --mono: ui-monospace, "SF Mono", Consolas, "Noto Sans Mono CJK SC", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0; overflow: hidden; background: var(--surface-50); color: var(--text);
+    font: 12px/1.5 "Open Sans", "Segoe UI", Tahoma, "Noto Sans CJK SC", "Microsoft YaHei", sans-serif;
+  }
+  #main-wrapper { display: flex; flex-direction: column; height: 100vh; }
+  .spacer { flex: 1; }
+  .dim { color: var(--surface-800); }
+  .ok { color: var(--success-500); }
+  .warn { color: var(--warning-400); }
+  .err { color: var(--error-400); }
+  .chg { color: var(--primary-500); }
+
+  /* ---------- 顶栏 / 底栏 ---------- */
+  #topbar {
+    flex: none; display: flex; align-items: center; gap: .75rem; flex-wrap: wrap;
+    padding: .5rem 1rem; background: var(--surface-200);
+    border-bottom: 1px solid var(--surface-400);
+  }
+  #topbar h1 {
+    margin: 0; font-size: 15px; font-weight: 700;
+    letter-spacing: .14em; color: var(--primary-500);
+  }
+  #statusbar {
+    flex: none; display: flex; align-items: center; gap: .75rem;
+    height: 1.75rem; padding: 0 1rem; font-size: 11px;
+    background: var(--surface-200); border-top: 1px solid var(--surface-400);
+  }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--surface-600); flex: none; }
+  .dot.on { background: var(--success-500); box-shadow: 0 0 8px var(--success-500); }
+  .dot.off { background: var(--error-500); }
+
+  /* ---------- 侧栏标签页 ---------- */
+  #middle { flex: 1; display: flex; min-height: 0; }
+  #tabs {
+    flex: none; width: 12rem; padding: 1rem .75rem; overflow-y: auto;
+    background: var(--surface-100); border-inline-end: 1px solid var(--surface-300);
+    display: flex; flex-direction: column; gap: .25rem;
+  }
+  .tab {
+    font: inherit; font-size: 13px; text-align: start; cursor: pointer;
+    padding: .7rem 1rem; border: 0; border-radius: 999px;
+    background: transparent; color: var(--text); transition: none;
+  }
+  .tab:hover { background: var(--primary-transparent-1); color: var(--primary-500); }
+  .tab.active { background: var(--primary-transparent-2); color: var(--primary-500); font-weight: 600; }
+  .tab.active:hover { cursor: default; }
+
+  /* ---------- 内容区 ---------- */
+  #content {
+    flex: 1; min-width: 0; min-height: 0; overflow-y: auto;
+    scrollbar-gutter: stable; background: var(--surface-100);
+  }
+  .tabpage[hidden] { display: none !important; }
+  .tab_wrapper { padding: 1.25rem 1.25rem 2rem; }
+  .tab_title {
+    margin: 0 0 1rem; padding-bottom: .25rem;
+    font-size: 2rem; font-weight: 300; line-height: 1.15;
+    border-bottom: 2px solid var(--primary-500);
+  }
+  .note {
+    margin-bottom: 1rem; padding: .5rem .75rem; border-radius: .5rem;
+    background: var(--primary-transparent-2); border: 1px solid var(--primary-500);
+  }
+  .note code { color: #000; background: var(--primary-500); padding: 0 .25rem; border-radius: 3px; }
+  #banner {
+    display: none; flex: none; padding: .6rem .9rem;
+    background: var(--error-transparent-1); border-bottom: 1px solid var(--error-600);
+  }
+  #banner code { color: var(--primary-500); }
+
+  /* ---------- 分组框 (UiBox: 圆角描边 + 悬浮胶囊标题) ---------- */
+  .grid { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); }
+  .box {
+    position: relative; padding: 1.1rem .85rem .75rem; margin-top: .75rem;
+    border: 2px solid var(--box-line); border-radius: .5rem;
+  }
+  .box > h2 {
+    position: absolute; top: 0; inset-inline-start: 1rem; transform: translateY(-50%);
+    margin: 0; padding: .2rem .75rem; white-space: nowrap;
+    border-radius: 999px; background: var(--surface-300);
+    font-size: 13px; font-weight: 600;
+  }
+  .wide { grid-column: 1 / -1; }
+
+  /* ---------- 键值行 ---------- */
+  .row { display: flex; justify-content: space-between; gap: .75rem; padding: .15rem 0; }
+  .row > span:first-child { color: var(--surface-800); }
+  .big { font-size: 30px; font-weight: 600; line-height: 1.15; color: var(--primary-500); }
+  .big small { font-size: 13px; font-weight: 400; color: var(--surface-800); }
+  .bar { height: 6px; margin-top: .4rem; border-radius: 3px; background: var(--surface-500); overflow: hidden; }
+  .bar > i { display: block; height: 100%; background: var(--primary-500); transition: width .3s; }
+  .servos { display: grid; grid-template-columns: repeat(6, 1fr); gap: .4rem; }
+  .servo { padding: .3rem .4rem; border-radius: var(--ui-radius); background: var(--surface-200); }
+  .servo .id { font-size: 10px; color: var(--surface-800); }
+  .servo .ang { font-size: 13px; }
+  .servo.L { border-inline-start: 2px solid var(--primary-500); }
+  .servo.R { border-inline-start: 2px solid var(--surface-600); }
+  /* 通道格子: 16 个, 8 列正好两行; 标注功能名 + 数值 + 条 */
+  #ch-panel { grid-template-columns: repeat(8, 1fr); }
+  #ch-panel .fn { font-size: 10px; color: var(--primary-500); }
+  #ch-panel .fn.none { color: var(--surface-800); }
+  #ch-panel .bar { margin-top: .25rem; height: 4px; }
+  #ch-panel .servo.pressed { background: var(--primary-500); }
+  #ch-panel .servo.pressed .id, #ch-panel .servo.pressed .ang { color: var(--surface-100); }
+  canvas { display: block; width: 100%; height: 150px; }
+
+  /* ---------- 控件 ---------- */
+  button { cursor: pointer; }
+  .regular-button, .danger-button {
+    font: inherit; font-size: 12px; font-weight: 700; line-height: 28px;
+    padding: 0 .6rem; border-radius: 3px; user-select: none;
+    transition: background-color .2s;
+  }
+  .regular-button { background: var(--primary-500); border: 1px solid var(--primary-600); color: #000; }
+  .regular-button:hover { background: var(--primary-400); }
+  #pausebtn.active {
+    background: var(--primary-transparent-3); color: var(--text);
+    border-color: var(--primary-transparent-4);
+  }
+  .danger-button { background: var(--error-500); border: 1px solid var(--error-600); color: #fff; }
+  .danger-button:hover { background: var(--error-400); }
+  .mini {
+    font: inherit; font-size: 12px; line-height: 20px; padding: 0 .45rem;
+    border: 1px solid var(--surface-600); border-radius: 3px;
+    background: var(--surface-500); color: var(--text);
+  }
+  .mini:hover { background: var(--primary-transparent-3); border-color: var(--primary-500); }
+  /* 输入源按钮: 当前生效的那个 (按固件回报的 [CH] 模式点亮, 不是按点击) */
+  .mini.on { background: var(--primary-500); border-color: var(--primary-500); color: var(--surface-100); }
+  input[type=text], input[type=number] {
+    height: 20px; font: inherit; font-size: 12px; padding: 0 3px;
+    border: 1px solid var(--surface-400); border-radius: 3px;
+    background: var(--surface-200); color: var(--text);
+  }
+  input[type=text]:focus, input[type=number]:focus {
+    outline: none; border-color: var(--primary-500);
+  }
+  input[type=checkbox] {
+    -webkit-appearance: none; appearance: none; position: relative;
+    width: 14px; height: 14px; margin: 0; cursor: pointer;
+    border: 1px solid var(--surface-600); border-radius: 3px; background: var(--surface-200);
+  }
+  input[type=checkbox]:checked { background: var(--primary-500); border-color: var(--primary-600); }
+  input[type=checkbox]:checked::after {
+    content: ""; position: absolute; inset: 2px; background: #000;
+    clip-path: polygon(14% 44%, 0 65%, 40% 100%, 100% 16%, 84% 0, 38% 68%);
+  }
+  input[type=range] {
+    -webkit-appearance: none; appearance: none; width: 100%; height: 16px;
+    margin: 0; background: transparent; cursor: pointer;
+  }
+  input[type=range]::-webkit-slider-runnable-track {
+    height: 4px; border-radius: 2px; background: var(--surface-600);
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none; margin-top: -4px;
+    width: 12px; height: 12px; border: 0; border-radius: 50%; background: var(--primary-500);
+  }
+  input[type=range]:hover::-webkit-slider-thumb { background: var(--primary-400); }
+
+  /* ---------- 参数页 ---------- */
+  .content_toolbar {
+    position: sticky; bottom: 0; z-index: 5;
+    display: flex; align-items: center; gap: .5rem; flex-wrap: wrap;
+    padding: .6rem .75rem; background: var(--surface-300);
+    border-start-start-radius: 1.5rem; border-start-end-radius: .5rem;
+    box-shadow: 0 -.5rem .5rem rgba(0, 0, 0, .25);
+  }
+  .prow {
+    display: grid; grid-template-columns: 200px minmax(140px, 1fr) 76px 46px 28px;
+    align-items: center; gap: .5rem; padding: .3rem .5rem;
+    max-width: 1100px;                       /* 超宽屏上别把滑条拉成一米长 */
+    border-bottom: 1px solid var(--surface-400);
+    border-inline-start: 2px solid transparent;
+  }
+  .prow:last-child { border-bottom: 0; }
+  .prow.is-changed { border-inline-start-color: var(--primary-500); }
+  .prow .pname { font-size: 12px; }
+  .prow.is-changed .pname { color: var(--primary-500); }
+  .prow .punit { font-size: 11px; color: var(--surface-800); }
+  .ptoggle { display: flex; align-items: center; gap: .5rem; }
+  .ptoggle .state { font-size: 12px; }
+
+  /* ---------- 外设页 ---------- */
+  /* 一行一个可控量: 名字 | 滑条 | 数字 | 单位。比 .prow 窄, 因为它不进参数表,
+   * 没有 5 列里的那个 ↺ 复位键 */
+  .perrow {
+    display: grid; grid-template-columns: 170px minmax(120px, 1fr) 76px 40px;
+    align-items: center; gap: .5rem; padding: .2rem 0; max-width: 820px;
+  }
+  .perrow .plabel { font-size: 12px; color: var(--surface-800); }
+  .perrow .punit { font-size: 11px; color: var(--surface-800); }
+  #per-rx { max-height: 130px; }
+  #per-tx { flex: 1; min-width: 8rem; }
+  .perdot { font-size: 11px; }
+
+  /* ---------- 日志页 ---------- */
+  /* 日志页撑满视口, 让 #log 自己滚, 命令栏始终可见 */
+  #tab-log { display: flex; flex-direction: column; height: 100%; }
+  #tab-log .tab_wrapper { display: flex; flex-direction: column; flex: 1; min-height: 0; width: 100%; }
+  #tab-log .box { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+  #log {
+    flex: 1; min-height: 220px; overflow-y: auto;
+    padding: .5rem .6rem; border: 1px solid var(--surface-400); border-radius: var(--ui-radius);
+    background: var(--surface-50); white-space: pre-wrap; word-break: break-all;
+    font-family: var(--mono); font-size: 12px;
+  }
+  #log div { padding: .05rem 0; }
+  #log .l-err { color: var(--error-400); }
+  #log .l-warn { color: var(--warning-400); }
+  #log .l-ok { color: var(--success-500); }
+  #log .l-cmd { color: var(--primary-500); }
+  #cmdbar { display: flex; gap: .5rem; margin-top: .6rem; }
+  #cmd {
+    flex: 1; height: 24px; font-family: var(--mono); font-size: 12px; padding: 0 .4rem;
+    border: 1px solid var(--surface-400); border-radius: 3px;
+    background: var(--surface-200); color: var(--text);
+  }
+  #cmd:focus { outline: none; border-color: var(--primary-500); }
+  .quick { display: flex; gap: .4rem; flex-wrap: wrap; margin-top: .5rem; }
+
+  /* ---------- 设备/烧录面板 (Betaflight Firmware Flasher 式) ---------- */
+  .overlay {
+    position: fixed; inset: 0; z-index: 50; display: none;
+    align-items: center; justify-content: center; background: rgba(0, 0, 0, .65);
+  }
+  .overlay.show { display: flex; }
+  .modal {
+    width: min(580px, 92vw); max-height: 86vh; overflow: auto; padding: 1rem 1.1rem;
+    background: var(--surface-200); border: 2px solid var(--box-line); border-radius: .5rem;
+  }
+  .modal > h3 { margin: 0; font-size: 15px; }
+  .sect { margin-top: .9rem; }
+  .sect > h4 {
+    margin: 0 0 .3rem; font-size: 11px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .04em; color: var(--surface-800);
+  }
+  .modal .actions { display: flex; gap: .5rem; align-items: center; margin-top: 1rem; flex-wrap: wrap; }
+  .modal select {
+    flex: 1; min-width: 0; height: 24px; font: inherit; font-size: 12px;
+    border: 1px solid var(--surface-400); border-radius: 3px;
+    background: var(--surface-300); color: var(--text);
+  }
+  .devlog {
+    max-height: 170px; overflow: auto; margin-top: .5rem; padding: .4rem .5rem;
+    background: var(--surface-100); border-radius: var(--ui-radius);
+    font-family: var(--mono); font-size: 11px; line-height: 1.45;
+    white-space: pre-wrap; word-break: break-all; color: var(--surface-900);
+  }
+  /* 放在 .devlog 之后: 同优先级下靠后者胜, 否则 .devlog 的 color 会盖掉 .err */
+  .devlog.err { color: var(--error-400); }
+  button[disabled] { opacity: .45; cursor: not-allowed; }
+
+  /* ---------- 滚动条 ---------- */
+  ::-webkit-scrollbar { width: .3rem; height: .3rem; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--surface-600); border-radius: .15rem; }
+
+  /* ---------- 窄屏: 侧栏转横向 ---------- */
+  @media (max-width: 700px) {
+    #middle { flex-direction: column; }
+    #tabs {
+      width: auto; flex-direction: row; padding: .5rem; gap: .25rem;
+      border-inline-end: 0; border-bottom: 1px solid var(--surface-300);
+    }
+    .tab { padding: .5rem .9rem; }
+    .tab_title { font-size: 1.5rem; }
+    .prow { grid-template-columns: 1fr 3fr; row-gap: .3rem; }
+    .prow .punit, .prow .pdef { display: none; }
+  }
+</style>
+</head>
+<body>
+<div id="main-wrapper">
+
+  <div id="topbar">
+    <h1>HEXAPOD</h1>
+    <span class="dot" id="linkdot"></span>
+    <span id="linktxt" class="dim">连接中…</span>
+    <span class="spacer"></span>
+    <button id="devbtn" class="mini">连接设备</button>
+    <button id="pausebtn" class="regular-button">暂停轮询</button>
+  </div>
+
+  <div id="banner">
+    串口桥接未连接。请先在 N100 上运行 <code>python3 tools/serial_console.py</code>，
+    并确认 Pico 已插好（本页会自动重连，无需刷新）。
+    也可以点右上角「连接设备」—— 检测到设备时能直接进 BOOTSEL 烧录新固件。
+  </div>
+
+  <div class="overlay" id="devmodal">
+    <div class="modal">
+      <h3>设备</h3>
+
+      <div class="sect">
+        <h4>检测到的设备</h4>
+        <div id="devlist" class="dim">检测中…</div>
+      </div>
+
+      <div class="sect">
+        <h4>固件</h4>
+        <div class="actions" style="margin-top:0">
+          <select id="fwsel"></select>
+          <button class="mini" id="fwpick">选择本地 .uf2…</button>
+          <input type="file" id="fwfile" accept=".uf2" hidden>
+        </div>
+        <div id="fwinfo" class="dim" style="margin-top:.3rem"></div>
+      </div>
+
+      <div class="actions">
+        <button class="regular-button" id="flashbtn">烧录固件</button>
+        <button class="mini" id="devrefresh">重新检测</button>
+        <button class="mini" id="devclose">关闭</button>
+      </div>
+
+      <div class="devlog" id="devlog">就绪。</div>
+    </div>
+  </div>
+
+  <div id="middle">
+    <nav id="tabs">
+      <button class="tab active" data-tab="dash">状态</button>
+      <button class="tab" data-tab="gait">步态</button>
+      <button class="tab" data-tab="stance">姿态</button>
+      <button class="tab" data-tab="radio">遥控</button>
+      <button class="tab" data-tab="power">电源</button>
+      <button class="tab" data-tab="balance">平衡</button>
+      <button class="tab" data-tab="calib">校准</button>
+      <button class="tab" data-tab="per">外设</button>
+      <button class="tab" data-tab="log">日志</button>
+    </nav>
+
+    <div id="content">
+
+      <!-- ==================== 状态 ==================== -->
+      <section class="tabpage" id="tab-dash">
+        <div class="tab_wrapper">
+          <div class="tab_title">状态总览</div>
+          <div class="grid">
+
+            <div class="box">
+              <h2>电池</h2>
+              <div class="big"><span id="batt-v">—</span><small id="batt-unit"> mV</small></div>
+              <div class="row"><span>引脚电压</span><span id="batt-pin">—</span></div>
+              <div class="row"><span>采样离散度</span><span id="batt-spread">—</span></div>
+              <div class="row"><span>原始计数 avg/min/max</span><span id="batt-raw">—</span></div>
+              <div class="row"><span>保护窗口</span><span id="batt-lim">—</span></div>
+              <div class="row"><span>电池保护</span><span id="batt-en">—</span></div>
+              <div class="bar"><i id="batt-bar" style="width:0"></i></div>
+            </div>
+
+            <div class="box">
+              <h2>IMU 姿态</h2>
+              <div class="row"><span>在线</span><span id="imu-av">—</span></div>
+              <div class="row"><span>Roll / Pitch</span><span id="imu-rp">—</span></div>
+              <div class="row"><span>Yaw</span><span id="imu-yaw">—</span></div>
+              <div class="row"><span>数据有效</span><span id="imu-valid">—</span></div>
+              <div class="row"><span>校准 sys/gyr/acc/mag</span><span id="imu-calib">—</span></div>
+            </div>
+
+            <div class="box">
+              <h2>I2C 总线</h2>
+              <div class="row"><span>舵机供电 GP10左 / GP11右</span><span id="i2c-pwr">—</span></div>
+              <div class="row"><span>总线空闲 SDA/SCL</span><span id="i2c-idle">—</span></div>
+              <div id="i2c-devs"></div>
+              <div id="i2c-scan" class="dim" style="margin-top:.4rem">自动轮询中 · 校准页 !I2C 可做全总线扫描</div>
+            </div>
+
+            <div class="box">
+              <h2>舵机角度</h2>
+              <div class="servos" id="servos"></div>
+            </div>
+
+            <div class="box wide">
+              <h2>电池电压曲线</h2>
+              <canvas id="chart"></canvas>
+            </div>
+
+          </div>
+        </div>
+      </section>
+
+      <!-- ============ 参数页 (步态/姿态/遥控/电源/平衡) ============
+           五页结构完全相同, 由 JS 按 PAGES 表生成 (见 buildParamPages) -->
+      <div id="param-pages"></div>
+
+      <!-- ==================== 校准 ==================== -->
+      <section class="tabpage" id="tab-calib" hidden>
+        <div class="tab_wrapper">
+          <div class="tab_title">舵机校准</div>
+          <div class="note">
+            校准走查会依次驱动全部 18 路舵机 —— <b>先把机器人架空</b>，并确认舵机供电已开。
+            走查中每条腿按提示调到目标位置，全部走完后按「保存校准」写入 flash（掉电保持）。
+            校准数据的读写只有串口命令，本页只是把命令做成了按钮；输出仍打在日志页。
+          </div>
+          <div class="box">
+            <h2>校准操作</h2>
+            <div class="quick">
+              <button class="mini" data-cmd="!C">!C 开始校准走查</button>
+              <button class="mini" data-cmd="!SAVE">!SAVE 保存校准</button>
+              <button class="mini" data-cmd="!I2C">!I2C 扫描总线</button>
+            </div>
+            <div class="row"><span>I2C 总线</span><span id="cal-i2c" class="dim">—</span></div>
+          </div>
+          <div class="box wide">
+            <h2>舵机角度</h2>
+            <div class="servos" id="cal-servos"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ==================== 日志 ==================== -->
+      <section class="tabpage" id="tab-log" hidden>
+        <div class="tab_wrapper">
+          <div class="tab_title">串口日志</div>
+          <div class="box">
+            <h2>实时输出</h2>
+            <div id="log"></div>
+            <div id="cmdbar">
+              <input id="cmd" placeholder="输入命令，如 !LOG / !BATT / !CFG（↑↓ 翻历史）" autocomplete="off">
+              <button id="send" class="regular-button">发送</button>
+            </div>
+            <div class="quick">
+              <button class="mini" data-cmd="!BATT">!BATT</button>
+              <button class="mini" data-cmd="!IMU">!IMU</button>
+              <button class="mini" data-cmd="!A">!A</button>
+              <button class="mini" data-cmd="!CFG">!CFG</button>
+              <button class="mini" data-cmd="!LOG">!LOG</button>
+              <button class="mini" data-cmd="!V 3">!V 3 调试等级</button>
+              <button class="mini" data-cmd="!S">!S 停止</button>
+              <button class="mini" id="clear">清屏</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <div id="statusbar">
+    <span id="rate" class="dim"></span>
+    <span class="spacer"></span>
+    <span class="dim">127.0.0.1:8080</span>
+  </div>
+
+</div>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const cssvar = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+
+/* ---------------- 串口日志 ---------------- */
+const LOG_MAX = 600;
+const logEl = $("log");
+let autoscroll = true;
+logEl.addEventListener("scroll", () => {
+  autoscroll = logEl.scrollTop + logEl.clientHeight >= logEl.scrollHeight - 8;
+});
+
+function classify(line) {
+  if (/NOT FOUND|Low battery|Refuse|Invalid|error|Error|FAIL/.test(line)) return "l-err";
+  if (/DETECTED|IN RANGE|完全|fully|Robot ON|saved OK/.test(line)) return "l-ok";
+  if (/warn|Warn|WARNING|OUT OF RANGE|clamped/.test(line)) return "l-warn";
+  return "";
+}
+function addLog(line, cls) {
+  const d = document.createElement("div");
+  d.className = cls || classify(line);
+  d.textContent = line;
+  logEl.appendChild(d);
+  while (logEl.childElementCount > LOG_MAX) logEl.removeChild(logEl.firstChild);
+  if (autoscroll) logEl.scrollTop = logEl.scrollHeight;
+}
+
+/* ---------------- 分页 ---------------- */
+function showTab(name) {
+  /* 认不出的名字 (旧书签如 #params, 或手改的 hash) 回落到状态页 ——
+   * 否则没有任何 tabpage 匹配, 页面会整片空白 */
+  if (!document.querySelector(`.tab[data-tab="${name}"]`)) name = "dash";
+
+  for (const t of document.querySelectorAll(".tab"))
+    t.classList.toggle("active", t.dataset.tab === name);
+  for (const m of document.querySelectorAll(".tabpage"))
+    m.hidden = (m.id !== "tab-" + name);
+  if (name === "dash") drawChart();   // canvas 在隐藏时 clientWidth=0, 需重画
+  if (name === "log") logEl.scrollTop = logEl.scrollHeight;
+  location.hash = name;               // 便于收藏/刷新回到同一页
+}
+document.querySelectorAll(".tab").forEach(b => b.onclick = () => showTab(b.dataset.tab));
+
+/* ---------------- 电池曲线 ---------------- */
+const hist = [];              // [{t, mv}]
+const HIST_MAX = 900;
+const cv = $("chart"), ctx = cv.getContext("2d");
+
+function drawChart() {
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  if (w === 0 || h === 0) return;
+  if (cv.width !== w * dpr || cv.height !== h * dpr) {
+    cv.width = w * dpr; cv.height = h * dpr;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, h);
+  const u = (i) => i * (h / 150);   // 1 逻辑像素 → 设备像素, 免得线在 2x 屏上糊
+
+  if (hist.length < 2) {
+    /* 没数据时给个说明 —— 空白框看不出是"没接电池"还是"页面坏了" */
+    ctx.fillStyle = cssvar("--surface-700");
+    ctx.font = `${u(12)}px "Open Sans", "Noto Sans CJK SC", sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText(BATT.state === "ABSENT" ? "未接电池 (USB 供电) — 无电压曲线"
+                                         : "等待遥测数据…", w / 2, h / 2);
+    ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
+    return;
+  }
+
+  const lo = BATT.lo_mv, hi = BATT.hi_mv;
+  let mn = Math.min(...hist.map(p => p.mv));
+  let mx = Math.max(...hist.map(p => p.mv));
+  if (lo && hi) { mn = Math.min(mn, lo); mx = Math.max(mx, hi); }
+  const pad = Math.max(40, (mx - mn) * 0.15);
+  mn -= pad; mx += pad;
+
+  const X = (i) => (i / (hist.length - 1)) * w;
+  const Y = (mv) => h - ((mv - mn) / (mx - mn)) * h;
+
+  ctx.setLineDash([u(4), u(4)]); ctx.lineWidth = u(1);
+  if (lo) { ctx.strokeStyle = cssvar("--error-400"); ctx.beginPath();
+            ctx.moveTo(0, Y(lo)); ctx.lineTo(w, Y(lo)); ctx.stroke(); }
+  if (hi) { ctx.strokeStyle = cssvar("--warning-400"); ctx.beginPath();
+            ctx.moveTo(0, Y(hi)); ctx.lineTo(w, Y(hi)); ctx.stroke(); }
+  ctx.setLineDash([]);
+
+  const last = hist[hist.length - 1].mv;
+  ctx.strokeStyle = cssvar((lo && hi && (last < lo || last > hi)) ? "--error-400" : "--success-400");
+  ctx.lineWidth = u(1.6); ctx.beginPath();
+  hist.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p.mv)) : ctx.moveTo(X(i), Y(p.mv)));
+  ctx.stroke();
+
+  ctx.fillStyle = cssvar("--surface-900"); ctx.font = `${u(11)}px ui-monospace, monospace`;
+  ctx.fillText(`${Math.round(mx)} mV`, u(4), u(12));
+  ctx.fillText(`${Math.round(mn)} mV`, u(4), h - u(4));
+}
+
+/* ---------------- 状态面板渲染 ---------------- */
+const BATT = {};
+
+function renderBatt(d) {
+  Object.assign(BATT, d);
+
+  /* ABSENT = 未接电池 (USB 供电)。这时电压是 0mV, 但它是正常的台面调试状态,
+   * 不能显示成"0mV 低压告警"。FAULT (真过放/过压) 才按故障显示。 */
+  const absent = BATT.state === "ABSENT";
+
+  if (d.batt_mv !== undefined && !absent) {
+    $("batt-v").textContent = d.batt_mv;
+    $("batt-v").className = "";
+    $("batt-unit").textContent = " mV";
+    hist.push({ t: Date.now(), mv: d.batt_mv });
+    while (hist.length > HIST_MAX) hist.shift();
+    drawChart();
+  } else if (absent) {
+    $("batt-v").textContent = "USB 供电";
+    $("batt-v").className = "dim";
+    $("batt-unit").textContent = " 未接电池";
+    /* 清曲线: 否则会一直画着拔电池之前的旧读数, 看着像还在放电 */
+    if (hist.length) { hist.length = 0; drawChart(); }
+  }
+
+  if (d.pin_mv !== undefined) $("batt-pin").textContent = d.pin_mv + " mV";
+  if (d.spread_mv !== undefined)
+    $("batt-spread").textContent = `${d.spread_mv} mV (${d.spread_counts} counts)`;
+  if (d.avg !== undefined)
+    $("batt-raw").textContent = `${d.avg} / ${d.min} / ${d.max}`;
+
+  if (d.lo_mv !== undefined) {
+    if (absent) {
+      $("batt-lim").textContent = "跳过 (未接电池)";
+      $("batt-lim").className = "dim";
+    } else {
+      $("batt-lim").textContent = `${d.lo_mv} ~ ${d.hi_mv} mV`;
+      $("batt-lim").className = d.in_range ? "ok" : "err";
+    }
+  }
+  if (d.enabled !== undefined) {
+    $("batt-en").textContent = d.enabled
+      ? (absent ? "已启用 (未接电池不触发)" : "已启用")
+      : "未启用 (batt_check=0)";
+    $("batt-en").className = (d.enabled && !absent) ? "ok" : (d.enabled ? "dim" : "warn");
+  }
+
+  if (!absent && BATT.batt_mv !== undefined && BATT.lo_mv) {
+    const p = (BATT.batt_mv - BATT.lo_mv) / (BATT.hi_mv - BATT.lo_mv);
+    $("batt-bar").style.width = Math.max(0, Math.min(1, p)) * 100 + "%";
+  } else {
+    $("batt-bar").style.width = "0";
+  }
+}
+
+function renderImu(d) {
+  if (d.available !== undefined) {
+    $("imu-av").textContent = d.available ? `是 (0x${d.addr.toString(16)})` : "否";
+    $("imu-av").className = d.available ? "ok" : "err";
+  }
+  if (d.roll !== undefined) {
+    $("imu-rp").textContent = `${(d.roll / 10).toFixed(1)}° / ${(d.pitch / 10).toFixed(1)}°`;
+    $("imu-yaw").textContent = `${(d.yaw / 10).toFixed(1)}°`;
+    $("imu-valid").textContent = d.valid ? "是" : "否";
+    $("imu-valid").className = d.valid ? "ok" : "warn";
+  }
+  if (d.calib) {
+    const c = d.calib;
+    $("imu-calib").textContent =
+      `${c.sys}/3 ${c.gyr}/3 ${c.acc}/3 ${c.mag}/3` + (d.fully ? " 完整" : "");
+    $("imu-calib").className = d.fully ? "ok" : "warn";
+  }
+}
+
+const I2C = {};
+function renderI2c(d) {
+  if (d.reset) {
+    /* 新一轮 !I2C 开始: 作废上一轮的设备状态, 否则掉线的设备会一直留着。
+     * 扫描列表只在全扫描时清 —— 轮询用的 !I2C q 不产生扫描结果, 若也清
+     * 就会把用户刚手动扫出来的列表在 3s 后抹掉。 */
+    for (const k of Object.keys(I2C)) if (k !== "scan") delete I2C[k];
+    if (d.reset_scan) {
+      delete I2C.scan;
+      $("i2c-scan").textContent = "自动轮询中 · 校准页 !I2C 可做全总线扫描";
+    }
+    $("i2c-devs").innerHTML = "";
+    return;
+  }
+  Object.assign(I2C, d);
+  if (d.servo_power) {
+    const p = d.servo_power;
+    $("i2c-pwr").textContent = `${p.left} / ${p.right}`;
+    $("i2c-pwr").className = (p.left && p.right) ? "ok" : "dim";
+  }
+  if (d.idle) {
+    const ok = d.idle.sda && d.idle.scl;
+    $("i2c-idle").textContent = `SDA=${d.idle.sda} SCL=${d.idle.scl}`;
+    $("i2c-idle").className = ok ? "ok" : "err";
+  }
+  let html = "";
+  (I2C.pca || []).forEach(p => {
+    html += `<div class="row"><span>PCA9685 0x${p.addr.toString(16).toUpperCase()} (${p.side})</span>` +
+            `<span class="${p.ok ? "ok" : "err"}">${p.ok ? "在线" : "未找到"}</span></div>`;
+  });
+  (I2C.bno || []).forEach(b => {
+    html += `<div class="row"><span>BNO055 0x${b.addr.toString(16).toUpperCase()}</span>` +
+            `<span class="${b.ok ? "ok" : "err"}">${b.ok ? "在线" : "未找到"}</span></div>`;
+  });
+  $("i2c-devs").innerHTML = html;
+  /* 用累积的 I2C.scan 而非本帧的 d.scan —— 手动全扫描的结果要能留到
+   * 下一次全扫描, 不被中间的 !I2C q 轮询帧清掉 */
+  if (I2C.scan && I2C.scan.length)
+    $("i2c-scan").textContent = "全扫描: " +
+      I2C.scan.map(a => "0x" + a.toString(16).toUpperCase().padStart(2, "0")).join(" ");
+  else if (I2C.scan) $("i2c-scan").textContent = "全扫描: 无设备响应";
+
+  /* 校准页的一行摘要 —— 校准前要确认舵机驱动和总线都在 */
+  const cal = $("cal-i2c");
+  if (!cal) return;
+  const want = [...(I2C.pca || []), ...(I2C.bno || [])];
+  if (!want.length && !I2C.idle) { cal.textContent = "—"; cal.className = "dim"; return; }
+  const miss = want.filter(x => !x.ok).length;
+  const bus = I2C.idle ? (I2C.idle.sda && I2C.idle.scl ? "空闲" : "拉低") : "?";
+  cal.textContent = `${want.length - miss}/${want.length} 设备在线 · 总线${bus}`;
+  cal.className = miss || bus !== "空闲" ? "err" : "ok";
+}
+
+/* 舵机格子出现在状态页和校准页两处 —— 两边都要跟着刷新 */
+function renderServo(d) {
+  if (!d.boards) return;
+  for (const [host, prefix] of [["servos", "sv"], ["cal-servos", "calsv"]]) {
+    const el = $(host);
+    if (!el) continue;
+    if (!el.childElementCount) {
+      let h = "";
+      for (let i = 0; i < 18; i++) {
+        const side = i <= 8 ? "R" : "L";
+        h += `<div class="servo ${side}" id="${prefix}${i}">` +
+             `<div class="id">#${i} · ${side}</div><div class="ang">—</div></div>`;
+      }
+      el.innerHTML = h;
+    }
+    for (const key in d.boards) {
+      const b = d.boards[key];
+      for (const id in b.angles)
+        el.querySelector(`#${prefix}${id} .ang`).textContent = b.angles[id];
+    }
+  }
+}
+
+/* ---------------- 遥控通道实时显示 (遥控页) ----------------
+ * 固件 5Hz 推 [CH] 行 → server.py 解析成 ch 事件。两种输入源报的东西不同,
+ * 所以格子是重建而不是复用 (切换输入源时整块换掉)。 */
+const CH = { last: 0, fc: 0, fcT: 0, fps: 0 };
+
+/* 与固件 config.h 的 CRSF_CHANNEL_*_DEFAULT 一致 (参数读取前的显示兜底) */
+const CRSF_CH_DEFAULT = {
+  crsf_ch_fwd: 1, crsf_ch_str: 0, crsf_ch_turn: 3, crsf_ch_hgt: 2,
+  crsf_ch_arm: 4, crsf_ch_gait: 5, crsf_ch_stance: 6, crsf_ch_bal: 7,
+};
+
+/* 通道号 → 功能名。参数没读回来时用固件默认值兜底, 否则一进页面全是"未使用"。
+ * 重复映射用 / 拼接 (改滑条时可能两个功能撞到同一通道, 得看得见)。 */
+function chFuncNames() {
+  const names = {};
+  for (const [pname, label] of CH_FN) {
+    const p = curParams[pname];
+    const idx = p ? p.val : CRSF_CH_DEFAULT[pname];
+    if (idx === undefined || idx < 0 || idx > 15) continue;
+    names[idx] = names[idx] ? names[idx] + "/" + label : label;
+  }
+  return names;
+}
+
+/* PS2 键位: 位序取自 hexapod_ps2.h 的 PSB_* (按下 = 该位为 0) */
+const PSB = [
+  [0, "SELECT"], [1, "L3"], [2, "R3"], [3, "START"],
+  [4, "上"], [5, "右"], [6, "下"], [7, "左"],
+  [8, "L2"], [9, "R2"], [10, "L1"], [11, "R1"],
+  [12, "△"], [13, "○"], [14, "×"], [15, "□"],
+];
+
+function buildChPanel(kind) {
+  const el = $("ch-panel");
+  if (!el || el.dataset.kind === kind) return false;
+  el.dataset.kind = kind;
+  el.innerHTML = "";
+  return true;
+}
+
+function renderCh(d) {
+  const el = $("ch-panel");
+  if (!el) return;
+
+  if (d.mode !== undefined) {
+    $("ch-mode").textContent = d.mode === "crsf" ? "CRSF (ELRS)" : "PS2 手柄";
+    $("ch-mode").className = "";
+    /* 点亮当前生效的输入源按钮 —— 按固件回报的实际模式, 所以没存盘的切换
+     * 也看得出来 (按钮 ≠ 已保存状态) */
+    $("ch-btn-crsf")?.classList.toggle("on", d.mode === "crsf");
+    $("ch-btn-ps2")?.classList.toggle("on", d.mode === "ps2");
+  }
+
+  /* 刷新率: 固件只给帧计数, 差值/时间差在这里算 (1 秒内不重复算) */
+  if (d.fc !== undefined) {
+    const t = Date.now();
+    if (CH.fcT && d.fc >= CH.fc && t > CH.fcT) {
+      if (t - CH.fcT >= 1000) {
+        CH.fps = Math.round((d.fc - CH.fc) * 1000 / (t - CH.fcT));
+        CH.fc = d.fc; CH.fcT = t;
+      }
+    } else { CH.fc = d.fc; CH.fcT = t; }
+  }
+  const fps = CH.fps ? ` · ${CH.fps} 帧/秒` : "";
+  if (d.mode === "crsf") {
+    $("ch-link").textContent = (d.link ? "已连接" : "无信号") + fps;
+    $("ch-link").className = d.link ? "" : "dim";
+  } else if (d.mode === "ps2") {
+    $("ch-link").textContent = (d.connected ? "已连接" : "未连接") + fps;
+    $("ch-link").className = d.connected ? "" : "dim";
+  }
+
+  CH.last = Date.now();
+
+  if (d.mode === "crsf" && d.ch) {
+    if (buildChPanel("crsf")) {
+      let h = "";
+      for (let i = 0; i < 16; i++) {
+        h += `<div class="servo" id="chc${i}"><div class="id">CH${i + 1}</div>` +
+             `<div class="fn none">未使用</div><div class="ang">—</div>` +
+             `<div class="bar"><i style="width:0"></i></div></div>`;
+      }
+      $("ch-panel").innerHTML = h;
+    }
+    /* 功能名每次都重算: 滑条改完下一次 ch 帧就跟着变 */
+    const names = chFuncNames();
+    for (let i = 0; i < 16; i++) {
+      const cell = $("chc" + i);
+      if (!cell) continue;
+      const fn = cell.querySelector(".fn");
+      const label = names[i] || "未使用";
+      if (fn.textContent !== label) fn.textContent = label;
+      fn.className = names[i] ? "fn" : "fn none";
+
+      const v = d.ch[i];
+      if (v === undefined) continue;
+      cell.querySelector(".ang").textContent = v;
+      /* 172~1811 定标, 中位在正中间 (行程不对称时也能看出偏了多少) */
+      const p = (v - 172) / (1811 - 172);
+      cell.querySelector(".bar > i").style.width = Math.max(0, Math.min(1, p)) * 100 + "%";
+    }
+  } else if (d.mode === "ps2") {
+    if (buildChPanel("ps2")) {
+      let h = "";
+      for (const [stick, label] of [["lx", "左X"], ["ly", "左Y"], ["rx", "右X"], ["ry", "右Y"]]) {
+        h += `<div class="servo" id="chs-${stick}"><div class="id">${label}</div>` +
+             `<div class="ang">—</div><div class="bar"><i style="width:0"></i></div></div>`;
+      }
+      for (const [bit, label] of PSB) {
+        h += `<div class="servo" id="chb${bit}"><div class="id">${label}</div>` +
+             `<div class="ang">—</div></div>`;
+      }
+      $("ch-panel").innerHTML = h;
+    }
+    for (const s of ["lx", "ly", "rx", "ry"]) {
+      const cell = $("chs-" + s);
+      if (!cell || d[s] === undefined) continue;
+      cell.querySelector(".ang").textContent = d[s];
+      cell.querySelector(".bar > i").style.width = (d[s] / 255 * 100) + "%";
+    }
+    if (d.btns !== undefined) {
+      for (const [bit, label] of PSB) {
+        const cell = $("chb" + bit);
+        if (!cell) continue;
+        const down = !(d.btns & (1 << bit));   /* 按下 = 0 */
+        cell.querySelector(".ang").textContent = down ? "按下" : "—";
+        cell.className = down ? "servo pressed" : "servo";
+      }
+    }
+  }
+}
+
+/* 3 秒没收到 ch 帧就当数据过期 (固件 5Hz 推, 断流说明桥接或固件停了) */
+setInterval(() => {
+  if (!CH.last || Date.now() - CH.last < 3000) return;
+  const el = $("ch-mode");
+  if (el && el.textContent !== "无数据") {
+    $("ch-mode").textContent = "无数据";
+    $("ch-mode").className = "dim";
+    $("ch-link").textContent = "—";
+  }
+}, 1000);
+
+/* ---------------- 外设页 ----------------
+ * 两类控件混在一页: 上面的卡片是"直接驱动"(!MOTOR/!LED/!BUZZ/!UART0T/!PWM),
+ * 即时生效但不进参数表; 下面的「外设开关」是普通的 per 组参数, 走通用滑条。
+ * 状态只有一个来源: 固件每 2 秒被问一次的 6 行 [PER] (见 server.py --periph-interval),
+ * 所以这里的数字是"回显"而不是"本地记的" —— 从日志页手敲命令也能对上。 */
+
+/* 空闲 PWM 的编号规则在固件 (hexapod_config.h FREE_PWM_*, g_free_pwm_channel):
+ * idx 0~6 = 左板 0x40 的 LED0~6, idx 7~13 = 右板 0x41 的 LED9~15 */
+const PER_PWM = [];
+for (let i = 0; i < 14; i++) PER_PWM.push(i <= 6 ? `左板 LED${i}` : `右板 LED${i + 2}`);
+
+const PER = { last: 0 };
+
+/* 滑条 ↔ 数字框互为对方的备份, 取夹在 [min,max] 内的整数 */
+function perVal(rangeId, numId) {
+  const r = $(rangeId), n = $(numId);
+  let v = parseInt(n.value, 10);
+  if (!Number.isFinite(v)) v = parseInt(r.value, 10) || 0;
+  v = Math.max(+r.min, Math.min(+r.max, v));
+  r.value = n.value = v;
+  return v;
+}
+
+/* 拖动只同步数字框, 松手 (change) 才下发 —— 与参数页同理, 拖动中每帧一条命令
+ * 会把固件的控制循环淹掉 */
+function perSlider(rangeId, numId, mk) {
+  const r = $(rangeId), n = $(numId);
+  if (!r || !n) return false;
+  r.oninput = () => { n.value = r.value; };
+  r.onchange = n.onchange = () => sendCmd(mk(perVal(rangeId, numId)));
+  return true;
+}
+
+/* 固件回显 → 滑条。正在拖/正在输入的那个框不回写, 否则手指下的滑块会被拽回去 */
+function syncPerSlider(rangeId, numId, v) {
+  const r = $(rangeId), n = $(numId);
+  if (!r || !n || v === undefined) return;
+  if (document.activeElement !== r) r.value = v;
+  if (document.activeElement !== n) n.value = v;
+}
+
+function initPerPage() {
+  const host = $("per-pwm");
+  if (host) {
+    let h = "";
+    for (let i = 0; i < 14; i++) {
+      h += `<div class="perrow"><div class="plabel">idx ${i} · ${PER_PWM[i]}</div>` +
+           `<input type="range" id="per-pw${i}" min="0" max="20000" step="10" value="0">` +
+           `<input type="number" id="per-pwn${i}" min="0" max="20000" value="0">` +
+           `<div class="punit">µs</div></div>`;
+    }
+    host.innerHTML = h;
+    for (let i = 0; i < 14; i++)
+      perSlider(`per-pw${i}`, `per-pwn${i}`, v => `!PWM ${i} ${v}`);
+  }
+
+  perSlider("per-m1", "per-m1n", v => `!MOTOR 1 ${v}`);
+  perSlider("per-m2", "per-m2n", v => `!MOTOR 2 ${v}`);
+
+  /* 频率/时长只是"响一下"的参数, 单独拖不发声 —— 只做滑条与数字框的互相同步 */
+  for (const [ri, ni] of [["per-bf", "per-bfn"], ["per-bt", "per-btn"]]) {
+    const r = $(ri), n = $(ni);
+    if (!r || !n) continue;
+    r.oninput = () => { n.value = r.value; };
+    r.onchange = n.onchange = () => perVal(ri, ni);
+  }
+  const buzz = $("per-buzz");
+  if (buzz) buzz.onclick = () =>
+    sendCmd(`!BUZZ ${perVal("per-bf", "per-bfn")} ${perVal("per-bt", "per-btn")}`);
+
+  const tx = $("per-tx");
+  if (tx) {
+    const doTx = () => {
+      const t = tx.value.trim();
+      if (!t) return;
+      sendCmd("!UART0T " + t);
+      /* 不清空: 试外设时常要连着发同一条, 选中让它下次直接覆盖 */
+      tx.select();
+    };
+    $("per-txbtn").onclick = doTx;
+    tx.addEventListener("keydown", e => { if (e.key === "Enter") doTx(); });
+  }
+}
+
+function renderPer(d) {
+  PER.last = Date.now();
+
+  const m = d.motors;
+  if (m) {
+    $("per-motors").textContent = `m1=${m.m1} m2=${m.m2}`;
+    syncPerSlider("per-m1", "per-m1n", m.m1);
+    syncPerSlider("per-m2", "per-m2n", m.m2);
+  }
+
+  const l = d.leds;
+  if (l) {
+    $("per-leds").textContent =
+      `绿=${l.g ? "亮" : "灭"} 红=${l.r ? "亮" : "灭"}` +
+      ` · 心跳${l.hb ? "开" : "关"} 报警${l.alarm ? "开" : "关"}`;
+  }
+
+  const b = d.buzzer;
+  if (b) $("per-buzzer").textContent = `上次 ${b.freq} Hz / ${b.ms} ms`;
+
+  const u = d.uart0;
+  if (u) {
+    const el = $("per-uart0");
+    el.textContent = u.en
+      ? `${u.baud} 波特 · 收 ${u.rx} 字节 / ${u.lines} 行 · 发 ${u.tx} 字节`
+      : "未使能 (下面 uart0_en 打开)";
+    el.className = u.en ? "" : "dim";
+  }
+  const tx = $("per-txline");
+  if (tx && d.u0_tx !== undefined)
+    tx.textContent = `上次发出 ${d.u0_tx_bytes} 字节: ${d.u0_tx}`;
+  const rx = $("per-rx");
+  if (rx && d.u0_rx) {
+    rx.textContent = d.u0_rx.length ? d.u0_rx.join("\n") : "（还没有收到数据）";
+    rx.scrollTop = rx.scrollHeight;
+  }
+
+  const e = d.ext;
+  if (e) {
+    $("per-ext").textContent =
+      `模式=${["关", "软件 I2C", "ADC"][e.mode] || e.mode} · ` +
+      `I2C 命中 ${e.found} 个 · a0=${e.a0} mV · a1=${e.a1} mV`;
+  }
+
+  const p = d.pwm;
+  if (p) for (const k of Object.keys(p)) {
+    const i = parseInt(k, 10);
+    if (i >= 0 && i < 14) syncPerSlider(`per-pw${i}`, `per-pwn${i}`, p[k]);
+  }
+}
+
+/* 状态是轮询来的: 轮询被关 (--periph-interval 0)、桥接断了、或服务端没有浏览器
+ * 连着, 这里就一直是旧值。超过 5 秒没更新就把标记点亮, 免得看着像"值本来就这样" */
+setInterval(() => {
+  const el = $("per-stale");
+  if (!el) return;
+  const stale = !PER.last || Date.now() - PER.last > 5000;
+  el.textContent = stale ? "外设状态: 无数据" : "外设状态: 已连接";
+  el.className = "perdot " + (stale ? "dim" : "ok");
+}, 1000);
+
+/* ---------------- 参数页 ---------------- */
+/* 分组名 = 固件参数表 grp= 字段的取值 (见 hexapod_params.c s_table)。
+ * 每个参数页对应固件里的一组或几组 —— 遥控页把"手感"和"方向取反"放在一起,
+ * 因为它们调的是同一件事: 摇杆怎么映射到运动。 */
+const GROUP_NAME = {
+  batt: "电池", motion: "运动", stance: "站立姿态",
+  tune: "手感 / 死区", dir: "方向取反", imu: "IMU", chan: "通道映射",
+  per: "外设开关",
+};
+
+/* 不生成通用滑条的参数 —— 遥控页给了更清楚的输入源按钮 (CRSF / PS2),
+ * 再摆一个 0/1 滑条是同一个变量的第二种说法, 只会让人以为改了没反应。
+ * 值本身仍在参数表里: 照常参与保存 / 恢复默认 / 未保存计数。 */
+const PARAM_HIDE = new Set(["input_mode"]);
+
+/* 八个功能 ↔ 参数名的对应 (CRSF 通道映射)。页面上的格子按通道号反查这张表,
+ * 标出「这个通道现在是干什么的」—— 改滑条后下一次 ch 帧就会重新标。 */
+const CH_FN = [
+  ["crsf_ch_fwd", "前进"], ["crsf_ch_str", "平移"],
+  ["crsf_ch_turn", "旋转"], ["crsf_ch_hgt", "高度"],
+  ["crsf_ch_arm", "解锁"], ["crsf_ch_gait", "步态"],
+  ["crsf_ch_stance", "姿态"], ["crsf_ch_bal", "平衡"],
+];
+
+/* 外设页的手动控制卡片 (参数滑条由 per 组自动生成在它们下面)。
+ * 固定命令用 data-cmd 走通用接线 (index.html 底部那个 .quick 批处理);
+ * 带参数的 (滑条/文本框) 在 initPerPage() 里单独接。 */
+const perCustomHTML = `
+    <div class="box wide">
+      <h2>直流电机 (GP2 / GP3)</h2>
+      <div class="perrow">
+        <div class="plabel">电机 1 (GP2)</div>
+        <input type="range" id="per-m1" min="0" max="1000" step="10" value="0">
+        <input type="number" id="per-m1n" min="0" max="1000" value="0">
+        <div class="punit">‰</div>
+      </div>
+      <div class="perrow">
+        <div class="plabel">电机 2 (GP3)</div>
+        <input type="range" id="per-m2" min="0" max="1000" step="10" value="0">
+        <input type="number" id="per-m2n" min="0" max="1000" value="0">
+        <div class="punit">‰</div>
+      </div>
+      <div class="quick">
+        <button class="mini" data-cmd="!MOTOR">双电机停止</button>
+      </div>
+      <div class="row"><span>固件回报</span><span id="per-motors">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        板子只引了调速脚没有方向脚，所以这里给的是<b>转速不是正反转</b>
+        (占空比千分比，1000 = 全速)。滑条松手才下发。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>指示灯</h2>
+      <div class="quick">
+        <button class="mini" data-cmd="!LED g 1">绿灯亮</button>
+        <button class="mini" data-cmd="!LED g 0">绿灯灭</button>
+        <button class="mini" data-cmd="!LED r 1">红灯亮</button>
+        <button class="mini" data-cmd="!LED r 0">红灯灭</button>
+      </div>
+      <div class="row"><span>引脚实况</span><span id="per-leds">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        绿/红灯平时归主循环管 (心跳 / 电池报警)，每 1~2 秒覆盖一次 —— 手动开关想按得住，
+        得先关掉下面「外设开关」里的 <code>led_heartbeat</code> / <code>led_alarm</code>。
+        这里读的是<b>引脚实况</b>而不是上次设的值，所以一眼能看出有没有被心跳盖掉。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>蜂鸣器 (GP13)</h2>
+      <div class="perrow">
+        <div class="plabel">频率</div>
+        <input type="range" id="per-bf" min="200" max="10000" step="50" value="1500">
+        <input type="number" id="per-bfn" min="200" max="10000" value="1500">
+        <div class="punit">Hz</div>
+      </div>
+      <div class="perrow">
+        <div class="plabel">时长</div>
+        <input type="range" id="per-bt" min="10" max="2000" step="10" value="200">
+        <input type="number" id="per-btn" min="10" max="2000" value="200">
+        <div class="punit">ms</div>
+      </div>
+      <div class="quick"><button class="mini" id="per-buzz">响一下</button></div>
+      <div class="row"><span>固件回报</span><span id="per-buzzer">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        <b>这条是阻塞命令</b>: 发声期间控制回路停摆，最长 2000 ms (超长固件自己截断)。
+        机器人正在走的时候别按 —— 那是几秒的失控。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>外部 UART0 (GP0=TX, GP1=RX)</h2>
+      <div class="row"><span>状态</span><span id="per-uart0">—</span></div>
+      <div class="quick" style="flex-wrap:nowrap">
+        <input type="text" id="per-tx" placeholder="要发出去的文本" maxlength="40">
+        <button class="mini" id="per-txbtn">发送</button>
+      </div>
+      <div class="row" style="margin-top:.5rem"><span>最近发出</span><span id="per-txline">—</span></div>
+      <div class="row" style="margin-top:.5rem"><span>最近收到</span></div>
+      <div class="devlog" id="per-rx">（还没有收到数据）</div>
+      <div class="note" style="margin-top:.4rem">
+        要先把下面「外设开关」里的 <code>uart0_en</code> 打开 (最多 2 秒生效)，
+        波特率同一张卡里改。收到的整行由固件转发上来，这里留最近 20 行；
+        把 GP0 与 GP1 短接就能自测环回。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>外部 I2C / ADC (GP26 / GP27)</h2>
+      <div class="row"><span>模式 · 扫描 · 电压</span><span id="per-ext">—</span></div>
+      <div class="quick">
+        <button class="mini" data-cmd="!I2C2">扫描 I2C</button>
+        <button class="mini" data-cmd="!ADC2">读 ADC</button>
+      </div>
+      <div class="note" style="margin-top:.4rem">
+        这两个脚在 RP2040 上只能走 I2C1，而 I2C1 已经给了两块 PCA9685 —— 所以第二路
+        I2C 是固件<b>用软件位翻转出来的</b> (约 50 kHz，内部弱上拉，挂器件建议外挂 4.7k)。
+        模式在下面 <code>ext_i2c_mode</code>: 0=关 1=软件 I2C 2=ADC。扫描到的地址列表
+        在日志页。
+      </div>
+    </div>
+
+    <div class="box wide">
+      <h2>空闲 PWM 输出 (14 路)</h2>
+      <div id="per-pwm"></div>
+      <div class="quick">
+        <button class="mini" data-cmd="!PWMOFF">全部归零</button>
+        <button class="mini" data-cmd="!PERIPH">刷新状态</button>
+      </div>
+      <div class="note" style="margin-top:.4rem">
+        18 路舵机之外的 14 个 PCA9685 通道: idx 0~6 = 左板 0x40 的 LED0~6，
+        idx 7~13 = 右板 0x41 的 LED9~15。脉宽单位 µs，超过本板当前周期的值会被固件截断。
+        <b>断电不保持</b> —— 这只是台上试灯/试小负载的口子，不是能存下来的状态。
+      </div>
+    </div>`;
+
+/* 参数页定义: id 同时是 tab 名和 DOM id 后缀。组顺序 = 页面内卡片顺序。 */
+const PAGES = [
+  { id: "gait", title: "步态", groups: ["motion"],
+    note: "决定走多快、迈多大步。抬腿高度与步长<b>改完请先架空试转</b>，" +
+          "参数之间不校验运动学自洽 (如 lift_max 超过腿长的一半会解算失败)。" },
+  { id: "stance", title: "姿态", groups: ["stance"],
+    note: "三个姿态档 (窄/正常/宽) 的站姿缩放，以及切换姿态时的过渡速度与单周期最大位移。" },
+  { id: "radio", title: "遥控", groups: ["tune", "dir", "chan"],
+    custom: `
+    <div class="box wide">
+      <h2>输入源</h2>
+      <div class="quick">
+        <button class="mini" id="ch-btn-crsf" data-cmd="!MODE crsf">切到 CRSF</button>
+        <button class="mini" id="ch-btn-ps2" data-cmd="!MODE ps2">切到 PS2</button>
+      </div>
+      <div class="row"><span>当前输入</span><span id="ch-mode">—</span></div>
+      <div class="row"><span>链路 / 刷新率</span><span id="ch-link">—</span></div>
+      <div class="note" style="margin-top:.4rem">
+        切换会同时写 <code>input_mode</code> 参数，但<b>要按「保存到 Flash」才会掉电保持</b>，
+        否则重启回到上一次存的值。
+      </div>
+    </div>
+    <div class="box wide">
+      <h2>通道实时值</h2>
+      <div class="servos" id="ch-panel"></div>
+      <div class="note" style="margin-top:.4rem">
+        CRSF 显示 16 个通道的原始值（中位 992，范围 172~1811），格子上方标出该通道
+        当前映射到的功能 —— 改本页「通道映射」的滑条后即刻跟着变。
+      </div>
+    </div>`,
+    note: "摇杆死区/指数、四个通道的方向取反，以及 CRSF 通道号映射。CRSF 与 PS2 两套独立。" +
+          "通道映射填 <b>0~15</b>（对应遥控器 CH1~CH16）：换了遥控器或改了 ELRS 通道顺序，" +
+          "在这里改就行，不用重烧固件。取反是按功能的，不随通道号走 —— 换通道后若方向反了，" +
+          "翻转「方向取反」里对应那项，而不是调通道号。" },
+  { id: "power", title: "电源", groups: ["batt"],
+    note: "电池保护阈值与分压比。<b>分压比必须按实际电阻实测标定</b>，" +
+          "填错会让所有阈值整体偏移 —— 先用 !BATT 看 raw 与万用表实测的比值。" },
+  { id: "balance", title: "平衡", groups: ["imu"],
+    note: "IMU 姿态补偿的开关、增益和轴符号。符号反了会让机身越调越歪，" +
+          "标定时把机器人向一侧倾斜，看补偿方向是否与倾斜方向相反。" },
+  { id: "per", title: "外设", groups: ["per"], custom: perCustomHTML,
+    note: '<span id="per-stale" class="perdot dim">外设状态: —</span> · ' +
+          "板子上预留但还没接线的那些口子: 两个直流电机、蜂鸣器、双 LED、外部 UART0、" +
+          "GP26/27 上的第二路 I2C 或 ADC，以及 32 路 PWM 里空着的 14 路。" +
+          "上面的卡片是<b>直接驱动</b> (即时生效、不进参数表、不存 flash，" +
+          "数值每 2 秒从固件轮询回来)；下面「外设开关」那五项才是参数，" +
+          "要掉电保持得按「保存到 Flash」。" },
+];
+
+function buildParamPages() {
+  const host = $("param-pages");
+  for (const pg of PAGES) {
+    const sec = document.createElement("section");
+    sec.className = "tabpage";
+    sec.id = "tab-" + pg.id;
+    sec.hidden = true;
+    sec.innerHTML =
+      `<div class="tab_wrapper">
+         <div class="tab_title">${pg.title}</div>
+         <div class="note">${pg.note}
+           改完即时生效（无需重启）；要掉电保持需按「保存到 Flash」（机器人须处于锁定状态）。
+           滑条在松开鼠标时下发，数字框回车确认。<b>名称高亮 = 与出厂默认不同。</b></div>
+         <div class="content_toolbar">
+           <button id="p-reload-${pg.id}" class="regular-button">读取</button>
+           <button id="p-save-${pg.id}" class="regular-button">保存到 Flash</button>
+           <button id="p-reset-${pg.id}" class="danger-button">本页恢复默认</button>
+           <span class="spacer"></span>
+           <span id="p-summary-${pg.id}" class="dim">尚未读取</span>
+         </div>
+         ${pg.custom || ""}
+         <div class="grid" id="pgroups-${pg.id}" style="display:contents"></div>
+       </div>`;
+    host.appendChild(sec);
+  }
+
+  /* 「保存到 Flash」是整份参数写 flash (!CFGW 没有分组语义), 各页按钮等价 */
+  for (const pg of PAGES) {
+    $("p-reload-" + pg.id).onclick = async () => {
+      const r = await postParam("dump");
+      if (!r.ok) addLog("[本页] 读取失败: " + (r.err || "未知"), "l-err");
+    };
+    $("p-save-" + pg.id).onclick = async () => {
+      const r = await postParam("save");
+      if (r.ok) addLog("[本页] 已下发 !CFGW (存 flash)", "l-cmd");
+      else addLog("[本页] 保存失败: " + (r.err || "未知"), "l-err");
+    };
+    /* 「恢复默认」只重置本页参数的组 —— 固件没有 !CFGR <组>, 服务端按
+     * 参数快照展开成多条单参数命令 (见 server.py _reset_group) */
+    $("p-reset-" + pg.id).onclick = async () => {
+      if (!confirm(`把「${pg.title}」页的参数恢复出厂默认？(还需「保存到 Flash」才会掉电保持)`))
+        return;
+      for (const g of pg.groups) {
+        const r = await postParam("resetgrp " + g);
+        if (!r.ok) addLog("[本页] 重置失败: " + (r.err || "未知"), "l-err");
+      }
+    };
+  }
+}
+buildParamPages();
+initPerPage();                // 外设页的滑条/按钮 (DOM 已由上一步建好)
+const pRows = {};             // name → {row, range, num} 或 {row, box, state}
+
+/* ---------------- 「有改动未保存」判定 ----------------
+ * 页面上的每次改动都即时下发 (!CFG <name> <v>), 所以「未保存」= 当前生效值 ≠
+ * 上一次写 flash 时的值。!CFGW 只存非默认项, 因此基线必须是「上次存盘时的值」
+ * 而不是「出厂默认」—— 一个从 flash 载入的非默认值本来就已持久化, 不该让保存
+ * 按钮亮着。
+ *
+ * 基线在参数第一次出现时记下 (页面载入即等于当时生效值), 之后每次看到固件的
+ * [STORE] Params saved OK 重建 —— 这样从日志页命令框手敲 !CFGW 也能同步。 */
+const pBase = {};             // name → 上次存盘时的值
+let curParams = {};           // 最近一次 params 快照的 list
+
+function isUnsaved(p) {
+  return pBase[p.name] !== undefined && p.val !== pBase[p.name];
+}
+
+function saveBaseline() {
+  for (const p of Object.values(curParams)) pBase[p.name] = p.val;
+  refreshPageState();
+}
+
+/* 每页的按钮与统计: 保存键在无未保存改动时置灰 (压下去也是空写一次 flash);
+ * 恢复默认键在本页本来就全是默认值时置灰。 */
+function refreshPageState() {
+  const all = Object.values(curParams);
+  for (const pg of PAGES) {
+    const mine = all.filter(p => pg.groups.includes(p.grp));
+    const unsaved = mine.filter(isUnsaved).length;
+    const sum = $("p-summary-" + pg.id);
+    if (sum) {
+      sum.textContent = mine.length
+        ? `${mine.length} 个参数 · ` + (unsaved ? `${unsaved} 项改动未保存` : "已全部保存")
+        : "尚未读取";
+      sum.className = unsaved ? "chg" : "dim";
+    }
+    const sv = $("p-save-" + pg.id);
+    if (sv) sv.disabled = !unsaved;
+    const rs = $("p-reset-" + pg.id);
+    if (rs) rs.disabled = !mine.some(star);
+  }
+}
+
+async function postParam(body) {
+  try {
+    const r = await fetch("/param", { method: "POST", body });
+    return await r.json();
+  } catch (e) { return { ok: false, err: String(e) }; }
+}
+
+function star(p) { return p.val !== p.def; }
+
+function buildParamRow(p) {
+  const row = document.createElement("div");
+  row.className = "prow";
+
+  const label = document.createElement("div");
+  label.className = "pname";
+  label.textContent = p.name;
+  label.title = `${p.grp} · 默认 ${p.def}${p.unit ? " " + p.unit : ""}`;
+
+  let input;
+  if (p.min === 0 && p.max === 1) {
+    /* 0/1 → 开关 */
+    input = document.createElement("label");
+    input.className = "ptoggle";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    const state = document.createElement("span");
+    state.className = "state";
+    input.append(box, state);
+    box.onchange = () => sendSet(p.name, box.checked ? 1 : 0);
+    /* 5 列: 名字 | 开关 | (滑条位空) | (数字框位空) | ↺ */
+    row.append(label, input, document.createElement("div"),
+               document.createElement("div"), mkDefaultBtn(p));
+    pRows[p.name] = { row, box, state };
+    return row;
+  }
+
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = p.min; range.max = p.max;
+  /* 滑条步长: 约 200 格, 但至少 1 (batt_ratio_milli 这种 4 位数的量也能拖) */
+  range.step = Math.max(1, Math.round((p.max - p.min) / 200));
+
+  const num = document.createElement("input");
+  num.type = "number";
+  num.min = p.min; num.max = p.max;
+
+  const unit = document.createElement("div");
+  unit.className = "punit";
+  unit.textContent = p.unit || "";
+
+  /* 拖动中只更新数字框, 松手才下发 —— 否则 100Hz 控制循环会被命令洪水淹没 */
+  range.oninput = () => { num.value = range.value; };
+  range.onchange = () => sendSet(p.name, parseInt(range.value, 10));
+  num.onchange = () => sendSet(p.name, parseInt(num.value, 10));
+
+  row.append(label, range, num, unit, mkDefaultBtn(p));
+  pRows[p.name] = { row, range, num };
+  return row;
+}
+
+function mkDefaultBtn(p) {
+  const b = document.createElement("button");
+  b.className = "mini pdef";
+  b.textContent = "↺";
+  b.title = `恢复默认 (${p.def}${p.unit ? " " + p.unit : ""})`;
+  b.onclick = async () => {
+    const r = await postParam("reset " + p.name);
+    if (!r.ok) addLog("[本页] 重置失败: " + (r.err || "未知"), "l-err");
+  };
+  return b;
+}
+
+async function sendSet(name, val) {
+  if (!Number.isFinite(val)) return;
+  const r = await postParam(`set ${name} ${val}`);
+  if (!r.ok) addLog("[本页] 写入失败: " + (r.err || "未知"), "l-err");
+}
+
+function updateParamRow(p) {
+  const e = pRows[p.name];
+  if (!e) return;
+  const changed = star(p);
+  e.row.classList.toggle("is-changed", changed);
+
+  if (e.box) {                       // 开关型
+    if (document.activeElement !== e.box) e.box.checked = p.val === 1;
+    e.state.textContent = p.val ? "开" : "关";
+    e.state.className = "state " + (p.val ? "ok" : "dim");
+    return;
+  }
+  /* 正在拖/正在输入时不要回写, 否则固件回显会把手指下的滑块拽回去 */
+  if (document.activeElement !== e.range) e.range.value = p.val;
+  if (document.activeElement !== e.num) e.num.value = p.val;
+  e.num.title = `范围 ${p.min} ~ ${p.max}`;
+}
+
+function renderParams(d) {
+  if (!d.list) return;
+
+  curParams = d.list;
+  /* 参数是逐个到达的 (固件打一行推一次), 所以基线按「第一次见到时的值」记 ——
+   * 页面载入时生效值 == flash 值, 正好是基线该有的语义。
+   * 见过的名字不再覆盖, 否则编辑后回显会把自己变成基线, 永远不会「未保存」 */
+  for (const p of Object.values(d.list)) {
+    if (pBase[p.name] === undefined) pBase[p.name] = p.val;
+  }
+
+  const all = Object.values(d.list);
+
+  for (const pg of PAGES) {
+    const host = $("pgroups-" + pg.id);
+    const mine = all.filter(p => pg.groups.includes(p.grp));
+    const seen = new Set();
+
+    /* 卡片按需创建; 参数行只在首次出现时建 (之后原地更新) */
+    for (const g of pg.groups) {
+      /* PARAM_HIDE: 页面给了更合适的控件, 不再生成通用滑条 (值仍在参数表里,
+       * 照常参与保存/恢复默认/未保存计数) */
+      const items = mine.filter(p => p.grp === g && !PARAM_HIDE.has(p.name));
+      if (!items.length) continue;         // 该组还没有参数: 别建空卡片
+      let card = host.querySelector(`[data-grp="${g}"]`);
+      if (!card) {
+        card = document.createElement("section");
+        card.className = "box wide";
+        card.dataset.grp = g;
+        card.innerHTML = `<h2>${GROUP_NAME[g] || g}</h2>`;
+        host.appendChild(card);
+      }
+      for (const p of items) {
+        seen.add(p.name);
+        if (!pRows[p.name]) card.appendChild(buildParamRow(p));
+        updateParamRow(p);
+      }
+    }
+
+    /* 固件里已删除的参数: 从页面移除, 避免显示幽灵项。
+     * 只清理本页宿主里的行 —— pRows 是全局的, 不加 host 限定会把别页的行删掉 */
+    for (const name of Object.keys(pRows)) {
+      const row = pRows[name].row;
+      if (!seen.has(name) && host.contains(row)) { row.remove(); delete pRows[name]; }
+    }
+
+  }
+  /* 统计与按钮状态都按页算 (d.changed 是全局的, 直接用会让每页显示同一个数字) */
+  refreshPageState();
+}
+
+/* ---------------- SSE ---------------- */
+let lineCount = 0, rateT = Date.now();
+function setLink(up, msg) {
+  $("linkdot").className = "dot " + (up ? "on" : "off");
+  $("linktxt").textContent = msg;
+  $("banner").style.display = up ? "none" : "block";
+}
+
+function connect() {
+  const es = new EventSource("/events");
+  es.onmessage = (e) => {
+    const ev = JSON.parse(e.data);
+    switch (ev.t) {
+      case "hello":
+      case "link":
+        setLink(ev.bridge !== undefined ? ev.bridge : ev.up,
+                ev.msg || (ev.bridge ? "桥接已连接" : "桥接未连接"));
+        /* link 帧不带 paused (只有 hello 带) —— 别把暂停按钮冲回未暂停 */
+        if (ev.paused !== undefined) setPaused(ev.paused);
+        break;
+      case "bridge": addLog(ev.msg, "l-ok"); break;
+      case "raw":
+        addLog(ev.line);
+        /* 写 flash 成功 → 当前值即基线 (保存按钮随之置灰)。
+         * 认固件的回显而不是「点了按钮」, 因为从日志页命令框手敲 !CFGW 也走这里,
+         * 而且被固件拒绝 (robot is armed) 时不该清掉未保存标记 */
+        if (/\[STORE\] Params saved OK/.test(ev.line)) saveBaseline();
+        if (++lineCount % 20 === 0) {
+          const now = Date.now();
+          $("rate").textContent =
+            Math.round(20000 / Math.max(1, now - rateT)) + " 行/秒";
+          rateT = now;
+        }
+        break;
+      case "batt": renderBatt(ev.d); break;
+      case "imu": renderImu(ev.d); break;
+      case "i2c": renderI2c(ev.d); break;
+      case "servo": renderServo(ev.d); break;
+      case "ch": renderCh(ev.d); break;
+      case "per": renderPer(ev.d); break;
+      case "params": renderParams(ev.d); break;
+      case "flash": renderFlash(ev.d); break;
+    }
+  };
+  es.onerror = () => {
+    setLink(false, "网页服务断开，重连中…");
+    es.close();
+    setTimeout(connect, 2000);
+  };
+}
+
+/* ---------------- 命令 ---------------- */
+const hist$ = []; let hIdx = -1;
+async function post(path, body) {
+  try {
+    const r = await fetch(path, { method: "POST", body });
+    return await r.json();
+  } catch (e) { return { ok: false, err: String(e) }; }
+}
+async function sendCmd(cmd) {
+  cmd = (cmd || "").trim();
+  if (!cmd) return;
+  addLog("> " + cmd, "l-cmd");
+  const r = await post("/cmd", cmd);
+  if (!r.ok) addLog("[本页] 发送失败: " + (r.err || "未知"), "l-err");
+}
+$("send").onclick = () => { sendCmd($("cmd").value); $("cmd").value = ""; hIdx = -1; };
+$("cmd").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") { hist$.push($("cmd").value); $("send").click(); }
+  else if (e.key === "ArrowUp") {
+    if (hIdx < 0) hIdx = hist$.length;
+    if (hIdx > 0) $("cmd").value = hist$[--hIdx];
+    e.preventDefault();
+  } else if (e.key === "ArrowDown") {
+    if (hIdx >= 0 && hIdx < hist$.length - 1) $("cmd").value = hist$[++hIdx];
+    else { hIdx = -1; $("cmd").value = ""; }
+    e.preventDefault();
+  }
+});
+document.querySelectorAll(".quick button[data-cmd]").forEach(b => {
+  b.onclick = () => sendCmd(b.dataset.cmd);
+});
+$("clear").onclick = () => { logEl.innerHTML = ""; };
+
+/* ---------------- 暂停 ---------------- */
+let paused = false;
+function setPaused(p) {
+  paused = !!p;
+  $("pausebtn").textContent = paused ? "恢复轮询" : "暂停轮询";
+  $("pausebtn").classList.toggle("active", paused);
+}
+$("pausebtn").onclick = async () => {
+  setPaused(!paused);
+  await post("/poll", paused ? "off" : "on");
+};
+
+/* ---------------- 设备 / 烧录 ----------------
+   烧录在服务端做: Pico 插在跑服务的那台机器上, 浏览器够不着它那侧的 USB
+   (与「为什么必须服务端桥接」同源)。服务端用 picotool, 一条 load -f -x
+   就覆盖了"进 BOOTSEL → 写入 → 重启回应用"全流程 —— 所以设备即使在应用
+   模式 (正常跑固件) 也能直接烧, 不必先手动按 BOOTSEL 键。 */
+let DEV = null;          // GET /device 的结果
+let FW_LOCAL = null;     // 已上传到服务端的本地固件路径
+
+function modeName(m) {
+  return m === "app" ? "应用模式 · 串口在线"
+       : m === "bootsel" ? "BOOTSEL · 等待烧录"
+       : m;
+}
+
+function devLog(text, cls) {
+  /* textContent 而非 innerHTML: 这里的文案含用户选的文件名 */
+  const el = $("devlog");
+  el.textContent = text;
+  el.className = "devlog" + (cls ? " " + cls : "");
+}
+
+async function loadDevice() {
+  try {
+    DEV = await (await fetch("/device")).json();
+  } catch (e) {
+    $("devlist").innerHTML = '<span class="err">读取 /device 失败</span>';
+    devLog("读取 /device 失败: " + e, "err");
+    return;
+  }
+  renderDevice();
+  const n = DEV.devices.length, f = DEV.firmware.length;
+  devLog(`检测到 ${n} 个 RP2040 设备 · ${f} 个可用固件` +
+         (DEV.picotool ? "" : " · ⚠️ 未找到 picotool，无法烧录"), f ? "" : "err");
+}
+
+function renderDevice() {
+  const d = DEV;
+  if (!d) return;
+  let h = "";
+  if (d.devices.length) {
+    for (const v of d.devices)
+      h += `<div class="row"><span>${v.product || "RP2040"} · ${v.bus_id}</span>` +
+           `<span class="${v.mode === "bootsel" ? "ok" : ""}">${modeName(v.mode)}</span></div>`;
+  } else {
+    h += '<div class="dim">未检测到 RP2040 设备（USB 没插好？）</div>';
+  }
+  h += `<div class="row"><span>串口桥接</span>` +
+       `<span class="${d.bridge ? "ok" : "err"}">${d.bridge ? "已连接" : "未连接"}</span></div>`;
+  if (!d.picotool)
+    h += '<div class="row"><span>picotool</span><span class="err">未找到，无法烧录</span></div>';
+  $("devlist").innerHTML = h;
+
+  const sel = $("fwsel");
+  sel.innerHTML = "";
+  for (const f of d.firmware)
+    sel.appendChild(new Option(`${f.name} · ${(f.size / 1024).toFixed(0)} KB`, f.name));
+  if (!d.firmware.length) sel.appendChild(new Option("（无编译产物，请先 make）", ""));
+  sel.disabled = !d.firmware.length;
+  updateFwInfo();
+}
+
+function updateFwInfo() {
+  $("fwinfo").textContent = FW_LOCAL
+    ? `使用已上传的本地固件: ${FW_LOCAL.split("/").pop()}`
+    : "烧录会用 picotool 让设备先进 BOOTSEL，再写入并重启回应用。";
+}
+
+$("devbtn").onclick = () => {
+  $("devmodal").classList.add("show");
+  devLog("检测中…");
+  loadDevice();
+};
+$("devclose").onclick = () => $("devmodal").classList.remove("show");
+$("devmodal").onclick = (e) => {
+  if (e.target === $("devmodal")) $("devmodal").classList.remove("show");
+};
+$("devrefresh").onclick = () => { devLog("重新检测…"); loadDevice(); };
+$("fwsel").onchange = () => { FW_LOCAL = null; updateFwInfo(); };
+
+$("fwpick").onclick = () => $("fwfile").click();
+$("fwfile").onchange = async () => {
+  const f = $("fwfile").files[0];
+  if (!f) return;
+  devLog(`上传 ${f.name} (${(f.size / 1024).toFixed(0)} KB)…`);
+  try {
+    const r = await fetch("/flash-upload", {
+      method: "POST",
+      headers: { "X-Filename": encodeURIComponent(f.name) },
+      body: f,
+    });
+    const j = await r.json();
+    if (!j.ok) { devLog("上传失败: " + (j.err || "未知"), "err"); return; }
+    FW_LOCAL = j.path;
+    updateFwInfo();
+    devLog(`已上传: ${j.name}`);
+  } catch (e) {
+    devLog("上传失败: " + e, "err");
+  }
+};
+
+$("flashbtn").onclick = async () => {
+  const target = FW_LOCAL || $("fwsel").value;
+  if (!target) { devLog("没有可烧录的固件", "err"); return; }
+  $("flashbtn").disabled = true;
+  devLog("发起烧录…");
+  const r = await post("/flash", JSON.stringify({ uf2: target }));
+  if (!r.ok) {
+    devLog("无法开始: " + (r.err || "未知"), "err");
+    $("flashbtn").disabled = false;
+  }
+};
+
+function renderFlash(d) {
+  if (!d) return;
+  if (d.log && d.log.length) {
+    const el = $("devlog");
+    el.textContent = d.log.join("\n");
+    el.scrollTop = el.scrollHeight;
+  }
+  $("flashbtn").disabled = d.state === "running";
+  if (d.state === "ok") {
+    $("devlog").textContent += "\n✅ 烧录完成，设备已重启回应用模式";
+    $("devlog").scrollTop = $("devlog").scrollHeight;
+    setTimeout(loadDevice, 2500);      // 等设备重新枚举后再刷新列表
+  } else if (d.state === "err" && d.err) {
+    $("devlog").textContent += "\n❌ " + d.err;
+    $("devlog").scrollTop = $("devlog").scrollHeight;
+  }
+}
+
+window.addEventListener("resize", drawChart);
+showTab(location.hash.slice(1) || "dash");   // 必须在 cv/hist 初始化之后
+connect();
+</script>
+</body>
+</html>

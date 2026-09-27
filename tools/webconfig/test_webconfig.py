@@ -1,0 +1,1006 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""网页监视台回归测试 (无需硬件)。
+
+[1] 解析器单元测试: 用固件真实输出样本喂 parse_line, 断言解析出的字段。
+    固件输出格式若变动, 这里会先报警 (解析失效只影响显示, 不会崩)。
+[2] 固件契约: 从 hexapod_params.c 抽出参数表, 逐条校验服务器/前端的隐含前提
+    (名字长度、字符集、与 config.h 宏的对应), 这类不一致在固件侧是静默的。
+[3] 端到端: socat pty 对 + 回放假固件 + serial_console.py + server.py ——
+    验证 HTTP 静态页 / POST 命令下发 / SSE 广播 / 遥测解析整条链路,
+    含 /param 参数读写的完整回环 (改 → 固件回显 → SSE → 前端)。
+
+用法: python3 tools/webconfig/test_webconfig.py
+"""
+
+import json
+import os
+import re
+import signal
+import socket
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+TOOLS = os.path.dirname(HERE)
+ROOT = os.path.dirname(TOOLS)
+sys.path.insert(0, HERE)
+
+import server as wc                                     # noqa: E402
+
+PTY_A, PTY_B = "/tmp/wc_fakerobot", "/tmp/wc_robotport"
+BRIDGE_PORT, HTTP_PORT = 7199, 8099
+
+procs = []
+passed, failed = [], []
+
+
+def check(name, cond, detail=""):
+    (passed if cond else failed).append(name)
+    print(("  PASS  " if cond else "  FAIL  ") + name
+          + (f"  [{detail}]" if detail else ""))
+    sys.stdout.flush()
+
+
+# ==================== [1] 解析器单元测试 ====================
+
+# 以下样本逐字取自固件 printf (hexapod_hal_pico.c), 改动固件输出时同步更新
+S_BATT = [
+    "=== Battery ADC (GP28/ADC2, divider 47/377) ===",
+    "Raw: avg=1277 min=1270 max=1285 (spread 15 counts = 12 mV)",
+    "Pin: 1029 mV  →  Battery: 8370 mV",
+    "Limits: 6600 ~ 8800 mV → IN RANGE",
+    "Protection: BATTERY_CHECK_ENABLED=0",
+    "State: OK",
+]
+# 未接电池 (USB 供电): 分压抽头被 R2 拉到 ~0mV。不是故障, 前端不该显示成低压告警。
+S_BATT_ABSENT = [
+    "=== Battery ADC (GP28/ADC2, divider 47/377) ===",
+    "Raw: avg=0 min=0 max=1 (spread 1 counts = 0 mV)",
+    "Pin: 0 mV  →  Battery: 0 mV",
+    "Limits: 6600 ~ 8800 mV → OUT OF RANGE",
+    "Protection: BATTERY_CHECK_ENABLED=1",
+    "State: ABSENT (未接电池, USB 供电 — 不算故障)",
+]
+S_I2C = [
+    "=== I2C Bus Check (SDA=GP14, SCL=GP15) ===",
+    "Servo power: GP10(left)=1  GP11(right)=1",
+    "PCA9685 0x40 (left legs): DETECTED  MODE1=0x11",
+    "PCA9685 0x41 (right legs): DETECTED  MODE1=0x11",
+    "BNO055 0x28: NOT FOUND",
+    "BNO055 0x29: DETECTED  CHIP_ID=0xA0",
+    "Scanning I2C bus...",
+    "  Device found at 0x29",
+    "  Device found at 0x40",
+    "Scan complete.",
+    "Bus idle: SDA(GP14)=1 SCL(GP15)=1 (1=空闲正常, 0=被拉低/短路/引脚损坏)",
+]
+# !I2C q —— 网页轮询用的定向检测: 没有 128 地址全扫描那几行
+S_I2C_Q = [
+    "=== I2C Bus Check (SDA=GP14, SCL=GP15) quick ===",
+    "Servo power: GP10(left)=0  GP11(right)=0",
+    "PCA9685 0x40 (left  legs): DETECTED  MODE1=0x00",
+    "PCA9685 0x41 (right legs): DETECTED  MODE1=0x00",
+    "BNO055 0x28: NOT FOUND",
+    "BNO055 0x29: NOT FOUND",
+    "Bus idle: SDA(GP14)=1 SCL(GP15)=1 (1=空闲正常, 0=被拉低/短路/引脚损坏)",
+]
+S_IMU = [
+    "=== IMU Status ===",
+    "available: YES  addr: 0x29",
+    "calib: sys=3 gyr=3 acc=3 mag=0 (fully)",
+    "INT_STA=0x80 (bit7=BSX_DRDY)",
+    "last: roll=-12 pitch=34 yaw=567 (0.1deg) valid=1",
+    "===================",
+]
+S_SERVO = [
+    "=== Servo Snapshot ===",
+    "Board 0x41 (right): [0]:1500 [1]:1480 [2]:1520 [3]:1500 [4]:1500 [5]:1500 "
+    "[6]:1500 [7]:1500 [8]:1500 ",
+    "Board 0x40 (left): [9]:1500 [10]:1500 [11]:1500 [12]:1500 [13]:1500 "
+    "[14]:1500 [15]:1500 [16]:1500 [17]:1500 ",
+]
+
+# 遥控通道遥测 (hexapod_hal_pico.c: hal_debug_print_channel_telemetry, 自由推送 5Hz)
+S_CH_CRSF = [
+    "[CH] m=crsf link=1 fc=123456 c0=172 c1=1500 c2=992 c3=992 c4=1811 c5=992 "
+    "c6=992 c7=992 c8=992 c9=992 c10=992 c11=992 c12=992 c13=992 c14=992 c15=992",
+]
+S_CH_PS2 = [
+    "[CH] m=ps2 con=1 btns=65535 lx=128 ly=130 rx=127 ry=126 fc=987",
+]
+
+# 外设状态 (hexapod_hal_pico.c: periph_status_print / !PERIPH) —— 一行一节,
+# 节名是 server.py 的白名单契约。轮询线程每 2 秒问一次。
+S_PER = [
+    "[PER] motors: m1=500 m2=0",
+    "[PER] leds: g=1 r=0 hb=1 alarm=1",
+    "[PER] buzzer: freq=1500 ms=300",
+    "[PER] uart0: en=1 baud=115200 rx=42 tx=7 lines=3",
+    "[PER] ext: mode=2 found=0 a0=1234 a1=5678",
+    "[PER] pwm: 0=0 1=1500 2=0 3=5000 4=0 5=0 6=0 7=0 8=0 9=0 10=0 11=0 12=0 13=0",
+]
+# 外部 UART0 的收发 ([U0TX] 是 !UART0T 的回执, [U0] 是收到的整行)
+S_U0 = [
+    "[U0TX] sent 5 bytes: hello",
+    "[U0] hello",
+]
+
+# 参数输出 (hexapod_params.c: params_print_all) —— 注意 unit= 后为空 token
+S_PARAMS = [
+    "[P] === 3 params (1 changed) ===",
+    "[P] name=batt_check val=0 min=0 max=1 def=0 unit= grp=batt chg=0",
+    "[P] name=batt_ov_mv val=9000 min=8000 max=9500 def=8800 unit=mV grp=batt chg=1",
+    "[P] name=travel_fwd_mm val=150 min=20 max=250 def=150 unit=mm grp=motion chg=0",
+    "[P] === end ===",
+    "[P] WARN travel_fwd_mm clamped 999 -> 250 (范围 20~250)",
+    "[P] FAIL unknown param 'nosuch' (试 !CFG 列出全部)",
+]
+
+
+def test_param_parser():
+    print("\n[1b] 参数行单元测试")
+    t = wc.Telemetry()
+    kinds = [wc.parse_line(t, line) for line in S_PARAMS]
+
+    check("参数: 三行参数被识别, 汇总行与提示行走日志",
+          [k[0] if k else None for k in kinds]
+          == [None, "params", "params", "params", None, None, None])
+    snap = t.snapshot()["params"]
+    check("参数: 汇总条数/改动数来自固件回显",
+          snap["count"] == 3 and snap["changed"] == 1, str(snap))
+    check("参数: val/min/max/def/unit/grp 全解析",
+          snap["list"]["batt_ov_mv"] == {"name": "batt_ov_mv", "val": 9000, "min": 8000,
+                                         "max": 9500, "def": 8800, "unit": "mV",
+                                         "grp": "batt", "chg": True},
+          str(snap["list"].get("batt_ov_mv")))
+    check("参数: chg=0 判为未改动", snap["list"]["batt_check"]["chg"] is False)
+    check("参数: 空 unit 解析为空串而非缺字段", snap["list"]["batt_check"]["unit"] == "")
+
+    # 同一参数再次出现就地覆盖 (前端只关心最新值), 而不是新增一项
+    t2 = wc.Telemetry()
+    wc.parse_line(t2, "[P] name=travel_fwd_mm val=150 min=20 max=250 def=150 unit=mm grp=motion chg=0")
+    wc.parse_line(t2, "[P] name=travel_fwd_mm val=200 min=20 max=250 def=150 unit=mm grp=motion chg=1")
+    s2 = t2.snapshot()["params"]
+    check("参数: 同名重复出现就地更新 (不重复计数)",
+          s2["count"] == 1 and s2["list"]["travel_fwd_mm"]["val"] == 200 and s2["changed"] == 1)
+
+    for bad in ["[P] name=x val=1",                       # 缺字段
+                "[P] name=x val=abc min=0 max=1 def=0 unit= grp=sys chg=0"]:  # 非整数
+        check(f"参数: 残缺行解析为 None ({bad[:22]}…)",
+              wc.parse_param_line(bad) is None)
+
+
+# ==================== [2] 固件契约 ====================
+
+PARAMS_C = os.path.join(ROOT, "pico", "Src", "hexapod_params.c")
+CONFIG_H = os.path.join(ROOT, "pico", "Inc", "hexapod_config.h")
+STORE_H = os.path.join(ROOT, "pico", "Inc", "hexapod_store.h")
+STORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_store.c")
+INDEX_HTML = os.path.join(HERE, "index.html")
+
+RE_TABLE_ROW = re.compile(
+    r'^\s*\{\s*"([a-z0-9_]+)"\s*,\s*&g_params\.(\w+)[^,]*,[^,]*,[^,]*,[^,]*,[^,]*,\s*"(\w+)"',
+    re.M)
+RE_NAME_LEN = re.compile(r"#define\s+STORE_PARAM_NAME_LEN\s+(\d+)u")
+RE_PARAMS_MAX = re.compile(r"#define\s+STORE_PARAMS_MAX\s+(\d+)u")
+# 前端用来认「刚存盘成功」的那条固件回显 (捕获括号里就是文案本身)
+RE_SAVE_ACK = re.compile(r"if \(/\\\[STORE\\\] ([^/]+)/\.test\(ev\.line\)\)")
+
+# 网页的分页表 (index.html 的 PAGES) 必须覆盖固件里出现的每一个分组,
+# 否则那组参数在网页上无处可去 —— 加参数时忘了配页面就会静默丢一个组。
+WEB_GROUPS = {"batt", "motion", "stance", "tune", "dir", "imu", "chan", "per"}
+
+
+def test_firmware_contract():
+    """
+    服务器与前端对参数表有几个隐含前提 (名字长度上限、字符集、与 config.h 的
+    宏对应)。固件侧违反任何一条都不会编译报错, 只会静默失效 —— 例如名字超过
+    STORE_PARAM_NAME_LEN 时 !CFG 查不到、存 flash 也被截断, 存了等于没存。
+    """
+    print("\n[2] 固件参数表契约")
+    src = open(PARAMS_C, encoding="utf-8").read()
+    rows = RE_TABLE_ROW.findall(src)
+    store_h = open(STORE_H, encoding="utf-8").read()
+    name_len = int(RE_NAME_LEN.search(store_h).group(1))
+    params_max = int(RE_PARAMS_MAX.search(store_h).group(1))
+
+    check("参数表可解析", len(rows) >= 30, f"{len(rows)} 行")
+    check("名字与结构体字段同名 (宏重定向的前提)",
+          all(n == f for n, f, _ in rows), str([n for n, f, _ in rows if n != f]))
+    check("无重名参数", len({n for n, _, _ in rows}) == len(rows))
+
+    # 分组: 每组都得在网页上有归属 (index.html 的 PAGES), 否则参数无处显示
+    grps = {g for _, _, g in rows}
+    check("参数表每个分组都被网页分页覆盖",
+          grps <= WEB_GROUPS, "无归属: " + ", ".join(sorted(grps - WEB_GROUPS)))
+
+    # 名字长度: 固件缓冲 20 字节, 服务器正则 {0,18} —— 两者必须一致
+    too_long = [n for n, _, _ in rows if len(n) >= name_len]
+    check(f"名字都能装进 STORE_PARAM_NAME_LEN={name_len}",
+          not too_long, "超长: " + ", ".join(too_long))
+    check(f"服务器 PARAM_NAME_OK 接受全部名字 (上限 {name_len - 1})",
+          all(wc.PARAM_NAME_OK.match(n) for n, _, _ in rows),
+          "被拒: " + ", ".join(n for n, _, _ in rows if not wc.PARAM_NAME_OK.match(n)))
+
+    # 存 flash 时 params_save() 会把条数静默截到 STORE_PARAMS_MAX —— 参数表一旦
+    # 超过它, 排在后面的参数就是"改得动、存不下", 重启回默认且全程没有报错。
+    check(f"参数表条数不超过 STORE_PARAMS_MAX={params_max} (超出会被静默截断)",
+          len(rows) <= params_max, f"{len(rows)} 行")
+
+    cfg = open(CONFIG_H, encoding="utf-8").read()
+    missing = [f for _, f, _ in rows if f"g_params.{f}" not in cfg]
+    check("每个参数都有 config.h 宏指向它 (否则改了没人读)",
+          not missing, "缺: " + ", ".join(missing))
+
+    # 保存按钮的基线靠这句固件回显重建 (网页认回显而不是「点了按钮」, 手敲 !CFGW
+    # 和被固件拒绝的情况才都能正确)。改文案而不同步前端 → 保存后按钮一直亮着。
+    m = RE_SAVE_ACK.search(open(INDEX_HTML, encoding="utf-8").read())
+    check("网页按固件回显重建保存基线", m is not None)
+    if m:
+        store_c = open(STORE_C, encoding="utf-8").read()
+        check(f"固件确实回显 {m.group(1)!r}", m.group(1) in store_c)
+
+
+# ==================== [3] 端到端 ====================
+
+# 假固件的参数表: name → [val, min, max, def, unit, grp]
+# 名字取自真实固件表 (由 [2] 校验), 覆盖开关 / 空 unit / 带 unit 三种形态
+FAKE_PARAMS = {
+    "batt_check":    [0,    0,    1,    0,    "",   "batt"],
+    "imu_enabled":   [0,    0,    1,    0,    "",   "imu"],
+    "batt_ov_mv":    [8800, 8000, 9500, 8800, "mV", "batt"],
+    "travel_fwd_mm": [150,  20,   250,  150,  "mm", "motion"],
+    "imu_roll_sign": [-1,   -1,   1,    -1,   "",   "imu"],
+}
+
+
+def param_line(name):
+    """按 params_print_one() 的格式生成一行 (unit 为空时就是 "unit= grp=")"""
+    v, lo, hi, d, unit, grp = FAKE_PARAMS[name]
+    return (f"[P] name={name} val={v} min={lo} max={hi} def={d} "
+            f"unit={unit} grp={grp} chg={1 if v != d else 0}")
+
+
+def fake_cfg(cmd):
+    """假固件的 !CFG 家族: 按参数表动态应答, 含钳位与错误提示"""
+    parts = cmd.split()
+    op = parts[0]
+
+    if op == "!CFGW":
+        n = sum(1 for v in FAKE_PARAMS.values() if v[0] != v[3])
+        return [f"[STORE] Params saved OK ({n} 项, CRC 0x1A2B3C4D)"]
+
+    if op == "!CFGR":
+        if len(parts) == 1:
+            for v in FAKE_PARAMS.values():
+                v[0] = v[3]
+            return (["[P] 全部参数已恢复默认 (尚未写 flash, 需 !CFGW 才持久)"]
+                    + [param_line(n) for n in FAKE_PARAMS])
+        if parts[1] not in FAKE_PARAMS:
+            return [f"[P] FAIL unknown param '{parts[1]}'"]
+        FAKE_PARAMS[parts[1]][0] = FAKE_PARAMS[parts[1]][3]
+        return [param_line(parts[1])]
+
+    if len(parts) == 1:                                   # !CFG → 全量
+        changed = sum(1 for v in FAKE_PARAMS.values() if v[0] != v[3])
+        return ([f"[P] === {len(FAKE_PARAMS)} params ({changed}) ==="]
+                + [param_line(n) for n in FAKE_PARAMS] + ["[P] === end ==="])
+
+    name = parts[1]
+    if name not in FAKE_PARAMS:
+        return [f"[P] FAIL unknown param '{name}' (试 !CFG 列出全部)"]
+    if len(parts) == 2:                                   # 只查询
+        return [param_line(name)]
+    try:
+        want = int(parts[2])
+    except ValueError:
+        return [f"[P] FAIL bad value for '{name}' (需要整数)"]
+    row = FAKE_PARAMS[name]
+    got = max(row[1], min(row[2], want))
+    row[0] = got
+    out = []
+    if got != want:
+        out.append(f"[P] WARN {name} clamped {want} -> {got} (范围 {row[1]}~{row[2]})")
+    out.append(param_line(name))                          # 回显实际生效值
+    return out
+
+
+def test_parser():
+    print("\n[1] 解析器单元测试")
+    t = wc.Telemetry()
+
+    for line in S_BATT:
+        wc.parse_line(t, line)
+    b = t.snapshot()["batt"]
+    check("电池: 解析出换算电压/引脚电压", b.get("batt_mv") == 8370 and b.get("pin_mv") == 1029)
+    check("电池: 解析出离散度", b.get("spread_mv") == 12 and b.get("spread_counts") == 15)
+    check("电池: 解析出阈值与判定", b.get("lo_mv") == 6600 and b.get("in_range") is True)
+    check("电池: 解析出保护开关状态", b.get("enabled") == 0)
+    check("电池: 解析出三态判定", b.get("state") == "OK")
+
+    # 未接电池 (USB 供电) —— 电压 0mV 且 OUT OF RANGE, 但 state=ABSENT,
+    # 前端据此显示"USB 供电"而不是低压告警 (独立于 in_range)
+    t = wc.Telemetry()
+    for line in S_BATT_ABSENT:
+        wc.parse_line(t, line)
+    ba = t.snapshot()["batt"]
+    check("电池: USB 供电解析为 ABSENT", ba.get("state") == "ABSENT", str(ba.get("state")))
+    check("电池: USB 供电时电压为 0 且窗口外",
+          ba.get("batt_mv") == 0 and ba.get("in_range") is False)
+    check("电池: USB 供电时保护开关仍如实上报", ba.get("enabled") == 1)
+
+    t = wc.Telemetry()
+    for line in S_I2C:
+        wc.parse_line(t, line)
+    i = t.snapshot()["i2c"]
+    check("I2C: 两块 PCA9685 均在线",
+          [d["addr"] for d in i["pca"]] == [0x40, 0x41] and all(d["ok"] for d in i["pca"]))
+    check("I2C: BNO055 区分在线/未找到",
+          {d["addr"]: d["ok"] for d in i["bno"]} == {0x28: False, 0x29: True})
+    check("I2C: 全扫描结果", i["scan"] == [0x29, 0x40])
+    check("I2C: 总线空闲电平", i["idle"] == {"sda": 1, "scl": 1})
+    check("I2C: 舵机供电脚", i["servo_power"] == {"left": 1, "right": 1})
+
+    # 每个 !I2C 头行都是一轮新检测: 必须先作废上一轮结果, 否则设备掉线后
+    # 卡片会永远显示一个已经不在的设备。
+    # snapshot() 会丢掉空子系统, 故用 .get —— 头行之后 i2c 整个为空是预期
+    r = wc.parse_line(t, "=== I2C Bus Check (SDA=GP14, SCL=GP15) ===")
+    i = t.snapshot().get("i2c", {})
+    check("I2C: 新一轮检测作废上一轮设备 (掉线不残留)",
+          "pca" not in i and "bno" not in i, str(sorted(i)))
+    check("I2C: 全扫描头行要求连扫描列表一起清",
+          r[1].get("reset") is True and r[1].get("reset_scan") is True, str(r[1]))
+
+    # 轮询用的 !I2C q 不带扫描结果, 若也清列表, 用户刚手动扫出来的东西
+    # 会在 3 秒后消失。
+    wc.parse_line(t, "  Device found at 0x40")
+    r = wc.parse_line(t, "=== I2C Bus Check (SDA=GP14, SCL=GP15) quick ===")
+    check("I2C: quick 头行保留扫描列表",
+          r[1].get("reset") is True and r[1].get("reset_scan") is False, str(r[1]))
+    scan = t.snapshot().get("i2c", {}).get("scan")
+    check("I2C: quick 头行不清服务端扫描列表 (与前端语义一致)",
+          scan == [0x40], str(scan))
+
+    t = wc.Telemetry()
+    for line in S_IMU:
+        wc.parse_line(t, line)
+    m = t.snapshot()["imu"]
+    check("IMU: 在线/地址", m.get("available") is True and m.get("addr") == 0x29)
+    check("IMU: 欧拉角 (0.1deg 原始值)", (m.get("roll"), m.get("pitch"), m.get("yaw"))
+          == (-12, 34, 567) and m.get("valid") == 1)
+    check("IMU: 校准等级与 fully 标记",
+          m["calib"] == {"sys": 3, "gyr": 3, "acc": 3, "mag": 0} and m["fully"] is True)
+
+    t = wc.Telemetry()
+    for line in S_SERVO:
+        wc.parse_line(t, line)
+    s = t.snapshot()["servo"]["boards"]
+    check("舵机: 左右板 18 路角度",
+          s["41"]["side"] == "right" and s["41"]["angles"][2] == 1520
+          and len(s["40"]["angles"]) == 9 and s["40"]["angles"][17] == 1500)
+
+    # 通道遥测: 每帧都是完整的, 所以整份覆盖 —— 切模式后不能残留上一种模式的字段
+    t = wc.Telemetry()
+    for line in S_CH_CRSF:
+        wc.parse_line(t, line)
+    c = t.snapshot()["ch"]
+    check("通道: CRSF 模式与链路/帧计数",
+          c.get("mode") == "crsf" and c.get("link") is True and c.get("fc") == 123456)
+    check("通道: 16 个原始值逐个解析",
+          c.get("ch", [])[:5] == [172, 1500, 992, 992, 1811] and len(c["ch"]) == 16)
+    check("通道: 未报的通道位回填中位 992", c["ch"][15] == 992)
+
+    t2 = wc.Telemetry()
+    wc.parse_line(t2, S_CH_PS2[0])
+    p = t2.snapshot()["ch"]
+    check("通道: PS2 摇杆与键位",
+          p.get("mode") == "ps2" and p.get("lx") == 128 and p.get("ry") == 126
+          and p.get("btns") == 65535 and p.get("connected") is True)
+
+    # 切回 CRSF (同一 Telemetry) —— ps2 的摇杆字段必须消失, 否则前端会把
+    # 上一个模式的 lx 当成 CRSF 帧的字段去渲染
+    wc.parse_line(t2, S_CH_CRSF[0])
+    c2 = t2.snapshot()["ch"]
+    check("通道: 切模式后不残留上一模式的字段",
+          "lx" not in c2 and "btns" not in c2 and c2["mode"] == "crsf", str(sorted(c2)))
+
+    # 外设状态: 一次 !PERIPH 是 6 行, 每行一节。分节合并 (而不是整份覆盖),
+    # 是为了让前端在只收到一半时也有东西可渲染。
+    t = wc.Telemetry()
+    kinds = [wc.parse_line(t, l) for l in S_PER]
+    check("外设: 6 行各成一节", [k[0] if k else None for k in kinds] == ["per"] * 6)
+    per = t.snapshot()["per"]
+    check("外设: 电机占空比", per.get("motors") == {"m1": 500, "m2": 0}, str(per.get("motors")))
+    check("外设: LED 实况与所有权参数一起报",
+          per.get("leds") == {"g": 1, "r": 0, "hb": 1, "alarm": 1}, str(per.get("leds")))
+    check("外设: 蜂鸣器最后一次发声",
+          per.get("buzzer") == {"freq": 1500, "ms": 300}, str(per.get("buzzer")))
+    check("外设: UART0 使能/波特率/收发计数",
+          per.get("uart0") == {"en": 1, "baud": 115200, "rx": 42, "tx": 7, "lines": 3},
+          str(per.get("uart0")))
+    check("外设: 第二路 I2C/ADC 模式与读数",
+          per.get("ext") == {"mode": 2, "found": 0, "a0": 1234, "a1": 5678},
+          str(per.get("ext")))
+    check("外设: 14 路空闲 PWM 按 idx 编号",
+          len(per.get("pwm", {})) == 14 and per["pwm"]["3"] == 5000 and per["pwm"]["1"] == 1500,
+          str(per.get("pwm")))
+
+    # 分节合并: 只来一行时, 之前那几节必须还在 (前端整页渲染, 缺节会闪 0)
+    wc.parse_line(t, "[PER] motors: m1=0 m2=0")
+    per2 = t.snapshot()["per"]
+    check("外设: 单节更新不动其他节",
+          per2["motors"] == {"m1": 0, "m2": 0} and per2["uart0"]["baud"] == 115200,
+          str(sorted(per2)))
+
+    # 外部 UART0: 回执 + 收行。收行留在环形缓冲里累积 (不是整份覆盖)
+    t = wc.Telemetry()
+    kinds = [wc.parse_line(t, l) for l in S_U0]
+    check("[U0TX]/[U0] 各产生一帧", [k[0] if k else None for k in kinds] == ["per", "per"])
+    p = t.snapshot()["per"]
+    check("UART0 回执: 字节数与内容",
+          p.get("u0_tx") == "hello" and p.get("u0_tx_bytes") == 5, str(p.get("u0_tx")))
+    check("UART0 收到整行进环形缓冲", p.get("u0_rx") == ["hello"], str(p.get("u0_rx")))
+
+    for i in range(wc.U0_RX_RING + 5):
+        wc.parse_line(t, f"[U0] line{i}")
+    ring = t.snapshot()["per"]["u0_rx"]
+    check(f"UART0 收行环形缓冲只留最近 {wc.U0_RX_RING} 行",
+          len(ring) == wc.U0_RX_RING and ring[-1] == f"line{wc.U0_RX_RING + 4}"
+          and ring[0] == "line5", f"{len(ring)} 行: {ring[:2]}")
+
+    # [PER] 这个前缀同时是 PCA9685 周期校准 (!PER) 的输出前缀 —— 白名单必须挡住,
+    # 否则校准行会被当成外设节, 在页面上显示成一台不存在的设备
+    t = wc.Telemetry()
+    for cal in ["[PER] Coxa write: 6/6 OK (horn_offset: off)",
+                "[PER] Board 0 (0x40, left legs): period=20000 us",
+                "[PER] i2c2 scan: 0x40 0x41",
+                "[PER] ext_i2c_mode=0, 先 !CFG ext_i2c_mode 1"]:
+        check(f"校准/诊断行不算外设节 ({cal[6:26]}…)",
+              wc.parse_line(t, cal) is None)
+    check("白名单外的前缀没有污染外设状态", "per" not in t.snapshot(), str(t.snapshot().get("per")))
+
+    check("未知行不产生事件 (原样进日志)", wc.parse_line(t, "some random debug line") is None)
+
+
+# ==================== [2.5] 烧录模块 ====================
+#
+# 只测纯函数与拒绝路径。真烧录会动硬件 (进 BOOTSEL + 覆写 flash), 不进回归。
+
+def test_flasher():
+    print("\n[2.5] 烧录模块 (设备检测 + 路径白名单, 不碰硬件)")
+    import tempfile
+    from pathlib import Path
+    import flasher as F
+
+    check("固件目录指向 pico/build",
+          F.FIRMWARE_DIR.name == "build" and F.FIRMWARE_DIR.parent.name == "pico",
+          str(F.FIRMWARE_DIR))
+
+    # /sys 下非 RP2040 的 USB 条目必须被滤掉
+    devs = F.usb_devices()
+    check("设备检测只返回 RP2040 (VID 2e8a)",
+          all(d["vid"] == F.RP2040_VID for d in devs), str(devs))
+    check("设备条目字段完整",
+          all({"bus_id", "mode", "product", "serial"} <= set(d) for d in devs), str(devs))
+
+    # 路径白名单: 全项目唯一一处"用户输入决定读哪个文件"的地方。
+    # 真正的不变量是"解析后的真实路径必须落在白名单目录内" —— 带 .. 但绕回
+    # 白名单里的写法是合法的, 不该拒; 要拒的是最终落在外面。
+    for bad in ["/etc/passwd", "../../etc/passwd", "", "nope.uf2", "hexapod_pico.elf"]:
+        try:
+            F.resolve_uf2(bad)
+            check(f"拒绝越界固件路径 {bad!r}", False, "竟然通过了")
+        except ValueError:
+            check(f"拒绝越界固件路径 {bad!r}", True)
+
+    outside = Path(tempfile.gettempdir()) / "not_whitelisted.uf2"
+    outside.write_bytes(b"\x00")
+    try:
+        F.resolve_uf2(str(outside))
+        check("拒绝白名单目录之外的 .uf2 (绝对路径)", False, "竟然通过了")
+    except ValueError:
+        check("拒绝白名单目录之外的 .uf2 (绝对路径)", True)
+
+    # 反向: 名字里带 .. 但解析后仍在白名单内 → 放行 (不误杀)
+    inside = F.FIRMWARE_DIR / ".." / "build" / "x.uf2"
+    inside.write_bytes(b"\x00")
+    try:
+        check("带 .. 但绕回白名单内的路径放行", F.resolve_uf2(str(inside)).name == "x.uf2")
+    finally:
+        inside.unlink()
+
+    try:
+        F.save_upload(b"x", "evil.exe")
+        check("上传拒绝非 .uf2", False)
+    except ValueError:
+        check("上传拒绝非 .uf2", True)
+
+    p = F.save_upload(b"\x00\x01", "../../../tmp/escaped.uf2")
+    check("上传剥掉路径成分 (只取文件名)",
+          p.parent == F._UPLOAD_DIR and p.name == "escaped.uf2", str(p))
+    check("上传后的文件在白名单内", F.resolve_uf2(p) == p.resolve())
+    check("picotool 解析出绝对路径 (缺了则烧录不可用, 不算失败)",
+          F.find_picotool() is None or "/" in F.find_picotool(),
+          str(F.find_picotool()))
+
+
+# ==================== [3] 端到端 ====================
+
+# 回放假固件: 收到命令 → 原样吐出固件真实输出 (无硬件也能验证整条链路)。
+# 按"命令头 + 空格"前缀匹配, 认的是不带参数的命令 —— 外设那批是
+# !MOTOR 1 500 / !PWM 3 5000 这种带参形式, 精确匹配够不着。
+# 空格这条限制同时保证了 !PWMOFF 不会撞上 !PWM (与固件自己的字面量分发一致)。
+REPLAY = {"!BATT": S_BATT, "!I2C": S_I2C, "!I2C q": S_I2C_Q,
+          "!IMU": S_IMU, "!A": S_SERVO, "!PERIPH": S_PER, "!UART0T": S_U0,
+          "!MOTOR": ["[PER] motors: m1=500 m2=0"],
+          "!LED": ["[PER] leds: g=0 r=0 hb=0 alarm=1"],
+          "!PWM": ["[PER] pwm: 3=5000"],
+          "!PWMOFF": ["[PER] pwm: all=0"],
+          "!BUZZ": ["[PER] buzzer: freq=1500 ms=300"]}
+
+
+def fake_response(cmd):
+    if cmd.startswith("!CFG"):          # !CFG / !CFGR / !CFGW
+        return fake_cfg(cmd)
+    # 长的命令头先试: 否则 "!I2C q" 会被 "!I2C" 这条前缀吃掉, 回放出全扫描版本
+    for key in sorted(REPLAY, key=len, reverse=True):
+        if cmd == key or cmd.startswith(key + " "):
+            return REPLAY[key]
+    return []
+
+
+def replay_robot(pty):
+    """假固件 (仅测试用): 在 pty 上回放假固件输出。
+
+    除应答命令外还每秒无条件推一遍 [CH] 行 —— 固件的通道遥测是自由推送
+    (没有对应的查询命令), 只靠"发命令→收应答"测不到那条链路。
+    非阻塞读是为了让推送不被"等下一条命令"挡住。"""
+    fd = None
+    while fd is None:
+        try:
+            fd = os.open(pty, os.O_RDWR | os.O_NOCTTY)
+        except OSError:
+            time.sleep(0.2)
+    os.set_blocking(fd, False)
+    buf = b""
+    last_push = 0.0
+    while True:
+        try:
+            data = os.read(fd, 4096)
+        except BlockingIOError:
+            data = b""
+        except OSError:
+            time.sleep(0.05)
+            continue
+        if data:
+            buf += data
+            while b"\n" in buf:
+                raw, buf = buf.split(b"\n", 1)
+                cmd = raw.decode("utf-8", "replace").strip()
+                for line in fake_response(cmd):
+                    os.write(fd, line.encode() + b"\r\n")
+        now = time.time()
+        # 20Hz: 只要间隔明显小于 serial_console.py 那个"排空开机日志"循环的
+        # 200ms 静默超时, 该循环就会一直有数据可读 —— 于是它是不是有"总时长"
+        # 出口就成了关键 (没有出口 → 主循环卡死, 网页读数正常但发命令没反应)。
+        # 真机是 5Hz [CH] 叠加 2s 状态行, 密度足以触发; 这里用 20Hz 让它稳定复现,
+        # 免得测试变成"看调度运气"。
+        if now - last_push >= 0.05:
+            last_push = now
+            for line in S_CH_CRSF:
+                try:
+                    os.write(fd, line.encode() + b"\r\n")
+                except OSError:
+                    pass
+        time.sleep(0.02)
+
+
+def spawn(args, log, cwd):
+    f = open(log, "wb")
+    p = subprocess.Popen(args, stdout=f, stderr=subprocess.STDOUT, cwd=cwd,
+                         stdin=subprocess.DEVNULL)      # DEVNULL → headless 模式
+    procs.append(p)
+    return p
+
+
+def cleanup():
+    for p in procs:
+        try:
+            p.terminate()
+        except Exception:
+            pass
+    time.sleep(0.4)
+    for p in procs:
+        try:
+            p.kill()
+        except Exception:
+            pass
+    for path in (PTY_A, PTY_B):
+        try:
+            os.unlink(path)
+        except OSError:
+            pass
+
+
+def _raw_request(req, port=HTTP_PORT):
+    """发一个 HTTP/1.0 请求, 返回完整响应文本 (含响应头)"""
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+    s.sendall(req.encode())
+    data = b""
+    while True:
+        try:
+            c = s.recv(65536)
+        except socket.timeout:
+            break
+        if not c:
+            break
+        data += c
+    s.close()
+    return data.decode("utf-8", "replace")
+
+
+def http_get(path, port=HTTP_PORT):
+    """返回响应体 (已剥离响应头)"""
+    return _raw_request(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n", port
+                        ).split("\r\n\r\n", 1)[-1]
+
+
+def http_post(path, body, port=HTTP_PORT):
+    b = body.encode()
+    return _raw_request(f"POST {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+                        f"Content-Length: {len(b)}\r\n\r\n" + body, port
+                        ).split("\r\n\r\n", 1)[-1]
+
+
+def sse_open(port=HTTP_PORT, path="/events"):
+    """裸套接字打开 SSE —— urllib 的 read() 会阻塞等满缓冲, 不适合长连接流"""
+    s = socket.create_connection(("127.0.0.1", port), timeout=2)
+    s.sendall(f"GET {path} HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n".encode())
+    return s
+
+
+def sse_drain(s, seconds, stop_when=None):
+    events, buf = [], ""
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        try:
+            chunk = s.recv(65536)
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        if not chunk:
+            break
+        buf += chunk.decode("utf-8", "replace")
+        while "\n\n" in buf:
+            frame, buf = buf.split("\n\n", 1)
+            for line in frame.split("\n"):
+                if line.startswith("data: "):
+                    try:
+                        events.append(json.loads(line[6:]))
+                    except json.JSONDecodeError:
+                        pass
+        if stop_when and stop_when(events):
+            break
+    return events
+
+
+def wait_params(sse, pred, timeout=6):
+    """等一个满足 pred(参数快照) 的 SSE params 事件 → (快照 | None, 本批全部事件)"""
+    hit = []
+
+    def stop(evs):
+        m = [e["d"] for e in evs if e.get("t") == "params" and pred(e["d"])]
+        if m:
+            hit.append(m[-1])
+            return True
+        return False
+
+    evs = sse_drain(sse, timeout, stop_when=stop)   # 必须先抽完, hit 才有内容
+    return (hit[-1] if hit else None), evs
+
+
+def val_of(snap, name):
+    return (snap or {}).get("list", {}).get(name, {}).get("val")
+
+
+def test_param_e2e(sse):
+    print("\n[3b] /param 端到端 (浏览器 → 服务器 → 串口 → 固件 → SSE)")
+
+    # 订阅建立时服务器会自动拉一次参数表, 前端因此不需要用户点"读取"
+    snap, _ = wait_params(sse, lambda d: d["count"] == len(FAKE_PARAMS))
+    check("接入即自动拉取参数表", snap is not None,
+          f"count={snap['count'] if snap else None}")
+    check("/state 也带参数快照",
+          json.loads(http_get("/state"))["telemetry"]["params"]["count"] == len(FAKE_PARAMS))
+
+    # 改值: 服务器应生成 !CFG <name> <value>, 固件回显后前端才改显示
+    r = json.loads(http_post("/param", "set travel_fwd_mm 200"))
+    check("set 生成 !CFG 指令",
+          r.get("ok") is True and r.get("cmd") == "!CFG travel_fwd_mm 200", str(r))
+    snap, _ = wait_params(sse, lambda d: val_of(d, "travel_fwd_mm") == 200)
+    check("改动经串口回环到 SSE", snap is not None)
+    check("改动项标记 chg=1 供前端高亮",
+          snap and snap["list"]["travel_fwd_mm"]["chg"] is True)
+    check("附带范围/单位随回显一起回传 (前端画滑条要用)",
+          snap and (snap["list"]["travel_fwd_mm"]["min"],
+                    snap["list"]["travel_fwd_mm"]["max"],
+                    snap["list"]["travel_fwd_mm"]["unit"]) == (20, 250, "mm"))
+
+    # 越界: 服务器不夹, 交给固件夹, 但必须把固件提示透到日志
+    http_post("/param", "set travel_fwd_mm 999")
+    snap, evs = wait_params(sse, lambda d: val_of(d, "travel_fwd_mm") == 250)
+    check("越界值由固件夹到 max 并回显", snap is not None)
+    raws = [e.get("line", "") for e in evs if e.get("t") == "raw"]
+    check("固件的 WARN 走原样日志", any("[P] WARN" in l for l in raws), str(raws[-2:]))
+    check("参数行本身不再重复进日志 (已解析)",
+          not any("[P] name=" in l for l in raws))
+
+    # 服务器侧的校验: 非法输入根本不该发到串口
+    for body, why in [("set Travel 1", "大写名字"), ("set travel_fwd_mm abc", "非整数值"),
+                      ("bogus", "未知指令"), ("set", "缺参数名"), ("", "空指令")]:
+        r = json.loads(http_post("/param", body))
+        check(f"服务器拒绝非法请求: {why}", r.get("ok") is False, str(r))
+    check("被拒的请求没有改动固件状态",
+          val_of(json.loads(http_get("/state"))["telemetry"]["params"], "travel_fwd_mm") == 250)
+
+    # 按组恢复默认 (网页每页的「本页恢复默认」走这条; 固件没有 !CFGR <组>,
+    # 由服务器按参数快照展开成多条单参数命令)
+    http_post("/param", "set batt_ov_mv 9000")
+    wait_params(sse, lambda d: val_of(d, "batt_ov_mv") == 9000)
+    r = json.loads(http_post("/param", "resetgrp batt"))
+    check("resetgrp 展开为该组每个参数一条 !CFGR",
+          r.get("ok") and r.get("n") == 2, str(r))   # batt_check + batt_ov_mv
+    snap, _ = wait_params(sse, lambda d: val_of(d, "batt_ov_mv") == 8800)
+    check("该组参数回到默认值", snap is not None)
+    check("同组其他参数一起复位且 chg 归零",
+          snap and snap["list"]["batt_check"]["chg"] is False)
+    check("不碰其他组 (travel_fwd_mm 仍是刚才的越界夹后值)",
+          snap and val_of(snap, "travel_fwd_mm") == 250)
+
+    for body, why in [("resetgrp", "缺组名"), ("resetgrp BATT", "大写组名"),
+                      ("resetgrp nosuchgrp", "快照里没有的组")]:
+        r = json.loads(http_post("/param", body))
+        check(f"resetgrp 拒绝: {why}", r.get("ok") is False, str(r))
+
+    # 恢复默认
+    r = json.loads(http_post("/param", "reset travel_fwd_mm"))
+    check("reset 单项生成 !CFGR", r.get("ok") and r.get("cmd") == "!CFGR travel_fwd_mm", str(r))
+    snap, _ = wait_params(sse, lambda d: val_of(d, "travel_fwd_mm") == 150
+                          and d["list"]["travel_fwd_mm"]["chg"] is False)
+    check("恢复默认后 chg 归零 (前端取消高亮)", snap is not None)
+
+    # 保存到 flash
+    http_post("/param", "set batt_ov_mv 9000")
+    wait_params(sse, lambda d: val_of(d, "batt_ov_mv") == 9000)
+    r = json.loads(http_post("/param", "save"))
+    check("save 生成 !CFGW", r.get("ok") and r.get("cmd") == "!CFGW", str(r))
+    evs = sse_drain(sse, 3)
+    check("保存结果回到日志",
+          any("Params saved OK" in e.get("line", "") for e in evs if e.get("t") == "raw"))
+
+    # 全部恢复默认
+    r = json.loads(http_post("/param", "resetall"))
+    check("resetall 生成裸 !CFGR", r.get("ok") and r.get("cmd") == "!CFGR", str(r))
+    snap, _ = wait_params(sse, lambda d: d["changed"] == 0 and d["count"] == len(FAKE_PARAMS))
+    check("全部恢复默认后 changed=0", snap is not None)
+
+
+def main():
+    if len(sys.argv) > 2 and sys.argv[1] == "--replay":
+        replay_robot(sys.argv[2])
+        return
+
+    test_parser()
+    test_param_parser()
+    test_firmware_contract()
+    test_flasher()
+
+    print("\n[3] 端到端 (socat pty + 假固件 + 串口控制台 + 网页服务)")
+    for args, log, cwd in [
+        (["socat", "-d", "-d", f"pty,raw,echo=0,link={PTY_A}",
+          f"pty,raw,echo=0,link={PTY_B}"], "/tmp/wc_socat.log", TOOLS),
+        ([sys.executable, __file__, "--replay", PTY_A], "/tmp/wc_fake.log", HERE),
+        ([sys.executable, "serial_console.py", PTY_B, "--port", str(BRIDGE_PORT)],
+         "/tmp/wc_console.log", TOOLS),
+        ([sys.executable, "server.py", "--port", str(HTTP_PORT),
+          "--bridge-port", str(BRIDGE_PORT), "--no-poll"], "/tmp/wc_server.log", HERE),
+    ]:
+        spawn(args, log, cwd)
+    time.sleep(3.0)
+
+    # 桥接连上为止
+    ok = False
+    for _ in range(30):
+        try:
+            st = json.loads(http_get("/state"))
+            if st.get("bridge"):
+                ok = True
+                break
+        except (OSError, json.JSONDecodeError):
+            pass
+        time.sleep(0.5)
+    check("网页服务起来并连上串口桥接", ok)
+
+    raw_page = _raw_request("GET / HTTP/1.0\r\nHost: 127.0.0.1\r\n\r\n")
+    check("静态页可访问", raw_page.startswith("HTTP/1.0 200")
+          and "text/html" in raw_page and "HEXAPOD" in raw_page)
+    # 校准保存按钮: 走 data-cmd 快捷按钮 → /cmd, 没有服务端解析环节,
+    # 唯一会坏的方式是按钮被删/改名, 所以直接断言页面里有它
+    check("校准页含 !SAVE 保存校准按钮", 'data-cmd="!SAVE"' in raw_page
+          and "!SAVE 保存校准" in raw_page)
+    check("校准页含 !C 走查与 !I2C 扫描按钮",
+          'data-cmd="!C"' in raw_page and 'data-cmd="!I2C"' in raw_page)
+    check("校准页有 18 路舵机格子与 I2C 摘要",
+          'id="cal-servos"' in raw_page and 'id="cal-i2c"' in raw_page)
+
+    # 参数分页: 每页一个 tab 按钮 + 一个卡片宿主。页面本身由 JS 按 PAGES 生成,
+    # 所以断言生成器的输入 (PAGES 里的 id) 与 HTML 里的 tab 按钮两边都在。
+    for pid in ("gait", "stance", "radio", "power", "balance", "per"):
+        check(f"页面含参数分页 tab: {pid}",
+              f'data-tab="{pid}"' in raw_page and f'id: "{pid}"' in raw_page)
+    check("分页的组覆盖固件全部分组",
+          all(f'"{g}"' in raw_page for g in WEB_GROUPS))
+    check("旧的单页参数 tab 已移除", 'data-tab="params"' not in raw_page)
+
+    # 保存按钮置灰 (无未保存改动时压下去只是空写一次 flash)。判定依据是 pBase
+    # 基线 = 上次存盘时的值, 不是「与默认值不同」—— 后者是「本页恢复默认」按钮
+    # 的语义。两条线必须各走各的, 所以这里分别断言。
+    check("每页生成 保存/恢复默认/统计 三件套",
+          all(f'id="p-{k}-${{pg.id}}"' in raw_page
+              for k in ("save", "reset", "summary")))
+    check("保存键由「未保存改动数」驱动",
+          "function isUnsaved" in raw_page and "sv.disabled = !unsaved" in raw_page)
+    check("恢复默认键由「偏离默认值」驱动 (另一条线)",
+          "function star(p) { return p.val !== p.def; }" in raw_page
+          and "rs.disabled = !mine.some(star)" in raw_page)
+
+    # 遥控页: 输入源切换按钮 + 通道实时面板 (由 PAGES 的 custom 字段生成,
+    # 所以断言生成器的输入在页面里, 与上面分页断言同一套路)
+    check("遥控页有 PS2/CRSF 切换按钮",
+          'data-cmd="!MODE crsf"' in raw_page and 'data-cmd="!MODE ps2"' in raw_page)
+    check("遥控页有通道实时面板", 'id="ch-panel"' in raw_page and 'id="ch-mode"' in raw_page)
+    check("通道格子按功能名反查 (改滑条后跟着变)",
+          "crsf_ch_fwd" in raw_page and "renderCh" in raw_page)
+
+    # 输入源有两个入口 (按钮 / input_mode 滑条), 必须只剩一个说法:
+    # 滑条被 PARAM_HIDE 挡掉, 按钮点亮当前生效的模式
+    import re as _re
+    m_hide = _re.search(r"const PARAM_HIDE = new Set\(\[(.*?)\]\)", raw_page, _re.S)
+    hidden = _re.findall(r'"(\w+)"', m_hide.group(1)) if m_hide else []
+    check("input_mode 不生成通用滑条 (按钮才是它的控件)",
+          hidden == ["input_mode"], f"PARAM_HIDE={hidden}")
+    firm = {n for n, _, _ in
+            RE_TABLE_ROW.findall(open(PARAMS_C, encoding="utf-8").read())}
+    check("PARAM_HIDE 里的名字都是真参数 (防拼错导致参数凭空消失)",
+          set(hidden) <= firm,
+          "不存在: " + ", ".join(sorted(set(hidden) - firm)))
+    check("输入源按钮按固件回报的模式点亮 (不是按点击)",
+          'id="ch-btn-crsf"' in raw_page and 'classList.toggle("on"' in raw_page)
+
+    # 外设页: 手动控制卡片 (data-cmd 走通用接线) + 状态回显面板。
+    # 这些按钮没有服务端解析环节, 唯一会坏的方式是名字被改/删
+    check("外设页有手动驱动按钮",
+          all(f'data-cmd="{c}"' in raw_page
+              for c in ("!MOTOR", "!LED g 1", "!LED r 0", "!I2C2", "!ADC2",
+                        "!PWMOFF", "!PERIPH")))
+    check("外设页有状态回显面板",
+          all(f'id="{i}"' in raw_page
+              for i in ("per-motors", "per-leds", "per-buzzer", "per-uart0",
+                        "per-rx", "per-ext", "per-pwm", "per-stale")))
+    check("外设页的 14 路 PWM 滑条按固件编号生成",
+          "PER_PWM" in raw_page and "idx ${i} · ${PER_PWM[i]}" in raw_page)
+
+    sse = sse_open()
+    time.sleep(0.3)
+    r = json.loads(http_post("/cmd", "!BATT"))
+    check("POST /cmd 下发成功", r.get("ok") is True, str(r))
+    events = sse_drain(sse, 8, stop_when=lambda evs: any(
+        e.get("t") == "batt" and e.get("d", {}).get("batt_mv") == 8370 for e in evs))
+    sse.close()
+
+    types = [e.get("t") for e in events]
+    check("SSE 收到开场帧", "hello" in types)
+    check("SSE 收到原始日志行", any(
+        e.get("t") == "raw" and "Battery ADC" in e.get("line", "") for e in events))
+    batt = next((e["d"] for e in events if e.get("t") == "batt"
+                 and "batt_mv" in e.get("d", {})), None)
+    check("SSE 收到解析后的电池事件", batt is not None and batt["batt_mv"] == 8370,
+          str(batt))
+
+    # ---- 通道遥测: 固件自由推送 (无对应命令), 所以要等它自己到 ----
+    # 这段必须在 /poll off 之前 —— 暂停轮询不影响推送, 但保持与页面一致的时序
+    # (浏览器接入后先看到的就是推送帧)
+    sse_p = sse_open()
+    time.sleep(0.3)
+    evs = sse_drain(sse_p, 4, stop_when=lambda e: any(x.get("t") == "ch" for x in e))
+    sse_p.close()
+    ch_ev = next((e["d"] for e in evs if e.get("t") == "ch"), None)
+    check("SSE 收到固件自由推送的通道帧 (无命令触发)", ch_ev is not None, str(evs[:6]))
+    if ch_ev:
+        check("推送的通道帧内容正确",
+              ch_ev.get("mode") == "crsf" and ch_ev.get("ch", [])[:2] == [172, 1500],
+              str(ch_ev))
+        check("通道帧不进日志面板 (被解析的不再当 raw 重发)",
+              not any(e.get("t") == "raw" and "[CH]" in e.get("line", "") for e in evs))
+
+    # ---- 外设状态: 服务端用 --no-poll 起的, 所以这里先确认"没人主动问",
+    # 再手动问一次 —— !PERIPH 是轮询线程发的, 而 --no-poll 必须连新加的那个
+    # 间隔一起关掉 (漏了就会在用户明确要求静默时仍然每 2 秒打扰一次串口) ----
+    sse_p = sse_open()
+    time.sleep(0.3)
+    evs = sse_drain(sse_p, 2.5)
+    check("--no-poll 时没有 !PERIPH 主动轮询 (外设轮询也被关掉)",
+          not any(e.get("t") == "per" for e in evs), str(evs[:6]))
+
+    r = json.loads(http_post("/cmd", "!PERIPH"))
+    check("POST /cmd 下发 !PERIPH", r.get("ok") is True, str(r))
+    # 6 行是一行一行到的, 每行只带自己那一节 —— 等最后一节也到了再看快照
+    evs = sse_drain(sse_p, 4, stop_when=lambda e: any(
+        x.get("t") == "per" and {"motors", "leds", "pwm"} <= set(x.get("d", {}))
+        for x in e))
+    sse_p.close()
+    per_ev = next((e["d"] for e in reversed(evs) if e.get("t") == "per"), None)
+    check("SSE 收到解析后的外设帧", per_ev is not None, str(evs[:6]))
+    if per_ev:
+        check("外设帧含电机/LED/PWM 三节",
+              per_ev.get("motors") == {"m1": 500, "m2": 0}
+              and per_ev.get("leds", {}).get("hb") == 1
+              and per_ev.get("pwm", {}).get("3") == 5000, str(sorted(per_ev)))
+        check("外设行不进日志面板 (6 行一条, 每 2 秒会把日志冲掉)",
+              not any(e.get("t") == "raw" and wc.RE_PER.match(e.get("line", ""))
+                      for e in evs),
+              str([e.get("line") for e in evs if e.get("t") == "raw"][:3]))
+
+    # 带参数的外设命令 (回放按"命令头 + 空格"认, 固件侧也是按命令头分发的)。
+    # 断言 u0_rx —— 前面的用例没碰过它, 所以这一帧只可能来自这条命令
+    sse_p = sse_open()
+    time.sleep(0.3)
+    http_post("/cmd", "!UART0T hello")
+    evs = sse_drain(sse_p, 3, stop_when=lambda e: any(
+        x.get("t") == "per" and "u0_rx" in x.get("d", {}) for x in e))
+    sse_p.close()
+    rx = next((e["d"].get("u0_rx") for e in evs if e.get("t") == "per"
+               and "u0_rx" in e.get("d", {})), None)
+    check("带参数的外设命令也能过 (命令头前缀匹配)", rx == ["hello"], str(rx))
+
+    r = json.loads(http_post("/poll", "off"))
+    check("POST /poll 暂停轮询", r.get("paused") is True, str(r))
+
+    # ---- 设备/烧录端点 (只探只读与拒绝路径, 绝不真烧) ----
+    dev = json.loads(http_get("/device"))
+    check("GET /device 报设备/固件/picotool",
+          {"bridge", "devices", "firmware", "picotool"} <= set(dev), str(sorted(dev)))
+    check("GET /device 的 bridge 与 /state 一致",
+          dev["bridge"] is json.loads(http_get("/state"))["bridge"])
+    check("页面含「连接设备」入口与烧录按钮",
+          'id="devbtn"' in raw_page and "连接设备" in raw_page
+          and 'id="flashbtn"' in raw_page)
+
+    for bad, why in [("../../etc/passwd", "路径逃逸"), ("/etc/passwd", "非 uf2"),
+                     ("nope.uf2", "文件不存在")]:
+        r = json.loads(http_post("/flash", json.dumps({"uf2": bad})))
+        check(f"POST /flash 拒绝{why}", r.get("ok") is False and r.get("err"), str(r))
+
+    # 参数页另开一路 SSE (上一路已关闭) —— 接入时服务器会自动下发一次 !CFG
+    sse2 = sse_open()
+    time.sleep(0.3)
+    test_param_e2e(sse2)
+    sse2.close()
+
+    print(f"\n{len(passed)} 项通过, {len(failed)} 项失败")
+    if failed:
+        for f in failed:
+            print("  FAILED: " + f)
+        print("日志: /tmp/wc_socat.log /tmp/wc_fake.log /tmp/wc_console.log /tmp/wc_server.log")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    try:
+        code = main()
+    finally:
+        cleanup()
+    sys.exit(code)

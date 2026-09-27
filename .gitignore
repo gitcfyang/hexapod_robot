@@ -2,7 +2,7 @@
 pico/build/
 # 固件产物由 GitHub Actions 自动生成并上传 Release, 不入库
 *.uf2
-tools/__pycache__/
+__pycache__/
 
 # 硬件 EDA 临时文件 (KiCad / 立创EDA)
 *-backups/
