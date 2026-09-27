@@ -1812,8 +1812,10 @@ function renderModesConfig() {
  *   ① 复用脚 —— 功能下拉就是那个 port 组参数 (uart0_en 在外设组, input_mode
  *      在通道组, 其余六个在 port 组), 一律走 sendSet 那条参数通道, 所以照常
  *      参与保存/恢复默认/未保存计数;
- *   ② 空闲脚 GP23/24/29 —— 功能选「输出」后配置列才出现电平复选框, 它发
- *      !GPO (即时命令, 不落盘: 电平本来就不是能存的状态);
+ *   ② 板载脚 GP23/24/29 —— 板上没接东西, 但 Pico 模块内部连着 (SMPS 模式 /
+ *      VBUS 检测 / VSYS 检测), 所以不是"随便用的空脚": 留着是为了读数与调试。
+ *      功能选「输出」后配置列才出现电平复选框, 它发 !GPO (即时命令, 不落盘:
+ *      电平本来就不是能存的状态);
  *   ③ 固定脚 —— 只显示归属与实测电平。RP2040 的 UART/I2C 只能落在固定的脚上
  *      (I2C1 已给舵机总线), 所以这几行没有下拉可给。
  * 状态列的数据来自 !PORTS 轮询 (server --ports-interval, 默认 2 秒一次),
@@ -1873,17 +1875,29 @@ const PORT_ROWS = [
           "舵机总线, 所以 I2C 是固件位翻转出来的 (约 50kHz)。",
     state: d => d.ext && (d.ext.mode === 0 ? "关闭"
       : `${["关闭", "软件 I2C", "ADC"][d.ext.mode]} · a0=${d.ext.a0} a1=${d.ext.a1} mV`) },
-  { key: "gp23", title: "空闲脚 GP23", pins: "GP23",
+  /* 这三个脚「板子上没人接」, 但 Pico 模块内部有电路连着 (见各行的 hint):
+     留在这里是为了读数与调试, 不是拿来接线的空脚。选「输出」后右边出现
+     电平复选框 (发 !GPO)。 */
+  { key: "gp23", title: "GP23 · Pico 板载", pins: "GP23",
     pname: "gp23_fn", opts: [[0, "输入"], [1, "输出"]], pin: 23,
     cfg: { kind: "level" },
-    hint: "没被任何外设占用的脚。选「输出」后右边出现电平复选框 (发 !GPO)。",
+    hint: "Pico 模块内部占用: SMPS 模式脚 (决定稳压器跑 PFM 还是 PWM)。" +
+          "当输入读到的是模块当前的电源模式, 切输出会改电源模式 —— " +
+          "只当调试口用, 别外接东西。",
     state: null },          /* 三行共用下面对 ports.gpio 的渲染 */
-  { key: "gp24", title: "空闲脚 GP24", pins: "GP24",
+  { key: "gp24", title: "GP24 · Pico 板载", pins: "GP24",
     pname: "gp24_fn", opts: [[0, "输入"], [1, "输出"]], pin: 24,
-    cfg: { kind: "level" }, hint: "同上。", state: null },
-  { key: "gp29", title: "空闲脚 GP29", pins: "GP29",
+    cfg: { kind: "level" },
+    hint: "Pico 模块内部占用: VBUS 检测 (经分压接 USB 5V)。" +
+          "输入态实测电平 = USB 是否插着; 别切输出。",
+    state: null },
+  { key: "gp29", title: "GP29 · Pico 板载", pins: "GP29",
     pname: "gp29_fn", opts: [[0, "输入"], [1, "输出"]], pin: 29,
-    cfg: { kind: "level" }, hint: "同上 (这块板上它是最后一个空脚)。", state: null },
+    cfg: { kind: "level" },
+    hint: "Pico 模块内部占用: VSYS 检测 (200k/100k 分压 = VSYS/3, 也是 ADC3)。" +
+          "5V 的 VSYS 分压后只剩 ~1.7V, 在逻辑门限之下 —— 当数字输入读不出" +
+          "电池在不在 (真机实测恒 0); 要看 VSYS 得走 ADC3, 固件目前不读。别切输出。",
+    state: null },
 ];
 
 /* 固定功能的那几行 (没有下拉, 只在状态列里报实测电平) */
@@ -1906,9 +1920,13 @@ const portsCustomHTML = `
       <div class="note" style="margin-top:.4rem">
         <span id="pt-stale" class="perdot dim">端口状态: —</span> ·
         「功能」下拉写的是<b>参数</b> (改完即时生效, 按「保存到 Flash」掉电保持);
-        空闲脚的电平复选框发 <code>!GPO</code>, <b>是即时命令、不落盘</b>
+        板载脚的电平复选框发 <code>!GPO</code>, <b>是即时命令、不落盘</b>
         (切回输入再切输出会回到低电平)。输入态下复选框是灰的 —— 固件也会拒绝
         在输入脚上写电平。<br>
+        <b>GP23/24/29 不是空脚</b>: Pico 模块内部分别连着 SMPS 模式、VBUS 检测、
+        VSYS 检测 (板上没往外引)。当输入只有 GP24 读得出状态 (USB 插着);
+        GP29 是 VSYS/3 分压, 5V 下只剩 ~1.7V、数字读恒 0。切输出只当调试口用、
+        别外接负载。<br>
         <b>UART1 的波特率下拉只在串口输入模式下生效</b>: 遥控链路 (CRSF) 恒
         420000 波特, 改它不会动遥控。下面「外设」页也有
         <code>uart0_en</code> / <code>uart0_baud</code> / <code>ext_i2c_mode</code>
@@ -2286,9 +2304,10 @@ const PAGES = [
           "要掉电保持得按「保存到 Flash」。" },
   { id: "ports", title: "端口", groups: ["port"], custom: portsCustomHTML,
     note: "每一组引脚「现在是干什么的」: 复用脚在「功能」下拉里选用途，" +
-          "自由脚 (GP23/24/29) 可以切成输出并用复选框给电平。" +
+          "GP23/24/29 这三脚是 Pico 板载 (模块内部占用, 板上没往外引)，" +
+          "照常能切成输出并用复选框给电平。" +
           "功能下拉写的是参数，改完即时生效、按「保存到 Flash」掉电保持；" +
-          "空闲脚的<b>电平是即时命令 (!GPO)，不落盘</b>。" +
+          "这三脚的<b>电平是即时命令 (!GPO)，不落盘</b>。" +
           "本页的 UART0 / 输入 / 外部排针与外设页、遥控页是同一批参数 (两处联动)。" },
 ];
 

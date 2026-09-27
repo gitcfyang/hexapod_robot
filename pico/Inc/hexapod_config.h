@@ -957,8 +957,15 @@
 #define FOOT_SW_ENABLED_DEFAULT         1
 #define FOOT_SW_ENABLED                 (g_params.foot_sw_en)
 
-/* GP23/GP24/GP29: 三个空闲脚, 0=输入 1=输出 (输出初值 0, 电平靠 !GPO 写)。
- * 输入态读电平, 输出态 !GPO 才能改 —— 输入态发 !GPO 会被拒绝。 */
+/* GP23/GP24/GP29: 三个板载脚, 0=输入 1=输出 (输出初值 0, 电平靠 !GPO 写)。
+ * 输入态读电平, 输出态 !GPO 才能改 —— 输入态发 !GPO 会被拒绝。
+ *
+ * ⚠️ 这三脚**不是空脚**: 本机跑的是 Pico 模块 (BOM U23), 模块内部把
+ *    GP23 接到 SMPS 模式、GP24 接到 VBUS 检测、GP29 接到 VSYS 检测 (ADC3),
+ *    板上没往外引。输入态读到的电平是"模块自己的状态": GP24 读得出 USB 在不在
+ *    (实测插着=1), GP29 是 200k/100k 分压 (VSYS/3, 5V 下 ~1.7V) —— 在数字
+ *    门限之下, 读不出电池在不在 (真机实测恒 0, 要看 VSYS 得走 ADC3)。
+ *    切输出只该当调试口用, 别外接负载。 */
 #define GPIO_FN_INPUT                   0
 #define GPIO_FN_OUTPUT                  1
 #define GPIO23_FN_DEFAULT               GPIO_FN_INPUT

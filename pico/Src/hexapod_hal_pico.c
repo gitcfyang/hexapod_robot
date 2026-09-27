@@ -1172,11 +1172,19 @@ static void i2c_bus_check(bool full_scan)
     hal_debug_printf("Servo power: GP10(left)=%d  GP11(right)=%d\r\n",
                      gpio_get(SERVO_PWR_LEFT_PIN), gpio_get(SERVO_PWR_RIGHT_PIN));
 
-    /* PCA9685 定向检测: 0x40=左腿板, 0x41=右腿板 (读 MODE1 寄存器) */
+    /* PCA9685 定向检测: 0x40=左腿板, 0x41=右腿板 (读 MODE1 寄存器)
+     * 读之前必须先写寄存器指针 —— I2C 读是"从芯片内部指针处开始吐", 不写指针
+     * 拿到的是上次访问停的位置, 值不可信 (真机上实测在 0xE0/0x00 之间漂)。
+     * 下面 BNO055 那段就是这么写的。 */
     for (uint8_t addr = 0x40; addr <= 0x41; addr++) {
+        uint8_t reg = PCA9685_MODE1;
         uint8_t mode1 = 0;
-        int ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, addr, &mode1, 1, false,
+        int ret = i2c_write_blocking_until(PCA9685_I2C_INSTANCE, addr, &reg, 1, true,
+                                           make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
+        if (ret == 1) {
+            ret = i2c_read_blocking_until(PCA9685_I2C_INSTANCE, addr, &mode1, 1, false,
                                           make_timeout_time_us(PCA9685_I2C_TIMEOUT_US));
+        }
         if (ret == 1) {
             hal_debug_printf("PCA9685 0x%02X (%s legs): DETECTED  MODE1=0x%02X\r\n",
                              addr, (addr == PCA9685_ADDR_LEFT) ? "left " : "right", mode1);
@@ -2356,12 +2364,26 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
                 break;
             }
 #endif /* PS2_ENABLED */
-            /* !P<servo_id> <angle>  例: !P0 900  */
-            if (len < 5) { hal_debug_printf("Usage: !P<id> <angle>\r\n"); break; }
-            uint8_t sid = (uint8_t)parse_int(buf, 2, len);
-            /* 跳过 id 找到空格后的 angle */
-            uint8_t pos = 2; while (pos < len && buf[pos] != ' ') pos++;
-            int16_t ang = parse_int(buf, pos + 1, len);
+            /* !P<servo_id> <angle>  例: !P0 900
+             * 形状必须对得上: id 是紧跟命令字的数字 (中间多打的空格容忍, 有人会
+             * 按 "!P 0 300" 打), 空白之后才是角度。对不上就明确拒绝 —— 别猜:
+             * 老解析从 buf[2] 直接读 id、再取第一个空格后面的数当角度, "!P 0 300"
+             * 会被读成"舵机 0 → 角度 0"(角度吃到的其实是 id 的首位), 静默把某个
+             * 舵机转到没要求的角度上去。 */
+            uint8_t pos = 2;
+            while (pos < len && buf[pos] == ' ') pos++;
+            if (pos >= len || buf[pos] < '0' || buf[pos] > '9') {
+                hal_debug_printf("Usage: !P<id> <angle>\r\n");
+                break;
+            }
+            uint8_t sid = (uint8_t)parse_int(buf, pos, len);
+            while (pos < len && buf[pos] >= '0' && buf[pos] <= '9') pos++;
+            while (pos < len && buf[pos] == ' ') pos++;
+            if (pos >= len || (buf[pos] != '-' && (buf[pos] < '0' || buf[pos] > '9'))) {
+                hal_debug_printf("Usage: !P<id> <angle>\r\n");
+                break;
+            }
+            int16_t ang = parse_int(buf, pos, len);
             if (sid < 18 && ang >= -1800 && ang <= 1800) {
                 /* 直接写入舵机，绕过 IK/步态
                  * PCB 定版: ID 0~8=右腿→0x41, ID 9~17=左腿→0x40 */

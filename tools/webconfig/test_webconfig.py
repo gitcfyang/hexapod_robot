@@ -412,6 +412,12 @@ def test_firmware_contract():
           "`!P${CAL.sel} ${v}`" in html and "`!P ${CAL.sel} ${v}`" not in html)
     check("固件 !P 的形状与源码写的一致 (页面照它发)",
           "!P<servo_id> <angle>" in hal and "Usage: !P<id> <angle>" in hal)
+    # 形状对不上要打 Usage 拒绝, 不许"猜" —— 老固件 (len<5 + parse_int(buf,2) +
+    # "跳过 id 找到空格后的 angle") 对 "!P 0 300" 会静默读成舵机 0 角度 0。
+    # 两处 Usage 对应两种残形: id 不是数字 (含 "!P" 后面直接没东西)、角度缺失。
+    check("固件 !P 形状不对就拒绝 (id 与角度各一处 Usage, 不静默猜)",
+          hal.count("Usage: !P<id> <angle>") >= 2
+          and "跳过 id 找到空格后的 angle" not in hal)
     check("页码缓存 ho 帧并挂到 SSE 分发上",
           'case "ho": renderHo(ev.d); break;' in html)
     # !A 报的是角度而不是脉宽 (同样是 0=中位那套单位, 与 !P/!HO 一致)。改成
