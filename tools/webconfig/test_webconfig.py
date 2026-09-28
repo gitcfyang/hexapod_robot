@@ -1501,6 +1501,303 @@ def test_page_js():
           str(pr.get("cmds")))
 
 
+# ==================== [6] 直连引擎 (Web Serial, 页面内解析) ====================
+#
+# 直连模式下固件输出由页面自己解析, 于是解析器有两份实现 (server.py 与
+# index.html)。单侧漂移是静的: 同一条固件输出在两种打开方式下显示成两样,
+# 两边都不报错。这里拿同一条时间线喂两边做差分 —— 帧类型/字段/顺序/raw
+# 白名单必须逐帧一致 —— 再补几条定向断言, 把差分里不好读的语义单独钉住。
+
+# 同一块板再报一遍: 板级覆盖 (新角度是整份, 旧角度不许残留)
+S_SERVO_AGAIN = [
+    "Board 0x41 (right): [0]:1600 [1]:1580",
+]
+
+# 时间线覆盖三种累积策略 (ch 整帧替换 / per+ports 分节合并 / ho+params 逐条
+# 累积) 与全部帧类型, 顺序照真实开机流排; 末尾一条固件未来新增的怪行 (谁都不认
+# → 原样日志), 是"解析不了也不能崩"的那条底线。
+DIRECT_LINES = (S_VER + S_BATT + S_BATT_ABSENT + S_I2C + S_I2C_Q + S_IMU
+                + S_SERVO + S_SERVO_AGAIN + S_CH_CRSF + S_CH_PS2 + S_CH_CRSF
+                + S_RUN + S_PER + S_PORTS + S_HO + S_U0 + S_PARAMS + S_RC
+                + ["[FOO] 固件以后新加的行"])
+
+# 解析出来的行不再当 raw 重发 (server.py on_line 与页面 RAW_SKIP 各一份)
+RAW_SKIP = ["params", "per", "ch", "rc", "run", "ho", "ports"]
+
+
+def _first_diff(a, b):
+    """差分报告: 第一处不一致的帧 (整表 diff 打出来没人看得懂)"""
+    for i in range(max(len(a), len(b))):
+        x = a[i] if i < len(a) else None
+        y = b[i] if i < len(b) else None
+        if x != y:
+            d = json.dumps(x, ensure_ascii=False, sort_keys=True)
+            e = json.dumps(y, ensure_ascii=False, sort_keys=True)
+            return f"第 {i} 帧 页面={d[:160]} server={e[:160]}"
+    return ""
+
+
+def _python_frames(lines):
+    """server.py 的解析路径 (parse_line + on_line 的 raw 白名单)。
+    每帧当场冻结成 JSON 树: 广播出去的就是那一刻的字节, 之后同引用的快照
+    (params/servo/u0) 再被改写, 也不该回头改已经发出去的那一帧。"""
+    t = wc.Telemetry()
+    out = []
+    for line in lines:
+        parsed = wc.parse_line(t, line)
+        if not (parsed and parsed[0] in RAW_SKIP):
+            out.append(json.loads(json.dumps({"t": "raw", "line": line})))
+        if parsed:
+            out.append(json.loads(json.dumps({"t": parsed[0], "d": parsed[1]})))
+    return out
+
+
+PROBE_DIRECT_JS = """
+<div id="probe"></div>
+<script>
+try {
+  var LINES = """ + json.dumps(DIRECT_LINES, ensure_ascii=False) + """;
+  var out = {renderErrs: [], frames: []};
+  /* 第一拍: 每一步都过**真的** handleFrame —— 渲染函数 (renderBatt/renderI2c/…)
+     抛异常在前端是"页面卡住", 什么回执都没有, 只能在这里拦 */
+  Direct.telem = Direct.newTelem();
+  for (var i = 0; i < LINES.length; i++) {
+    try { Direct.handleLine(LINES[i]); }
+    catch (e) { out.renderErrs.push(String(e) + " @" + i + " " + LINES[i].slice(0, 40)); }
+  }
+  /* 第二拍: 换成记录用的 handleFrame 收帧。帧当场深拷: 快照里嵌的子对象是活
+     引用 (与 Python 侧 dict() 浅拷同理), 不冻结就会看到"最后状态"而不是"这一帧" */
+  handleFrame = function (ev) { out.frames.push(JSON.parse(JSON.stringify(ev))); };
+  Direct.telem = Direct.newTelem();
+  for (i = 0; i < LINES.length; i++) Direct.handleLine(LINES[i]);
+
+  /* ---- 定向抽查 (各自独立的小时间线) ---- */
+  var last = function (t, line) { return Direct.parseLine(t, line); };
+
+  /* i2c 头行清场: 全扫头行连扫描列表一起清, quick 头行只清设备 */
+  Direct.telem = Direct.newTelem();
+  last(Direct.telem, "=== I2C Bus Check (SDA=GP14, SCL=GP15) ===");
+  last(Direct.telem, "  Device found at 0x40");
+  var before = Direct.telem.i2c.scan;
+  var q = last(Direct.telem,
+               "=== I2C Bus Check (SDA=GP14, SCL=GP15) quick ===")[1];
+  out.i2c = {before: before, reset: q.reset, reset_scan: q.reset_scan,
+             after: Direct.telem.i2c.scan,
+             devWiped: !("pca" in Direct.telem.i2c)};
+
+  /* ch 整帧替换: 切到 ps2 后 crsf 的字段一个都不许留, 切回来缺项回填中位 */
+  Direct.telem = Direct.newTelem();
+  last(Direct.telem, "[CH] m=crsf link=1 fc=100 c0=200 c3=1000");
+  var ps2 = last(Direct.telem,
+                 "[CH] m=ps2 con=1 btns=1 lx=2 ly=3 rx=4 ry=5 fc=6")[1];
+  var crsf = last(Direct.telem, "[CH] m=crsf link=0 fc=9 c0=250")[1];
+  out.ch = {ps2Keys: Object.keys(ps2).sort(), crsfKeys: Object.keys(crsf).sort(),
+            crsfCh: crsf.ch};
+
+  /* 参数帧: 以固件回显为准重算 count/changed; 帧是快照不是活对象;
+     unit= 空 token 必须落成 "" 而不是 undefined (undefined 会在 JSON 里整键消失) */
+  Direct.telem = Direct.newTelem();
+  var p1 = last(Direct.telem,
+                "[P] name=aaa val=1 min=0 max=2 def=1 unit= grp=g chg=0")[1];
+  var p2 = last(Direct.telem,
+                "[P] name=bbb val=2 min=0 max=3 def=2 unit=mV grp=g chg=1")[1];
+  out.params = {first: [p1.count, p1.changed, Object.keys(p1.list)],
+                then: [p2.count, p2.changed, Object.keys(p2.list)],
+                unit: [p2.list.aaa.unit, p2.list.bbb.unit],
+                /* 提示行解析不出来 —— 不能变成帧, 只能进日志 */
+                warn: last(Direct.telem, "[P] WARN aaa clamped 999 -> 2 (范围 0~2)"),
+                sep: last(Direct.telem, "[P] === 2 params (1 changed) ===")};
+
+  /* per/ports 分节合并: 一行一节, 分节存才不至于只收到一半就渲染半张表 */
+  Direct.telem = Direct.newTelem();
+  var e1 = last(Direct.telem, "[PER] motors: m1=500 m2=0")[1];
+  var e2 = last(Direct.telem, "[PER] uart0: en=1 baud=115200 rx=42 tx=7 lines=3")[1];
+  /* [U0] 环形缓冲: 只留最近 U0_RX_RING 行 */
+  for (var k = 0; k < 22; k++) last(Direct.telem, "[U0] line" + k);
+  var e3 = last(Direct.telem, "[U0] 兜底")[1];
+  var s1 = last(Direct.telem, "[PORTS] uart0: en=1 baud=115200")[1];
+  var s2 = last(Direct.telem, "[PORTS] foot: en=1 s0=1 s1=0")[1];
+  out.per = {one: Object.keys(e1), two: Object.keys(e2).sort(),
+             ringLen: e3.u0_rx.length, ringHead: e3.u0_rx[0],
+             ringTail: e3.u0_rx[e3.u0_rx.length - 1]};
+  out.ports = {one: Object.keys(s1), two: Object.keys(s2).sort(), foot: s2.foot};
+
+  /* 舵机: 板级整份覆盖 (同一块板再报时旧角度是删掉, 不是留着)。
+     帧里的 boards 是活引用 (server.py 侧 dict() 浅拷同理), 所以板名当场取 */
+  Direct.telem = Direct.newTelem();
+  var b1 = last(Direct.telem, "Board 0x41 (right): [0]:1500 [1]:1480 [2]:1520 ")[1];
+  var firstBoards = Object.keys(b1.boards);
+  var b1Angles = Object.keys(b1.boards["41"].angles);   /* 键是 0x40/0x41 的十六进制对 */
+  last(Direct.telem, "Board 0x40 (left): [9]:1500 ");
+  var b3 = last(Direct.telem, "Board 0x41 (right): [0]:1600")[1];
+  out.servo = {first: firstBoards, firstAngles: b1Angles,
+               boards: Object.keys(b3.boards).sort(),
+               b41: b3.boards["41"], b40: b3.boards["40"]};
+  $("probe").textContent = JSON.stringify(out);
+} catch (e) { $("probe").textContent = "THROW " + e; }
+</script>
+"""
+
+
+def _probe_json(js, tag):
+    """把探针追加到页面末尾, 无头浏览器跑一遍, 返回 (解析好的 JSON, 失败原因)"""
+    if not CHROME:
+        return None, "没有无头浏览器"
+    prof = f"/tmp/wc_chrome_profile_{tag}"
+    shutil.rmtree(prof, ignore_errors=True)
+    src = open(INDEX_HTML, encoding="utf-8").read()
+    probe_path = f"/tmp/wc_page_probe_{tag}.html"
+    with open(probe_path, "w", encoding="utf-8") as f:
+        f.write(src.replace("</body>", js + "</body>"))
+    with open(f"/tmp/wc_chrome_{tag}.log", "wb") as errlog:
+        try:
+            r = subprocess.run(
+                [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu",
+                 f"--user-data-dir={prof}", "--virtual-time-budget=5000",
+                 "--dump-dom", "file://" + probe_path],
+                stdout=subprocess.PIPE, stderr=errlog,
+                stdin=subprocess.DEVNULL, timeout=90)
+        except subprocess.TimeoutExpired:
+            return None, f"浏览器 90s 没吐出 DOM, 见 /tmp/wc_chrome_{tag}.log"
+    dom = r.stdout.decode("utf-8", "replace")
+    m = re.search(r'id="probe">([^<]*)<', dom)
+    if not m:
+        return None, "页面里没有 #probe (探针没挂上?)"
+    got = html.unescape(m.group(1))
+    if got.startswith("THROW"):
+        return None, got
+    try:
+        return json.loads(got), ""
+    except json.JSONDecodeError:
+        return None, repr(got[:200])
+
+
+def test_direct_engine():
+    """页面内的直连解析器 vs server.py: 同一条时间线逐帧差分"""
+    pr, why = _probe_json(PROBE_DIRECT_JS, "direct")
+    if pr is None:
+        check("直连引擎探针能跑通", False, why)
+        return
+    check("直连引擎探针能跑通", True)
+
+    # 渲染层: 帧喂给真的 handleFrame, 每一帧都得能过 (抛了就记在 renderErrs)
+    check("每一帧都能过渲染层 (19 种帧喂真的 handleFrame 不抛)",
+          pr["renderErrs"] == [], str(pr["renderErrs"][:2]))
+
+    py_frames = _python_frames(DIRECT_LINES)
+    check(f"直连解析与 server.py 逐帧一致 ({len(py_frames)} 帧: 类型/字段/顺序)",
+          pr["frames"] == py_frames, _first_diff(pr["frames"], py_frames))
+    # 帧类型要真的覆盖到, 否则"两边一致"可能只是两边都没解析出东西
+    kinds = sorted({f["t"] for f in py_frames})
+    check("时间线覆盖到 12 类帧 (含 raw 日志路)",
+          kinds == ["batt", "ch", "ho", "i2c", "imu", "params", "per", "ports",
+                    "raw", "rc", "run", "servo", "ver"], str(kinds))
+    # raw 白名单: 白名单里的行不再进日志面板 (一次 !CFG 几十行会把日志冲掉),
+    # 认不出来的行必须原样进日志
+    raws = [f["line"] for f in py_frames if f["t"] == "raw"]
+    check("raw 白名单: 高频帧的行不进日志 ([P]/[PER]/[PORTS]/[HO]/[CH]/[RC]/[RUN])",
+          not any(r.startswith(("[P] name=", "[PER]", "[PORTS]", "[HO] id=",
+                                "[CH]", "[RC]", "[RUN]", "[IDLE]", "[U0]",
+                                "[U0TX]", "Robot "))
+                  for r in raws), str(raws[:3]))
+    check("raw 白名单: 认不出来的行原样进日志",
+          "=== Battery ADC (GP28/ADC2, divider 47/377) ===" in raws
+          and "[P] FAIL unknown param 'nosuch' (试 !CFG 列出全部)" in raws
+          and "[FOO] 固件以后新加的行" in raws)
+    # ver 不在白名单里是有意的: 版本行既是 ver 帧, 也留在日志里 ——
+    # 开始页的启动横幅就是从日志区读的 (没连接时唯一的版本来源)
+    check("raw 白名单: ver 例外 —— 版本行同时留在日志里",
+          "[VER] Hexapod v0.3.0-16-g8f5b04f-dirty" in raws)
+    check("raw 白名单与 server.py 同表 (顺序即契约)",
+          [f["line"] for f in pr["frames"] if f["t"] == "raw"] == raws)
+
+    check("i2c: 全扫头行之后的扫描列表, quick 头行保留 (reset_scan=False)",
+          pr["i2c"] == {"before": [0x40], "reset": True, "reset_scan": False,
+                        "after": [0x40], "devWiped": True}, str(pr["i2c"]))
+    check("ch: 切到 ps2 后 crsf 字段不残留 (整帧替换)",
+          pr["ch"]["ps2Keys"] == ["btns", "connected", "fc", "lx", "ly", "mode",
+                                  "rx", "ry"], str(pr["ch"]["ps2Keys"]))
+    check("ch: 切回 crsf 时缺项回填中位 992, 16 通道一个不少",
+          pr["ch"]["crsfKeys"] == ["ch", "fc", "link", "mode"]
+          and pr["ch"]["crsfCh"] == [250] + [992] * 15, str(pr["ch"]))
+    check("params: count/changed 以固件回显为准重算",
+          pr["params"]["first"] == [1, 0, ["aaa"]]
+          and pr["params"]["then"] == [2, 1, ["aaa", "bbb"]], str(pr["params"]))
+    check("params: 帧是快照 (后一帧不回头改前一帧), unit= 空 token 落成空串",
+          pr["params"]["unit"] == ["", "mV"], str(pr["params"]["unit"]))
+    check("params: WARN/=== 提示行解析不出来 (走日志, 不产帧)",
+          pr["params"]["warn"] is None and pr["params"]["sep"] is None)
+    check("per/ports: 分节合并 (后到的节不冲掉先到的)",
+          pr["per"]["one"] == ["motors"]
+          and pr["per"]["two"] == ["motors", "uart0"]
+          and pr["ports"]["one"] == ["uart0"]
+          and pr["ports"]["two"] == ["foot", "uart0"]
+          and pr["ports"]["foot"] == {"en": 1, "s0": 1, "s1": 0}, str(pr["per"]))
+    check("[U0] 环形缓冲只留最近 20 行",
+          pr["per"]["ringLen"] == 20 and pr["per"]["ringHead"] == "line3"
+          and pr["per"]["ringTail"] == "兜底", str(pr["per"]))
+    check("舵机: 板级整份覆盖 (同一块板重报后旧角度不残留)",
+          pr["servo"]["first"] == ["41"]
+          and pr["servo"]["firstAngles"] == ["0", "1", "2"]
+          and pr["servo"]["boards"] == ["40", "41"]
+          and pr["servo"]["b41"] == {"side": "right", "angles": {"0": 1600}}
+          and pr["servo"]["b40"] == {"side": "left", "angles": {"9": 1500}},
+          str(pr["servo"]))
+
+
+# 页面里的解析器与 server.py 必须同源: 正则表逐条同体 (改一处就得改另一处),
+# 常量与 raw 白名单同值。这些是静态检查 —— 不需要浏览器, 也不需要跑固件。
+def test_direct_contract():
+    print("\n[6] 直连契约 (静态: 与 server.py 同源)")
+    src = open(INDEX_HTML, encoding="utf-8").read()
+    srv = open(os.path.join(HERE, "server.py"), encoding="utf-8").read()
+
+    for name, needle in [
+            ("Web Serial 入口", "navigator.serial"),
+            ("帧分发器提到顶层 (两条数据路共用)", "function handleFrame(ev)"),
+            ("直连引擎命名空间", "const Direct = {"),
+            ("直连的行入口 (白名单 + 转帧)", "handleLine(line) {"),
+            ("连接前先探模式 (?mode= 覆盖 / file: 短路)", 'get("mode")'),
+            ("file:// 视作 server 态 (无头探针与本地开发靠它)",
+             'if (location.protocol === "file:") return pick("server");'),
+    ]:
+        check(f"页面直连标志: {name}", needle in src, "index.html 里没有 " + needle)
+
+    # 正则表同源: 名字相同、模式体逐字节相同 (Python r"..." 与 JS /.../ 都是
+    # 字面量, 所以体可以直接比字符串)。只取两边都有的; RE_DEV 是桥接侧专有
+    # ([TCP] dev 由 serial_console.py 发布), 直连没有它。
+    py_re = dict(re.findall(r'^((?:RE_)?[A-Z][A-Z0-9_]*) = re\.compile\(\s*r"'
+                            r'((?:[^"\\]|\\.)*)"', srv, re.M))
+    js_re = {n: (b, f) for n, b, f in
+             re.findall(r'^const ((?:RE_)?[A-Z][A-Z0-9_]*) = /(.*)/([a-z]*);',
+                        src, re.M)}
+    both = sorted(set(py_re) & set(js_re))
+    check(f"正则同源: 两边共有的模式都有 {len(both)} 条 (≥30, 防提取器空跑)",
+          len(both) >= 30, f"交集只有 {len(both)} 条")
+    drift = [n for n in both if py_re[n] != js_re[n][0]]
+    check("正则同源: 每一条的模式体逐字节相同 (单侧改了另一侧没跟上)",
+          not drift, "; ".join(f"{n}: server={py_re[n]!r} 页面={js_re[n][0]!r}"
+                               for n in drift[:3]))
+    flag_bad = [n for n in both if js_re[n][1] not in ("", "g")]
+    check("正则同源: 页面侧只多一个 g 标志 (matchAll 要它, Python 侧靠 findall)",
+          not flag_bad, str(flag_bad))
+    # 常量: 通道数/中位值与环形缓冲长度写死在两边, 对不上就是静默的显示差异
+    for const in ("CRSF_CH_COUNT", "CRSF_CH_MID", "U0_RX_RING"):
+        a = re.search(rf'^{const} = (\d+)', srv, re.M)
+        b = re.search(rf'^const {const} = (\d+)', src, re.M)
+        check(f"常量同值: {const}",
+              bool(a and b) and a.group(1) == b.group(1),
+              f"server={a and a.group(1)} 页面={b and b.group(1)}")
+
+    # raw 白名单: 两边的表必须一字不差 (差了就有行在一边进日志、另一边不进)
+    m_py = re.search(r"parsed\[0\] in \(([^)]+)\)", srv, re.S)
+    kinds = [x.strip().strip('"') for x in m_py.group(1).split(",") if x.strip()]
+    m_js = re.search(r"RAW_SKIP = new Set\(\[([^\]]+)\]\)", src)
+    js_kinds = [x.strip().strip('"') for x in m_js.group(1).split(",") if x.strip()]
+    check("raw 白名单同表 (server on_line 与页面 RAW_SKIP)",
+          kinds == js_kinds == RAW_SKIP, f"server={kinds} 页面={js_kinds}")
+
+
 def wait_dev(port, up, timeout=20):
     """等 /state 里的设备在线状态变成 up"""
     end = time.time() + timeout
@@ -2126,8 +2423,11 @@ def main():
 
     test_connect_gate()
 
+    test_direct_contract()
+
     print("\n[5] 页面脚本 (无头浏览器)")
     test_page_js()
+    test_direct_engine()
 
     print(f"\n{len(passed)} 项通过, {len(failed)} 项失败")
     if failed:
