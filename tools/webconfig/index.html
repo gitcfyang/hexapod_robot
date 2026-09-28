@@ -413,11 +413,17 @@
         <span id="wel-bridge" class="dim">检测中…</span></div>
       <div class="row"><span>机器人设备</span>
         <span id="wel-dev" class="dim">检测中…</span></div>
+      <!-- 版本行不留在固件卡里: 直连态固件卡整卡隐藏 (烧录要 /device, 直连够不着),
+           而版本两种模式都该显示。直连态要连上串口才读得到版本 (连过就记住,
+           见 VER_TXT 的 localStorage 说明) -->
+      <div class="row" id="wel-row-ver"><span>板上运行</span>
+        <span id="wel-ver" class="dim">—</span></div>
+      <div class="row" id="wel-row-hw"><span>硬件版本</span>
+        <span id="wel-hw" class="dim">—</span></div>
     </div>
 
     <div class="box" id="wel-fw-card">
       <h2>固件</h2>
-      <div class="row"><span>板上运行</span><span id="wel-ver" class="dim">—</span></div>
       <div id="wel-usb" class="dim">检测中…</div>
       <div class="row"><span>可烧录 .uf2</span><span id="wel-fw" class="dim">—</span></div>
       <div class="actions" style="margin-top:.6rem">
@@ -522,6 +528,34 @@
             <div class="box wide">
               <h2>电池电压曲线</h2>
               <canvas id="chart"></canvas>
+            </div>
+
+            <!-- IMU 曲线: 数据来自 !IMU 的四条原始传感器行 (1s 轮询, 见
+                 imu_status_print)。与电池曲线同一套历史缓冲与去重规则:
+                 值没变就不产生新点 (轮询帧会反复重发同一份快照)。 -->
+            <div class="box wide">
+              <h2>IMU 姿态曲线 (°)</h2>
+              <canvas id="ch-att"></canvas>
+            </div>
+
+            <div class="box wide">
+              <h2>加速度曲线 (0.01 m/s²)</h2>
+              <canvas id="ch-acc"></canvas>
+            </div>
+
+            <div class="box wide">
+              <h2>陀螺仪曲线 (1/16 dps)</h2>
+              <canvas id="ch-gyr"></canvas>
+            </div>
+
+            <div class="box wide">
+              <h2>磁力计曲线 (1/16 uT)</h2>
+              <canvas id="ch-mag"></canvas>
+            </div>
+
+            <div class="box wide">
+              <h2>温度曲线 (°C)</h2>
+              <canvas id="ch-tmp"></canvas>
             </div>
 
           </div>
@@ -666,6 +700,8 @@
 
   <div id="statusbar">
     <span id="rate" class="dim"></span>
+    <span id="fwver" class="dim"></span>
+    <span id="hwver" class="dim"></span>
     <span class="spacer"></span>
     <span class="dim">127.0.0.1:8080</span>
   </div>
@@ -741,7 +777,7 @@ function showTab(name) {
     t.classList.toggle("active", t.dataset.tab === name);
   for (const m of document.querySelectorAll(".tabpage"))
     m.hidden = (m.id !== "tab-" + name);
-  if (name === "dash") drawChart();   // canvas 在隐藏时 clientWidth=0, 需重画
+  if (name === "dash") drawAllCharts();   // canvas 在隐藏时 clientWidth=0, 需重画
   if (name === "log") logEl.scrollTop = logEl.scrollHeight;
   location.hash = name;               // 便于收藏/刷新回到同一页
 }
@@ -800,6 +836,114 @@ function drawChart() {
   ctx.fillStyle = cssvar("--surface-900"); ctx.font = `${u(11)}px ui-monospace, monospace`;
   ctx.fillText(`${Math.round(mx)} mV`, u(4), u(12));
   ctx.fillText(`${Math.round(mn)} mV`, u(4), h - u(4));
+}
+
+/* ---------------- IMU 曲线 (姿态/加速度/陀螺仪/磁力计/温度) ----------------
+   数据来自 !IMU 的输出 (1s 轮询): last: 行给姿态, 四条原始传感器行给其余。
+   轮询帧是累积快照 —— 一条 accel: 行到达后, 同一周期的后续帧还会再带一次
+   同样的 acc, 不去重的话曲线会以数倍速灌重复点, 900 点窗口几分钟就滚完。
+   副作用: 静止时值不变就不产生新点, 曲线停住 —— 诊断图就该是这样。 */
+const IMU_HIST = { att: [], acc: [], gyr: [], mag: [], tmp: [] };
+const IMU_PREV = { att: "", acc: "", gyr: "", mag: "", tmp: "" };
+
+/* 五张图的配置: canvas id / 历史缓冲键 / 各序列 [取值字段, 颜色, 图例名] */
+const IMU_CHARTS = [
+  { cv: "ch-att", key: "att", unit: "°", series: [
+      ["roll", "--primary-400", "roll"], ["pitch", "--success-400", "pitch"],
+      ["yaw", "--warning-400", "yaw"]] },
+  { cv: "ch-acc", key: "acc", unit: "", series: [
+      ["x", "--primary-400", "x"], ["y", "--success-400", "y"],
+      ["z", "--warning-400", "z"]] },
+  { cv: "ch-gyr", key: "gyr", unit: "", series: [
+      ["x", "--primary-400", "x"], ["y", "--success-400", "y"],
+      ["z", "--warning-400", "z"]] },
+  { cv: "ch-mag", key: "mag", unit: "", series: [
+      ["x", "--primary-400", "x"], ["y", "--success-400", "y"],
+      ["z", "--warning-400", "z"]] },
+  { cv: "ch-tmp", key: "tmp", unit: "°C", series: [["v", "--primary-400", "温度"]] },
+];
+
+/* 推一个点 (值没变就不推) 并重画对应那张图 */
+function pushHist(key, vals) {
+  const s = JSON.stringify(vals);
+  if (s === IMU_PREV[key]) return;
+  IMU_PREV[key] = s;
+  const h = IMU_HIST[key];
+  h.push(Object.assign({ t: Date.now() }, vals));
+  while (h.length > HIST_MAX) h.shift();
+  drawChartByKey(key);
+}
+
+function drawChartByKey(key) {
+  const cfg = IMU_CHARTS.find(c => c.key === key);
+  if (cfg) drawMultiChart(cfg);
+}
+
+/* 多序列曲线: 与 drawChart 同套 dpr 缩放/占位文案/极值标注, 但序列不定、
+   没有阈值虚线 (电池那些是电池独有的语义, 所以那边不合并进来) */
+function drawMultiChart(cfg) {
+  const cv = $(cfg.cv);
+  if (!cv) return;
+  const h = IMU_HIST[cfg.key];
+  const ctx = cv.getContext("2d");
+  const dpr = window.devicePixelRatio || 1;
+  const w = cv.clientWidth, ht = cv.clientHeight;
+  if (w === 0 || ht === 0) return;    // 隐藏页 (clientWidth=0) 不画
+  if (cv.width !== w * dpr || cv.height !== ht * dpr) {
+    cv.width = w * dpr; cv.height = ht * dpr;
+  }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, w, ht);
+  const u = (i) => i * (ht / 150);
+
+  if (h.length < 2) {
+    ctx.fillStyle = cssvar("--surface-700");
+    ctx.font = `${u(12)}px "Open Sans", "Noto Sans CJK SC", sans-serif`;
+    ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillText("等待遥测数据…", w / 2, ht / 2);
+    ctx.textAlign = "start"; ctx.textBaseline = "alphabetic";
+    return;
+  }
+
+  let mn = Infinity, mx = -Infinity;
+  for (const p of h)
+    for (const [k] of cfg.series) {
+      if (p[k] < mn) mn = p[k];
+      if (p[k] > mx) mx = p[k];
+    }
+  const pad = (mx - mn) * 0.15 || 1;   // 全等序列也不能除零 (|| 1 兜底)
+  mn -= pad; mx += pad;
+
+  const X = (i) => (i / (h.length - 1)) * w;
+  const Y = (v) => ht - ((v - mn) / (mx - mn)) * ht;
+
+  ctx.lineWidth = u(1.6);
+  for (const [k, color] of cfg.series) {
+    ctx.strokeStyle = cssvar(color);
+    ctx.beginPath();
+    h.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p[k])) : ctx.moveTo(X(i), Y(p[k])));
+    ctx.stroke();
+  }
+
+  ctx.fillStyle = cssvar("--surface-900"); ctx.font = `${u(11)}px ui-monospace, monospace`;
+  ctx.fillText(`${Math.round(mx)}${cfg.unit}`, u(4), u(12));
+  ctx.fillText(`${Math.round(mn)}${cfg.unit}`, u(4), ht - u(4));
+  /* 图例 (右对齐): 多条线得能分清谁是谁 */
+  ctx.textAlign = "right";
+  let lx = w - u(4);
+  for (let i = cfg.series.length - 1; i >= 0; i--) {
+    const [, color, label] = cfg.series[i];
+    ctx.fillStyle = cssvar(color);
+    ctx.fillText(label, lx, u(12));
+    lx -= ctx.measureText(label).width + u(10);
+  }
+  ctx.textAlign = "start";
+}
+
+/* 切页/出隐藏/改窗口大小时重画全部 (隐藏时 clientWidth=0 画不了, 出来要补) */
+function drawAllCharts() {
+  drawChart();
+  IMU_CHARTS.forEach(drawMultiChart);
 }
 
 /* ---------------- 状态面板渲染 ---------------- */
@@ -881,6 +1025,22 @@ function renderImu(d) {
     $("imu-calib").textContent =
       `${c.sys}/3 ${c.gyr}/3 ${c.acc}/3 ${c.mag}/3` + (d.fully ? " 完整" : "");
     $("imu-calib").className = d.fully ? "ok" : "warn";
+  }
+
+  /* 曲线: 帧是累积快照, 各序列按值去重 (见 IMU_HIST 处说明)。
+     掉线时清空 —— 否则曲线会一直画着拔线/关 IMU 之前的最后读数 */
+  if (d.available === false) {
+    let had = false;
+    for (const k in IMU_HIST) {
+      if (IMU_HIST[k].length) { IMU_HIST[k].length = 0; IMU_PREV[k] = ""; had = true; }
+    }
+    if (had) drawAllCharts();
+  } else {
+    if (d.roll !== undefined) pushHist("att", { roll: d.roll, pitch: d.pitch, yaw: d.yaw });
+    if (d.acc) pushHist("acc", d.acc);
+    if (d.gyr) pushHist("gyr", d.gyr);
+    if (d.mag) pushHist("mag", d.mag);
+    if (d.temp !== undefined) pushHist("tmp", { v: d.temp });
   }
 
   /* 校准页的同一份读数 (两页共用一次 !IMU 帧, 与舵机格子/总线摘要同一套路) */
@@ -2589,7 +2749,22 @@ let inDebug = false;
 let BRIDGE_UP = false;                       // 最近一次 hello/link 帧
 let SSE_OK = false;                          // 本页到服务器的 SSE 通不通
 let DEVS = { up: false, port: null, busy: false };
-let VER_TXT = "";                            // 板上固件版本 ([VER] 帧)
+
+/* 板上版本 ([VER]/[HW] 帧), 顺手存一份到 localStorage: 直连态的版本要连上
+   串口才读得到, 连过一次之后开始页才能立刻显示 (帧永远为准, 缓存只是先显示)。
+   try/catch: file:// 或隐私模式下 localStorage 会直接抛异常。 */
+const lsGet = (k) => { try { return localStorage.getItem(k) || ""; } catch (e) { return ""; } };
+const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+let VER_TXT = lsGet("hexapod_ver");          // 板上固件版本 ([VER] 帧)
+let HW_TXT = lsGet("hexapod_hw");            // 硬件版本 ([HW] 帧)
+
+/* 状态栏那对版本 (在 x 行/秒旁边): 每次版本帧到达刷新; 还不知道就留白 */
+function updateVerBar() {
+  const f = $("fwver"), h = $("hwver");
+  if (f) f.textContent = VER_TXT ? "固件 " + VER_TXT : "";
+  if (h) h.textContent = HW_TXT ? "硬件 " + HW_TXT : "";
+}
+updateVerBar();                              // 有缓存值时先显示, 不等帧
 
 function devText(d) {
   if (!d) return "检测中…";
@@ -2610,6 +2785,7 @@ function renderWelcome(msg) {
   $("wel-dev").className = BRIDGE_UP
     ? (DEVS.up ? "ok" : (DEVS.busy ? "warn" : "dim")) : "dim";
   $("wel-ver").textContent = VER_TXT || "—";
+  $("wel-hw").textContent = HW_TXT || "—";
   const can = BRIDGE_UP && DEVS.up;
   $("connectbtn").disabled = !can;
   $("wel-hint").textContent = msg || (!can
@@ -2648,7 +2824,7 @@ function enterDebugUI() {
   $("welcome").hidden = true;
   $("app").hidden = false;
   showTab(location.hash.slice(1) || "dash");
-  drawChart();          // 画布刚从 hidden 出来, 宽高得重算
+  drawAllCharts();      // 画布刚从 hidden 出来, 宽高得重算
 }
 
 async function enterDebug() {
@@ -2740,6 +2916,14 @@ function handleFrame(ev) {
       break;
     case "ver":
       VER_TXT = (ev.d && ev.d.text) || "";
+      lsSet("hexapod_ver", VER_TXT);
+      updateVerBar();
+      renderWelcome();
+      break;
+    case "hw":
+      HW_TXT = (ev.d && ev.d.text) || "";
+      lsSet("hexapod_hw", HW_TXT);
+      updateVerBar();
       renderWelcome();
       break;
     case "bridge": addLog(ev.msg, "l-ok"); welLog(ev.msg); break;
@@ -2808,6 +2992,11 @@ const RE_I2C_IDLE = /^Bus idle: SDA\(GP14\)=(\d) SCL\(GP15\)=(\d)/;
 const RE_IMU_AVAIL = /^available: (YES|NO)\s+addr: 0x([0-9A-F]{2})/;
 const RE_IMU_CALIB = /^calib: sys=(\d+) gyr=(\d+) acc=(\d+) mag=(\d+)(.*)$/;
 const RE_IMU_LAST = /^last: roll=(-?\d+) pitch=(-?\d+) yaw=(-?\d+).*valid=(\d)/;
+/* 原始传感器行 (固件 imu_status_print 随 !IMU 输出; 尾部不锚定, 单位标注改了不碎) */
+const RE_IMU_ACC = /^accel: x=(-?\d+) y=(-?\d+) z=(-?\d+)/;
+const RE_IMU_GYR = /^gyro: x=(-?\d+) y=(-?\d+) z=(-?\d+)/;
+const RE_IMU_MAG = /^mag: x=(-?\d+) y=(-?\d+) z=(-?\d+)/;
+const RE_IMU_TEMP = /^temp: (-?\d+)/;
 const RE_SERVO_BOARD = /^Board 0x([0-9A-F]{2}) \((\w+)\): (.*)$/;
 const RE_SERVO_ITEM = /\[(\d+)\]:(-?\d+)/g;
 const RE_CH_CRSF = /^\[CH\] m=crsf link=(\d) fc=(\d+) (.*)$/;
@@ -2819,6 +3008,7 @@ const RE_PARAM_KV = /(\w+)=(\S+)/g;
 const PARAM_NAME_OK = /^[a-z][a-z0-9_]{0,18}$/;      // 与固件 STORE_PARAM_NAME_LEN-1 一致
 const GROUP_NAME_OK = /^[a-z]{1,12}$/;
 const RE_VER = /^\[VER\] (.*)$/;
+const RE_HW = /^\[HW\] (.*)$/;
 const RE_ROBOT_PWR = /^Robot (ON|OFF)\b/;
 const RE_RUN_STATE = /^\[(RUN|IDLE)\]/;
 const RE_RUN_TRAVEL = /X:(-?\d+) Y:(-?\d+) Z:(-?\d+) Gait:(\d+) Lift:(\d+)/;
@@ -2864,7 +3054,7 @@ function newTelem() {
   return {
     batt: {}, i2c: {}, imu: {}, servo: {}, ch: {}, per: {},
     params: { list: {}, count: 0, changed: 0 },
-    ver: {}, rc: {}, ho: {}, ports: {}, run: {},
+    ver: {}, hw: {}, rc: {}, ho: {}, ports: {}, run: {},
   };
 }
 
@@ -2891,6 +3081,9 @@ function parseLine(t, line) {
 
   let m = RE_VER.exec(line);
   if (m) return ["ver", telemUpdate(t, "ver", { text: m[1] })];
+
+  m = RE_HW.exec(line);
+  if (m) return ["hw", telemUpdate(t, "hw", { text: m[1] })];
 
   m = RE_RC.exec(line);
   if (m) return ["rc", telemUpdate(t, "rc", { locked: m[1] === "locked" })];
@@ -2997,6 +3190,25 @@ function parseLine(t, line) {
   if (m) return ["imu", telemUpdate(t, "imu", {
     roll: +m[1], pitch: +m[2], yaw: +m[3], valid: +m[4],
   })];
+
+  /* 原始传感器行: 仍进 imu 子系统 (与 server.py 同形) */
+  m = RE_IMU_ACC.exec(line);
+  if (m) return ["imu", telemUpdate(t, "imu", {
+    acc: { x: +m[1], y: +m[2], z: +m[3] },
+  })];
+
+  m = RE_IMU_GYR.exec(line);
+  if (m) return ["imu", telemUpdate(t, "imu", {
+    gyr: { x: +m[1], y: +m[2], z: +m[3] },
+  })];
+
+  m = RE_IMU_MAG.exec(line);
+  if (m) return ["imu", telemUpdate(t, "imu", {
+    mag: { x: +m[1], y: +m[2], z: +m[3] },
+  })];
+
+  m = RE_IMU_TEMP.exec(line);
+  if (m) return ["imu", telemUpdate(t, "imu", { temp: +m[1] })];
 
   m = RE_SERVO_BOARD.exec(line);
   if (m) {
@@ -3365,6 +3577,7 @@ function renderWelcomeDirect(msg) {
                             : (ok ? "未选择串口" : "—");
   $("wel-dev").className = Direct.active ? "ok" : "dim";
   $("wel-ver").textContent = VER_TXT || "—";
+  $("wel-hw").textContent = HW_TXT || "—";
   $("connectbtn").disabled = !ok || Direct.active || Direct.busy;
   $("wel-hint").textContent = msg || (!ok
     ? "这个浏览器用不了 Web Serial：换 Chrome / Edge，或在本机跑 "
@@ -3581,7 +3794,7 @@ function startApp() {
   detectMode().then(pick);
 }
 
-window.addEventListener("resize", drawChart);
+window.addEventListener("resize", drawAllCharts);
 showTab(location.hash.slice(1) || "dash");   // 必须在 cv/hist 初始化之后
 startApp();
 </script>

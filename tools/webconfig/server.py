@@ -90,6 +90,16 @@ RE_IMU_AVAIL = re.compile(r"^available: (YES|NO)\s+addr: 0x([0-9A-F]{2})")
 RE_IMU_CALIB = re.compile(r"^calib: sys=(\d+) gyr=(\d+) acc=(\d+) mag=(\d+)(.*)$")
 RE_IMU_LAST = re.compile(r"^last: roll=(-?\d+) pitch=(-?\d+) yaw=(-?\d+).*valid=(\d)")
 
+# 原始传感器行 (固件 imu_status_print, 随 !IMU 1s 轮询输出; 数值可为负):
+#   accel: x=12 y=5 z=-1002 (0.01 m/s2) / gyro: x=.. (1/16 dps)
+#   mag: x=.. (1/16 uT) / temp: 31 (C)
+# 尾部不锚定: 单位标注改了也不碎解析。开头 ^ 锚定防串线 (这几个前缀
+# 在固件输出里唯一)。曲线只关心数值, 单位由前端标注。
+RE_IMU_ACC = re.compile(r"^accel: x=(-?\d+) y=(-?\d+) z=(-?\d+)")
+RE_IMU_GYR = re.compile(r"^gyro: x=(-?\d+) y=(-?\d+) z=(-?\d+)")
+RE_IMU_MAG = re.compile(r"^mag: x=(-?\d+) y=(-?\d+) z=(-?\d+)")
+RE_IMU_TEMP = re.compile(r"^temp: (-?\d+)")
+
 RE_SERVO_BOARD = re.compile(r"^Board 0x([0-9A-F]{2}) \((\w+)\): (.*)$")
 RE_SERVO_ITEM = re.compile(r"\[(\d+)\]:(-?\d+)")
 
@@ -135,9 +145,11 @@ RE_PARAM_KV = re.compile(r"(\w+)=(\S+)")
 # 放宽只是让非法名字走到固件去吃 FAIL, 收紧则会拒掉合法参数。
 PARAM_NAME_OK = re.compile(r"^[a-z][a-z0-9_]{0,18}$")
 
-# 固件版本 (开机横幅 + !VER 命令共用一行):
+# 固件版本 (开机横幅 + !VER 命令共用两行):
 #   [VER] Hexapod v0.3.0-16-g8f5b04f-dirty
+#   [HW] PCB v2
 RE_VER = re.compile(r"^\[VER\] (.*)$")
+RE_HW = re.compile(r"^\[HW\] (.*)$")
 
 # 设备在线状态 —— 由 serial_console.py 发布 (桥接连着 ≠ 机器人在线):
 #   [TCP] dev on /dev/ttyACM0    设备已打开
@@ -198,6 +210,7 @@ class Telemetry:
             "per": {},
             "params": {"list": {}, "count": 0, "changed": 0},
             "ver": {},
+            "hw": {},          # 硬件版本: {"text": "PCB v2"}
             "rc": {},          # 遥控门: {"locked": bool}
             "ho": {},          # 舵盘偏移: {"offs": {id: 0.1°}}
             "ports": {},       # 端口: 每节一个键 (uart0/input/motors/foot/ext/gpio/fixed)
@@ -257,6 +270,10 @@ def parse_line(telem, line):
     m = RE_VER.match(line)
     if m:
         return "ver", telem.update("ver", {"text": m.group(1)})
+
+    m = RE_HW.match(line)
+    if m:
+        return "hw", telem.update("hw", {"text": m.group(1)})
 
     m = RE_RC.match(line)
     if m:
@@ -383,6 +400,28 @@ def parse_line(telem, line):
             "roll": int(m.group(1)), "pitch": int(m.group(2)),
             "yaw": int(m.group(3)), "valid": int(m.group(4)),
         })
+
+    m = RE_IMU_ACC.match(line)
+    if m:
+        return "imu", telem.update("imu", {
+            "acc": {"x": int(m.group(1)), "y": int(m.group(2)), "z": int(m.group(3))},
+        })
+
+    m = RE_IMU_GYR.match(line)
+    if m:
+        return "imu", telem.update("imu", {
+            "gyr": {"x": int(m.group(1)), "y": int(m.group(2)), "z": int(m.group(3))},
+        })
+
+    m = RE_IMU_MAG.match(line)
+    if m:
+        return "imu", telem.update("imu", {
+            "mag": {"x": int(m.group(1)), "y": int(m.group(2)), "z": int(m.group(3))},
+        })
+
+    m = RE_IMU_TEMP.match(line)
+    if m:
+        return "imu", telem.update("imu", {"temp": int(m.group(1))})
 
     m = RE_SERVO_BOARD.match(line)
     if m:
