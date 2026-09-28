@@ -46,8 +46,10 @@ cd pico/build && make -j$(nproc)
 编译产物 `hexapod_pico.uf2` 拖入 Pico 的 USB 盘即烧录；Linux 下可免按键：
 `picotool load -f -x build/hexapod_pico.uf2`（运行中的固件会被软复位进 BOOTSEL）。
 调试控制台：`python3 tools/serial_console.py`（自动连接、断线重连）。
-网页配置台：`python3 tools/webconfig/server.py` → 浏览器开 `127.0.0.1:8080`
-（打开先是**开始页**：只看硬件是否在线、机器人跑的是什么固件，并可一键烧录新固件；
+网页配置台：`tools/webconfig/run.sh start` → 浏览器开 `127.0.0.1:8080`
+（同一个脚本还有 `stop`/`restart`/`status`/`logs`，重启＝先终止旧进程再起新的；
+它只管这个 HTTP 服务，不碰串口桥。不经脚本直接跑 `python3 tools/webconfig/server.py` 也一样。
+打开先是**开始页**：只看硬件是否在线、机器人跑的是什么固件，并可一键烧录新固件；
 检测到设备后点「连接」才进调试页 —— 状态: 实时电压/I2C/IMU/舵机角度 · 参数按功能
 分页（步态/姿态/几何/遥控/模式/电源/平衡/控制/外设/端口）: 滑条改参数并写 flash ·
 几何: 腿长/站高/舵机零位/安装角/偏移（重启生效）· 遥控: 输入源切换 +
