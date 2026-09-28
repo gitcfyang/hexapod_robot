@@ -3,11 +3,14 @@ name: Publish web configurator (Web Serial 直连)
 # 把单文件页面发布到 GitHub Pages: 板子插在用户自己电脑上时, 打开这个网址
 # 点「连接」就能调参数, 不装任何东西 (浏览器 Web Serial 直接读写 USB CDC)。
 #
-# Pages 站点由工作流自己启用 (configure-pages 的 enablement: true): 站点没建过时
-# 头一次跑会顺手建好并把 Source 指到 GitHub Actions —— 否则 deploy-pages 会以
-# 「Get Pages site failed」失败 (仓库没开 Pages 时就是这个错)。
-# 若仓库策略禁止 Actions 建站点, 才需要手动去 Settings → Pages → Source 选
-# "GitHub Actions" (选 Deploy from a branch 的话本工作流跑完也不会发布)。
+# ⚠️ 首次部署要在仓库里手动开一次 Pages: Settings → Pages → Build and deployment
+# → Source 选 "GitHub Actions" (选 Deploy from a branch 的话本工作流跑完也不发布)。
+# 实测 (2026-09-28): configure-pages 的 `enablement: true` **建不了**站点 —— 建站
+# 要的权限比 GITHUB_TOKEN 能拿到的多, 报 "Resource not accessible by integration"
+# (建站 = POST /repos/{owner}/{repo}/pages, 见 docs.github.com/rest/pages/pages)。
+# 站点建好之后这一段不再起作用 (它先 GET, 只有 404 才去建), 所以留着无害。
+# 站点不存在时的症状有两个: configure-pages 报「Get Pages site failed」, 或
+# 上面那条 Resource not accessible。
 #
 # ⚠️ Pages 有约 10 分钟缓存: 推送后刷不出新版先等等, 不是没发出去。
 

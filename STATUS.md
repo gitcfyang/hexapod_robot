@@ -1029,7 +1029,11 @@ Pico ──USB CDC──> 浏览器 ── 页面内解析 ──> 同一套渲�
 - `tools/webconfig/flasher.py` — 设备检测 (扫 /sys) + picotool 烧录; 只此一处碰 USB
 - `tools/webconfig/index.html` — 单页应用 (零依赖, 无构建步骤; 服务模式与直连模式共用)
 - `tools/webconfig/test_webconfig.py` — 363 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延、页面脚本执行与合成帧探针、直连解析器与 server 的逐帧差分、正则同源检查; 无 headless 浏览器时页面那几项自动跳过)
-- `.github/workflows/pages.yml` — 把 index.html 发布到 GitHub Pages (直连模式的托管)
+- `.github/workflows/pages.yml` — 把 index.html 发布到 GitHub Pages (直连模式的托管)。
+  **首次要在仓库里手动开一次**: Settings → Pages → Source 选 "GitHub Actions"。
+  工作流自己建不了站点 —— `configure-pages` 的 `enablement: true` 实测被
+  `Resource not accessible by integration` 挡下 (建站要的权限比 GITHUB_TOKEN
+  能拿到的多, 2026-09-28 实测), 站点建好之后才轮到它发布
 - `tools/webconfig/run.py` / `run.sh` — 本地服务启停 (start/stop/restart/status/logs)
 
 ```bash
