@@ -1,5 +1,8 @@
 name: Build and Release
 
+# 打 tag 时用 annotated 形式 (git tag -a v0.4.0 -m "..."): git describe 默认**忽略
+# 轻量标签**, 轻量 tag 会让固件版本串退回「上一个 tag + 距离 + 短哈希」而不是
+# v0.4.0 (2026-09-28 实测, 见 pico/cmake/gen_version.cmake)。
 on:
   push:
     tags:
@@ -14,6 +17,12 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          # 固件版本串来自构建时的 git describe, 而浅克隆 (默认 depth 1) 里没有 tag:
+          # 编出来的 uf2 会报裸短哈希而不是版本号 (实测 depth=1 → "4ea5744",
+          # 拉全历史 + annotated tag → "v0.4.0")。这个串会显示在网页/串口的
+          # 启动横幅上, 是"板上跑的到底是不是刚发的这版"的唯一凭据。
+          fetch-depth: 0
 
       - name: Install ARM GCC toolchain
         run: |
@@ -34,8 +43,13 @@ jobs:
       - name: Upload firmware and hardware files to Release
         uses: softprops/action-gh-release@v2
         with:
+          # 面向使用者的要点写在 .github/release-body.md (每次发版改那一个文件);
+          # generate_release_notes 生成的提交清单由 GitHub 接在要点之后
+          body_path: .github/release-body.md
+          generate_release_notes: true
           files: |
             pico/build/hexapod_pico.uf2
+            tools/webconfig/index.html
             hardware/pcb/board/gerber/*.zip
             hardware/pcb/schematic.pdf
             hardware/pcb/board/assembly/*.csv

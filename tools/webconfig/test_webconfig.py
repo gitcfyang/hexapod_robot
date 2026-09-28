@@ -1880,6 +1880,30 @@ def test_pages_workflow():
           "enablement: true" in y)
 
 
+def test_release_workflow():
+    """发固件的那条工作流: 版本串/发布说明/附件 —— 都是错了要等下一次发版才发现的东西"""
+    wf = os.path.join(ROOT, ".github", "workflows", "release.yml")
+    check("Release 工作流存在", os.path.isfile(wf), wf)
+    if not os.path.isfile(wf):
+        return
+    y = open(wf, encoding="utf-8").read()
+    check("Release 工作流按 v* tag 触发", "tags:" in y and "'v*'" in y)
+    # 固件版本串是构建时 git describe 出来的 (pico/cmake/gen_version.cmake),
+    # 而浅克隆里没有 tag —— 实测 depth=1 编出来是 "4ea5744", 拉全才是 "v0.4.0"。
+    # 这个串是"板上跑的到底是不是刚发的这版"的唯一凭据, 错了很难发现
+    check("Release 检出拉全历史 (否则 uf2 版本串是裸短哈希, 不是 v0.4.0)",
+          "fetch-depth: 0" in y)
+    check("Release 注释写明 tag 要 annotated (git describe 不认轻量标签)",
+          "annotated" in y)
+    check("Release 说明 = 要点文件 + 自动提交清单",
+          "body_path: .github/release-body.md" in y
+          and "generate_release_notes: true" in y)
+    body = os.path.join(ROOT, ".github", "release-body.md")
+    check("发布要点文件存在 (发版时改它, 内容面向使用者)", os.path.isfile(body), body)
+    check("Release 附件含固件与网页配置台 (单文件, 下载双击即用)",
+          "pico/build/hexapod_pico.uf2" in y and "tools/webconfig/index.html" in y)
+
+
 def wait_dev(port, up, timeout=20):
     """等 /state 里的设备在线状态变成 up"""
     end = time.time() + timeout
@@ -2507,6 +2531,7 @@ def main():
 
     test_direct_contract()
     test_pages_workflow()
+    test_release_workflow()
 
     print("\n[5] 页面脚本 (无头浏览器)")
     test_page_js()
