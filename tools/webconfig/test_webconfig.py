@@ -98,6 +98,7 @@ S_I2C_Q = [
 S_IMU = [
     "=== IMU Status ===",
     "available: YES  addr: 0x29",
+    "fail: 连续 3 次 (已持续 31ms) / 累计 9 次",   # 块内唯一的故障信号, 折叠时放行
     "calib: sys=3 gyr=3 acc=3 mag=0 (fully)",
     "INT_STA=0x80 (bit7=BSX_DRDY)",
     # 原始传感器行 (imu_status_print): 每行挑一个负轴, 钉住 -?\d+ 的负号分支
@@ -396,14 +397,24 @@ def test_firmware_contract():
     check("固件版本应答带 [HW] 行, 硬件版本来自 config.h 常量",
           '"[HW] %s\\r\\n"' in hal and "HEXAPOD_HW_VERSION" in hal
           and '#define HEXAPOD_HW_VERSION "PCB v2"' in cfg)
+    def _imu_fixture(prefix):
+        """夹具里那条以 prefix 开头的行 (按内容找, 不按下标 —— 表格增删行时不碎)"""
+        return next(l for l in S_IMU if l.startswith(prefix))
+
     check("固件 !IMU 输出四条原始传感器行 (前缀与解析正则对齐)",
           all(f'"{k}: x=%d y=%d z=%d' in hal
               for k in ("accel", "gyro", "mag"))
           and '"temp: %d' in hal
-          and wc.RE_IMU_ACC.match(S_IMU[4]) is not None
-          and wc.RE_IMU_GYR.match(S_IMU[5]) is not None
-          and wc.RE_IMU_MAG.match(S_IMU[6]) is not None
-          and wc.RE_IMU_TEMP.match(S_IMU[7]) is not None)
+          and wc.RE_IMU_ACC.match(_imu_fixture("accel:")) is not None
+          and wc.RE_IMU_GYR.match(_imu_fixture("gyro:")) is not None
+          and wc.RE_IMU_MAG.match(_imu_fixture("mag:")) is not None
+          and wc.RE_IMU_TEMP.match(_imu_fixture("temp:")) is not None)
+    # 日志面板折叠的边界就是这个块的表头/页脚, 一字之差折叠静默失效 (面板又回到
+    # 25 行/秒); 块内放行的故障行前缀 "fail:" 也得是固件那行的开头
+    check("IMU 状态块折叠边界与固件打印一字不差 (表头/页脚/块内故障行前缀)",
+          f'"{IMU_BLOCK_HEAD}\\r\\n"' in hal
+          and f'"{IMU_BLOCK_TAIL}\\r\\n"' in hal
+          and _imu_fixture("fail:").startswith("fail:"))
     # 驱动侧: 寄存器地址 (BNO055 数据手册 Page 0) 与四个读函数, 以及单位注释 ——
     # 单位错了曲线还在画, 只是数值全错, 比不画更难发现
     bno_h = open(BNO_H, encoding="utf-8").read()
@@ -675,6 +686,32 @@ def fake_cfg(cmd):
         out.append(f"[P] WARN {name} clamped {want} -> {got} (范围 {row[1]}~{row[2]})")
     out.append(param_line(name))                          # 回显实际生效值
     return out
+
+
+def test_imu_block_fold():
+    """IMU 状态块的折叠状态机 (server.py 的 imu_block_fold, 页面同款)。
+
+    测的是真函数 (不是抄一份): 四个角 —— 块外不折、表头到页脚之间折、块内的
+    fail: 行放行、页脚没等到时按上限兜底 (一次半行丢失不能把日志永久堵死)。"""
+    f = wc.imu_block_fold
+    st, fold = f(0, "calib: sys=3 gyr=3 acc=3 mag=0")
+    check("块外: 不折叠", (st, fold) == (0, False), f"st={st} fold={fold}")
+    st, fold = f(st, IMU_BLOCK_HEAD)
+    check("表头: 进块, 且表头自己不显示", st == 1 and fold is True, f"st={st} fold={fold}")
+    st, fold = f(st, "INT_STA=0x80 (bit7=BSX_DRDY)")
+    check("块内杂项行 (INT_STA 等): 折叠", st == 2 and fold is True, f"st={st} fold={fold}")
+    st, fold = f(st, "fail: 连续 3 次 (已持续 31ms) / 累计 9 次")
+    check("块内的 fail: 行: 放行 (折叠不藏故障)", st == 3 and fold is False, f"st={st} fold={fold}")
+    st, fold = f(st, IMU_BLOCK_TAIL)
+    check("页脚: 出块, 且页脚自己不显示", (st, fold) == (0, True), f"st={st} fold={fold}")
+    st, fold = f(st, "[IMU] 读连续失败 20 次 (约 210ms, 累计 57 次) → 总线恢复")
+    check("出块后的 [IMU] 警告行: 不折叠 (它本来就在块外)", (st, fold) == (0, False))
+    st = 1
+    for _ in range(IMU_BLOCK_MAX):
+        st, fold = f(st, "表头之后页脚迟迟不来")
+    check("页脚丢失: 到上限自己出块, 别把日志面板堵死", (st, fold) == (0, True), f"st={st}")
+    st, fold = f(st, "兜底出块之后的行照常显示")
+    check("兜底出块后的行: 不折叠", (st, fold) == (0, False))
 
 
 def test_parser():
@@ -1598,6 +1635,11 @@ DIRECT_LINES = (S_VER + S_BATT + S_BATT_ABSENT + S_I2C + S_I2C_Q + S_IMU
 # 解析出来的行不再当 raw 重发 (server.py on_line 与页面 RAW_SKIP 各一份)
 RAW_SKIP = ["params", "per", "ch", "imu", "rc", "run", "ho", "ports"]
 
+# IMU 状态块整块折叠 (server.py 的 IMU_BLOCK_* 与页面同名常量各一份, 必须同值)
+IMU_BLOCK_HEAD = "=== IMU Status ==="
+IMU_BLOCK_TAIL = "==================="
+IMU_BLOCK_MAX = 16
+
 
 def _first_diff(a, b):
     """差分报告: 第一处不一致的帧 (整表 diff 打出来没人看得懂)"""
@@ -1612,14 +1654,16 @@ def _first_diff(a, b):
 
 
 def _python_frames(lines):
-    """server.py 的解析路径 (parse_line + on_line 的 raw 白名单)。
+    """server.py 的解析路径 (块折叠 + parse_line + on_line 的 raw 白名单)。
     每帧当场冻结成 JSON 树: 广播出去的就是那一刻的字节, 之后同引用的快照
     (params/servo/u0) 再被改写, 也不该回头改已经发出去的那一帧。"""
     t = wc.Telemetry()
     out = []
+    imu_block = 0
     for line in lines:
+        imu_block, folded = wc.imu_block_fold(imu_block, line)   # 真的那份, 不抄
         parsed = wc.parse_line(t, line)
-        if not (parsed and parsed[0] in RAW_SKIP):
+        if not folded and not (parsed and parsed[0] in RAW_SKIP):
             out.append(json.loads(json.dumps({"t": "raw", "line": line})))
         if parsed:
             out.append(json.loads(json.dumps({"t": parsed[0], "d": parsed[1]})))
@@ -1857,17 +1901,22 @@ def test_direct_engine():
                                 "[CH]", "[RC]", "[RUN]", "[IDLE]", "[U0]",
                                 "[U0TX]", "Robot "))
                   for r in raws), str(raws[:3]))
-    # IMU 数据行同理: 5Hz × 十来行会把 600 行日志面板十几秒冲干净。留在日志里的
-    # 是**没有解析器**的 IMU 杂项行 (表头/INT_STA/INT cfg/SW rev/页脚) —— 与
-    # "[P] WARN 认不出来就进日志" 同一原则, 别顺手把它们也藏了
-    check("raw 白名单: IMU 数据行不进日志 (5Hz 推送)",
+    # IMU 输出在日志面板里的另一半: 状态块 (=== IMU Status === … =============)
+    # 整块折叠 —— 表头到页脚之间是没有解析器的杂项行 (表头/INT_STA/INT cfg/
+    # SW rev/页脚), 5Hz 下合计 25 行/秒, 600 行面板二十几秒冲干净。折叠只压噪
+    # 不藏故障, 所以块内的 fail: 行与块外的 [IMU] 警告行各有专门一条钉着。
+    check("raw: IMU 数据行不进日志 (5Hz 推送; 块折叠之外的兜底白名单)",
           not any(r.startswith(("calib:", "accel:", "gyro:", "mag:", "temp:",
                                 "last:", "available:")) for r in raws),
           str([r for r in raws if r.startswith(("calib:", "accel:", "last:"))][:3]))
-    check("raw 白名单: 没有解析器的 IMU 杂项行 (INT_STA 等) 照旧进日志",
-          any(r.startswith("INT_STA=") for r in raws),
-          str([r for r in raws if r.startswith(("INT_STA", "SW rev"))][:2]))
-    check("raw 白名单: 固件看门狗的 [IMU] 警告行照常进日志 (认不出来 = 进日志)",
+    check("raw: IMU 状态块整块折叠 (表头/INT_STA/INT cfg/SW rev/页脚都不进日志)",
+          not any(r.startswith(("=== IMU Status ===", "INT_STA=", "INT cfg readback:",
+                                "SW rev:", "===================")) for r in raws),
+          str([r for r in raws if r.startswith(("INT_STA", "SW rev", "==="))][:3]))
+    check("raw: 块内的 fail: 行放行 (折叠不藏故障)",
+          any(r.startswith("fail: 连续 3 次") for r in raws),
+          str([r for r in raws if r.startswith("fail:")][:2]))
+    check("raw: 固件看门狗的 [IMU] 警告行照常进日志 (在块外, 认不出来 = 进日志)",
           any(r.startswith("[IMU] 读连续失败") for r in raws),
           str([r for r in raws if r.startswith("[IMU]")][:3]))
     check("raw 白名单: 认不出来的行原样进日志",
@@ -2054,6 +2103,27 @@ def test_direct_contract():
     js_kinds = [x.strip().strip('"') for x in m_js.group(1).split(",") if x.strip()]
     check("raw 白名单同表 (server on_line 与页面 RAW_SKIP)",
           kinds == js_kinds == RAW_SKIP, f"server={kinds} 页面={js_kinds}")
+
+    # IMU 状态块折叠: 常量两边同值 (差一个字符就一边折一边不折, 用户只看到"日志
+    # 有时吵有时不吵"), 且折叠必须挂在 raw 那条路径上 —— 折叠只能挡日志面板,
+    # 挡了解析就等于曲线没有数据
+    def _block_consts(text):
+        out = {}
+        for name in ("IMU_BLOCK_HEAD", "IMU_BLOCK_TAIL"):
+            m = re.search(name + r'\s*=\s*"([^"]*)"', text)
+            out[name] = m.group(1) if m else None
+        m = re.search(r"IMU_BLOCK_MAX\s*=\s*(\d+)", text)
+        out["IMU_BLOCK_MAX"] = int(m.group(1)) if m else None
+        return out
+    py_b, js_b = _block_consts(srv), _block_consts(src)
+    check("IMU 状态块常量两边同值 (server 与页面)",
+          py_b == js_b == {"IMU_BLOCK_HEAD": IMU_BLOCK_HEAD,
+                           "IMU_BLOCK_TAIL": IMU_BLOCK_TAIL,
+                           "IMU_BLOCK_MAX": IMU_BLOCK_MAX},
+          f"server={py_b} 页面={js_b}")
+    check("IMU 状态块折叠挂在日志路径上, 解析照走 (folded 只进 raw 的判断)",
+          "if not folded and not (parsed" in srv
+          and "if (!folded && !(parsed" in src)
 
     # !IMU 轮询间隔: 直连态 (页面 iv.imu) 与 server 态 (--imu-interval 默认) 同值,
     # 否则同一块板在两种模式下"跟手程度"不一样, 而用户看不出是模式差异
@@ -2418,6 +2488,7 @@ def main():
         return
 
     test_parser()
+    test_imu_block_fold()
     test_param_parser()
     test_firmware_contract()
     test_launcher_contract()
