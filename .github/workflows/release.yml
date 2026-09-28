@@ -44,6 +44,24 @@ jobs:
         working-directory: pico/build
         run: make -j$(nproc)
 
+      - name: Append commit list to release body
+        # generate_release_notes 对没有 PR 的提交只给一行 compare 链接, 逐条清单
+        # 自己接: 上一个 tag 到本 tag 的提交跟要点拼在同一个文件里 (发布说明 =
+        # 要点 + 清单, 清单由这里生成)。上一个 tag 取自 git tag -l 而不是
+        # git describe —— 实测 CI 里 describe 连刚推的 tag 都认不出 (见上面注释),
+        # 挑上一版这种活儿不能再交给它
+        run: |
+          set -eu
+          prev=$(git tag -l 'v*' --sort=-v:refname | grep -vx "${GITHUB_REF_NAME}" | head -1 || true)
+          {
+            echo
+            echo "**提交 (${prev:-仓库起始} → ${GITHUB_REF_NAME})**"
+            echo
+            git log --oneline --no-decorate "${prev:+${prev}..}HEAD" | sed 's/^/- /'
+          } >> .github/release-body.md
+          echo "接上了 ${prev:-仓库起始} → ${GITHUB_REF_NAME} 的提交清单:"
+          tail -5 .github/release-body.md
+
       - name: Upload firmware and hardware files to Release
         uses: softprops/action-gh-release@v2
         with:

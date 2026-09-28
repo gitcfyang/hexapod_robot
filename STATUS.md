@@ -1032,10 +1032,12 @@ Pico ──USB CDC──> 浏览器 ── 页面内解析 ──> 同一套渲�
 - `tools/webconfig/server.py` — 桥接客户端 + SSE 广播 + 静态服务 + 轮询调度
 - `tools/webconfig/flasher.py` — 设备检测 (扫 /sys) + picotool 烧录; 只此一处碰 USB
 - `tools/webconfig/index.html` — 单页应用 (零依赖, 无构建步骤; 服务模式与直连模式共用)
-- `tools/webconfig/test_webconfig.py` — 374 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延、页面脚本执行与合成帧探针、直连解析器与 server 的逐帧差分、正则同源检查; 无 headless 浏览器时页面那几项自动跳过)
+- `tools/webconfig/test_webconfig.py` — 379 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延、页面脚本执行与合成帧探针、直连解析器与 server 的逐帧差分、正则同源检查; 无 headless 浏览器时页面那几项自动跳过)
 - `.github/workflows/release.yml` — 打 annotated tag (`git tag -a v0.4.0 -m ...`) 时编固件发 Release:
   附件 = uf2 + index.html + 硬件文件, 说明 = `.github/release-body.md` (面向使用者, 发版改它)
-  再接一段 GitHub 自动提交清单; 固件版本串由工作流指定为 tag 名 (`-DHEXAPOD_FW_GIT_OVERRIDE`,
+  后面接一段提交清单 —— GitHub 的自动清单对没有 PR 的提交只有一行 compare 链接 (实测),
+  逐条清单由工作流自己 `git log 上一版..本 tag` 接上 (上一版取自 `git tag -l`, 不靠
+  `git describe`: 它在 CI 里认不出刚推的 tag, 见下面「启动行为」); 固件版本串由工作流指定为 tag 名 (`-DHEXAPOD_FW_GIT_OVERRIDE`,
   理由见上面「启动行为」)。打 tag 前先把 `pico/CMakeLists.txt` 的
   `pico_set_program_version` 改成同一个号 (picotool 元数据, 不吃 tag)
 - `.github/workflows/pages.yml` — 把 index.html 发布到 GitHub Pages (直连模式的托管)。

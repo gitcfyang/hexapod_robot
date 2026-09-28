@@ -1904,6 +1904,76 @@ def test_release_workflow():
           "pico/build/hexapod_pico.uf2" in y and "tools/webconfig/index.html" in y)
 
 
+def _yaml_step_script(y, name):
+    """从工作流文本里抠出某个 step 的 run: | 脚本 (不引第三方 YAML 库)"""
+    lines = y.splitlines()
+    start = next((i for i, l in enumerate(lines)
+                  if l.strip() == f"- name: {name}"), None)
+    if start is None:
+        return None
+    out, inrun, indent = [], False, 0
+    for l in lines[start + 1:]:
+        if not inrun:
+            if l.strip().startswith("run: |"):
+                inrun, indent = True, len(l) - len(l.lstrip()) + 2
+            elif l.strip().startswith("- name:"):
+                return None
+        else:
+            if l.strip() and (len(l) - len(l.lstrip())) < indent:
+                break
+            out.append(l[indent:] if len(l) > indent else "")
+    return "\n".join(out) if inrun else None
+
+
+def test_release_body_step():
+    """发布说明的提交清单: 实跑工作流里那段脚本 (在共享克隆里跑, 不动工作区)"""
+    wf = os.path.join(ROOT, ".github", "workflows", "release.yml")
+    if not os.path.isfile(wf):
+        check("Release 工作流存在 (清单步)", False, wf)
+        return
+    y = open(wf, encoding="utf-8").read()
+    script = _yaml_step_script(y, "Append commit list to release body")
+    check("Release 有「接提交清单」一步", bool(script))
+    if not script:
+        return
+    # 顺序: 清单得在发布那一步之前写进 body 文件, 否则发出去的说明里没有清单
+    check("清单步排在发布步之前",
+          y.index("Append commit list to release body") < y.index("softprops/action-gh-release"))
+    # 当前 tag 取本地最新那个 v* tag (测试跑在仓库任意状态上都不该假红)
+    t = subprocess.run(["git", "tag", "-l", "v*", "--sort=-v:refname"],
+                       cwd=ROOT, capture_output=True, text=True)
+    tags = [x for x in t.stdout.split() if x]
+    if len(tags) < 2:
+        print("  (v* tag 不足两个, 清单步实跑跳过)")
+        return
+    cur, prev = tags[0], tags[1]
+    tmp = "/tmp/wc_release_clone"
+    subprocess.run(["rm", "-rf", tmp], check=False)
+    r = subprocess.run(["git", "clone", "-q", "--shared", "--no-checkout", ROOT, tmp],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        check("共享克隆建得起来 (清单步实跑)", False, r.stderr.strip()[:120])
+        return
+    subprocess.run(["git", "-C", tmp, "checkout", "-q", "HEAD", "--", ".github"], check=False)
+    env = dict(os.environ, GITHUB_REF_NAME=cur)
+    r = subprocess.run(["bash", "-c", script], cwd=tmp, env=env,
+                       capture_output=True, text=True)
+    check("清单步脚本能跑通 (bash -e, 实测)", r.returncode == 0,
+          (r.stderr or r.stdout).strip()[-160:])
+    body = open(os.path.join(tmp, ".github", "release-body.md"), encoding="utf-8").read()
+    want = subprocess.run(["git", "-C", tmp, "log", "--oneline", "--no-decorate",
+                           f"{prev}..HEAD"], capture_output=True, text=True).stdout.splitlines()
+    # 只数「提交」段里的行: 上面的要点本身就是个项目符号列表, 混在一起会数错
+    marker = f"**提交 ({prev} → {cur})**"
+    seg = body.split(marker, 1)[1] if marker in body else ""
+    got = [l for l in seg.splitlines() if l.strip()]
+    check(f"清单里是本版新增的提交 ({prev}..{cur} 共 {len(want)} 条)",
+          got == ["- " + w for w in want],
+          f"body 里 {len(got)} 条, git log 给 {len(want)} 条")
+    check("清单不影响原有要点 (要点仍在 body 开头)",
+          body.lstrip().startswith("**这一版最大的变化"))
+
+
 def test_fw_version():
     """固件版本串怎么来的 —— 实跑 pico/cmake/gen_version.cmake 两种入口
 
@@ -2575,6 +2645,7 @@ def main():
     test_direct_contract()
     test_pages_workflow()
     test_release_workflow()
+    test_release_body_step()
     test_fw_version()
 
     print("\n[5] 页面脚本 (无头浏览器)")
