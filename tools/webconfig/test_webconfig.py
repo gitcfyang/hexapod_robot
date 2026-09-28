@@ -415,6 +415,29 @@ def test_firmware_contract():
           f'"{IMU_BLOCK_HEAD}\\r\\n"' in hal
           and f'"{IMU_BLOCK_TAIL}\\r\\n"' in hal
           and _imu_fixture("fail:").startswith("fail:"))
+    # I2C 检测块的折叠边界同理 (前缀): 表头带 (SDA=…) quick, 页脚带两路电平读数
+    check("I2C 检测块折叠边界与固件打印对得上 (表头/页脚前缀)",
+          '"=== I2C Bus Check' in hal and '"Bus idle: SDA(GP14)' in hal)
+    # 反面回归: 电平诊断不许再切引脚。2026-09-29 真机现场 —— 切成 GPIO_FUNC_SIO
+    # 的那一瞬间, I2C 外设自己的 SDA/SCL 输入读到 0 被当成总线事件锁存, 之后所有
+    # 事务全失败 (网页每 3s 的 !I2C q → 141s 内 21 次卡死; 改读 pad 电平后 180s
+    # 零次)。要再切引脚就必须照 pca9685_i2c_recover 的顺序 (先 i2c_deinit, 切回来
+    # 再 i2c_init), 别悄悄退回老写法。
+    check("I2C 电平诊断不再切引脚 (读 pad 电平, 不碰 GPIO_FUNC_SIO)",
+          "gpio_set_function(PCA9685_I2C_SDA_PIN, GPIO_FUNC_SIO)" not in hal
+          and "gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_SIO)" not in hal)
+    # 电平还得走"与功能无关"的那一路: gpio_get 读的是 SIO 的输入寄存器, 引脚不在
+    # SIO 功能上时那一路就废了 (要读准还得切回 SIO = 又回到锁死外设的老路),
+    # 只有 IO bank 状态寄存器的 INFROMPAD 是 pad 原文
+    check("I2C 电平读 INFROMPAD (与 FUNCSEL 无关), 不是 gpio_get",
+          "INFROMPAD" in hal
+          and "pad_level(PCA9685_I2C_SDA_PIN), pad_level(PCA9685_I2C_SCL_PIN)" in hal)
+    # 量电平前要先等总线回到空闲: 事务刚结束时线还在爬升, 立刻读到的是一半 1
+    # 一半 0 的假电平 (换 INFROMPAD 之后照样 —— 踩过的第二个坑是量早了, 不是读错
+    # 寄存器)。这条钉住"先 sleep 再 printf"的顺序
+    check("I2C 电平在总线回到空闲之后才量 (Bus idle 行前有等待)",
+          re.search(r"sleep_ms\(\d+\);\s*\n\s*hal_debug_printf\(\"Bus idle:", hal)
+          is not None)
     # 驱动侧: 寄存器地址 (BNO055 数据手册 Page 0) 与四个读函数, 以及单位注释 ——
     # 单位错了曲线还在画, 只是数值全错, 比不画更难发现
     bno_h = open(BNO_H, encoding="utf-8").read()
@@ -708,6 +731,41 @@ def test_imu_block_fold():
     check("出块后的 [IMU] 警告行: 不折叠 (它本来就在块外)", (st, fold) == (0, False))
     st = 1
     for _ in range(IMU_BLOCK_MAX):
+        st, fold = f(st, "表头之后页脚迟迟不来")
+    check("页脚丢失: 到上限自己出块, 别把日志面板堵死", (st, fold) == (0, True), f"st={st}")
+    st, fold = f(st, "兜底出块之后的行照常显示")
+    check("兜底出块后的行: 不折叠", (st, fold) == (0, False))
+
+
+def test_i2c_block_fold():
+    """I2C 检测块的折叠状态机 (server.py 的 i2c_block_fold, 页面同款)。
+
+    与 IMU 块同形, 三处不同各有一条钉着: 表头/页脚是前缀匹配 (后面还带引脚名
+    与电平读数)、放行的是设备异常行 (NOT FOUND / present but)、上限按整块最长
+    的 128 地址全扫描留量。"""
+    f = wc.i2c_block_fold
+    st, fold = f(0, "Bus idle: SDA(GP14)=1 SCL(GP15)=1 (1=空闲正常, 0=被拉低/短路/引脚损坏)")
+    check("块外的 Bus idle: 行: 不折叠 (页脚前缀不能当块外行吞掉)",
+          (st, fold) == (0, False), f"st={st} fold={fold}")
+    st, fold = f(st, I2C_BLOCK_HEAD + " (SDA=GP14, SCL=GP15) quick ===")
+    check("表头 (轮询的 quick 变体): 进块, 且表头自己不显示",
+          st == 1 and fold is True, f"st={st} fold={fold}")
+    st, fold = f(st, "Servo power: GP10(left)=1  GP11(right)=1")
+    check("块内常规行 (Servo power): 折叠", st == 2 and fold is True, f"st={st} fold={fold}")
+    st, fold = f(st, "PCA9685 0x40 (left  legs): DETECTED  MODE1=0x20")
+    check("块内常规行 (PCA9685 DETECTED): 折叠", st == 3 and fold is True, f"st={st} fold={fold}")
+    st, fold = f(st, "PCA9685 0x41 (right legs): NOT FOUND (ret=-2)")
+    check("块内的 NOT FOUND: 放行 (折叠不藏故障)", st == 4 and fold is False, f"st={st} fold={fold}")
+    st, fold = f(st, "BNO055 0x29: present but CHIP_ID=0x00 (expect 0xA0)")
+    check("块内的 present but: 放行 (CHIP_ID 不对也算故障)", st == 5 and fold is False, f"st={st}")
+    st, fold = f(st, "  Device found at 0x40")
+    check("块内的全扫描行: 折叠 (卡片上有扫描列表)", st == 6 and fold is True, f"st={st} fold={fold}")
+    st, fold = f(st, "Bus idle: SDA(GP14)=1 SCL(GP15)=1 (1=空闲正常, 0=被拉低/短路/引脚损坏)")
+    check("页脚: 出块, 且页脚自己不显示", (st, fold) == (0, True), f"st={st} fold={fold}")
+    st, fold = f(st, "[I2C] Bus recovery started...")
+    check("出块后的 [I2C] 恢复行: 不折叠 (它本来就在块外)", (st, fold) == (0, False))
+    st = 1
+    for _ in range(I2C_BLOCK_MAX):
         st, fold = f(st, "表头之后页脚迟迟不来")
     check("页脚丢失: 到上限自己出块, 别把日志面板堵死", (st, fold) == (0, True), f"st={st}")
     st, fold = f(st, "兜底出块之后的行照常显示")
@@ -1640,6 +1698,12 @@ IMU_BLOCK_HEAD = "=== IMU Status ==="
 IMU_BLOCK_TAIL = "==================="
 IMU_BLOCK_MAX = 16
 
+# I2C 检测块整块折叠 (同上)。表头/页脚是前缀匹配 —— 表头后面还带引脚名与 quick,
+# 页脚 (Bus idle:) 后面还带两路电平读数, 所以不能像 IMU 块那样比整行相等
+I2C_BLOCK_HEAD = "=== I2C Bus Check"
+I2C_BLOCK_TAIL = "Bus idle:"
+I2C_BLOCK_MAX = 160      # 兜底: 手动全扫描 128 个地址时整块 ~137 行
+
 
 def _first_diff(a, b):
     """差分报告: 第一处不一致的帧 (整表 diff 打出来没人看得懂)"""
@@ -1660,8 +1724,11 @@ def _python_frames(lines):
     t = wc.Telemetry()
     out = []
     imu_block = 0
+    i2c_block = 0
     for line in lines:
-        imu_block, folded = wc.imu_block_fold(imu_block, line)   # 真的那份, 不抄
+        imu_block, folded_imu = wc.imu_block_fold(imu_block, line)   # 真的那份, 不抄
+        i2c_block, folded_i2c = wc.i2c_block_fold(i2c_block, line)
+        folded = folded_imu or folded_i2c
         parsed = wc.parse_line(t, line)
         if not folded and not (parsed and parsed[0] in RAW_SKIP):
             out.append(json.loads(json.dumps({"t": "raw", "line": line})))
@@ -1919,6 +1986,17 @@ def test_direct_engine():
     check("raw: 固件看门狗的 [IMU] 警告行照常进日志 (在块外, 认不出来 = 进日志)",
           any(r.startswith("[IMU] 读连续失败") for r in raws),
           str([r for r in raws if r.startswith("[IMU]")][:3]))
+    # I2C 检测块同理: 网页每 3s 轮询一次 !I2C q, 整块 7 行 (手动全扫描 ~137 行)
+    # 全是喂卡片的诊断值 —— 卡片上都有, 日志面板不必再刷一遍。设备异常行照常进日志
+    check("raw: I2C 检测块整块折叠 (表头/Servo power/PCA9685/扫描列表/页脚)",
+          not any(r.startswith(("=== I2C Bus Check", "Servo power:", "PCA9685 ",
+                                "Scanning I2C bus", "  Device found at", "Scan complete.",
+                                "Bus idle:")) for r in raws),
+          str([r for r in raws if r.startswith(("Bus idle:", "PCA9685", "==="))][:3]))
+    check("raw: I2C 块内的 NOT FOUND 行放行 (折叠不藏故障)",
+          any(r.startswith("BNO055 0x28: NOT FOUND") for r in raws)
+          and any(r.startswith("BNO055 0x29: NOT FOUND") for r in raws),
+          str([r for r in raws if r.startswith("BNO055")][:3]))
     check("raw 白名单: 认不出来的行原样进日志",
           "=== Battery ADC (GP28/ADC2, divider 47/377) ===" in raws
           and "[P] FAIL unknown param 'nosuch' (试 !CFG 列出全部)" in raws
@@ -2107,15 +2185,15 @@ def test_direct_contract():
     # IMU 状态块折叠: 常量两边同值 (差一个字符就一边折一边不折, 用户只看到"日志
     # 有时吵有时不吵"), 且折叠必须挂在 raw 那条路径上 —— 折叠只能挡日志面板,
     # 挡了解析就等于曲线没有数据
-    def _block_consts(text):
+    def _block_consts(text, prefix):
         out = {}
-        for name in ("IMU_BLOCK_HEAD", "IMU_BLOCK_TAIL"):
+        for name in (prefix + "_HEAD", prefix + "_TAIL"):
             m = re.search(name + r'\s*=\s*"([^"]*)"', text)
             out[name] = m.group(1) if m else None
-        m = re.search(r"IMU_BLOCK_MAX\s*=\s*(\d+)", text)
-        out["IMU_BLOCK_MAX"] = int(m.group(1)) if m else None
+        m = re.search(prefix + r"_MAX\s*=\s*(\d+)", text)
+        out[prefix + "_MAX"] = int(m.group(1)) if m else None
         return out
-    py_b, js_b = _block_consts(srv), _block_consts(src)
+    py_b, js_b = _block_consts(srv, "IMU_BLOCK"), _block_consts(src, "IMU_BLOCK")
     check("IMU 状态块常量两边同值 (server 与页面)",
           py_b == js_b == {"IMU_BLOCK_HEAD": IMU_BLOCK_HEAD,
                            "IMU_BLOCK_TAIL": IMU_BLOCK_TAIL,
@@ -2124,6 +2202,22 @@ def test_direct_contract():
     check("IMU 状态块折叠挂在日志路径上, 解析照走 (folded 只进 raw 的判断)",
           "if not folded and not (parsed" in srv
           and "if (!folded && !(parsed" in src)
+    # I2C 检测块 (网页每 3s 一次的 !I2C q): 常量同值 + 前缀匹配 (表头后面还带引脚
+    # 名与 quick, 页脚后面还带电平读数, 比整行相等就永远折不上) + 异常行放行
+    py_i, js_i = _block_consts(srv, "I2C_BLOCK"), _block_consts(src, "I2C_BLOCK")
+    check("I2C 检测块常量两边同值 (server 与页面)",
+          py_i == js_i == {"I2C_BLOCK_HEAD": I2C_BLOCK_HEAD,
+                           "I2C_BLOCK_TAIL": I2C_BLOCK_TAIL,
+                           "I2C_BLOCK_MAX": I2C_BLOCK_MAX},
+          f"server={py_i} 页面={js_i}")
+    check("I2C 检测块两边都是前缀匹配 (表头/页脚都带尾巴)",
+          "line.startswith(I2C_BLOCK_HEAD)" in srv
+          and "line.startswith(I2C_BLOCK_TAIL)" in srv
+          and "line.indexOf(I2C_BLOCK_HEAD) === 0" in src
+          and "line.indexOf(I2C_BLOCK_TAIL) === 0" in src)
+    check("I2C 检测块放行设备异常行 (NOT FOUND / present but, 两边同款)",
+          '"NOT FOUND" in line or "present but" in line' in srv
+          and 'line.indexOf("NOT FOUND") < 0 && line.indexOf("present but") < 0' in src)
 
     # !IMU 轮询间隔: 直连态 (页面 iv.imu) 与 server 态 (--imu-interval 默认) 同值,
     # 否则同一块板在两种模式下"跟手程度"不一样, 而用户看不出是模式差异
@@ -2489,6 +2583,7 @@ def main():
 
     test_parser()
     test_imu_block_fold()
+    test_i2c_block_fold()
     test_param_parser()
     test_firmware_contract()
     test_launcher_contract()
