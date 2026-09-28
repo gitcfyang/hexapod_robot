@@ -485,6 +485,46 @@ def test_firmware_contract():
           and 'id="pt-stale"' in html)
 
 
+def test_launcher_contract():
+    """启停脚本 (run.py) 的契约。
+
+    这里钉的是两条"错了会伤到别的东西"的性质: 默认端口必须跟着 server.py 走,
+    进程识别必须保持两道核实 —— 退回"命令行文本里出现脚本名就算"的话, 一条
+    git commit / grep 所在的 shell 会被当成 server 进程, stop 就把人家终端杀了。
+    """
+    print("\n[2b] 启停脚本")
+    launcher = os.path.join(HERE, "run.py")
+    check("run.py 在位", os.path.isfile(launcher))
+    src = open(launcher, encoding="utf-8").read()
+
+    r = subprocess.run([sys.executable, launcher, "help"],
+                       capture_output=True, text=True, timeout=20)
+    check("help 一条命令列全五个子命令且退出码 0",
+          r.returncode == 0
+          and all(f" {c} " in r.stdout or f" {c}\n" in r.stdout
+                  for c in ("start", "stop", "restart", "status", "logs")),
+          r.stdout.splitlines()[0] if r.stdout else r.stderr.strip()[:60])
+
+    # 默认端口: server.py 的 argparse 默认值 = 脚本的默认值 = 8080
+    srv = open(os.path.join(HERE, "server.py"), encoding="utf-8").read()
+    m = re.search(r'"--port",\s*type=int,\s*default=(\d+)', srv)
+    check("默认端口与 server.py 一致 (改了服务端端口, 脚本会自动跟上)",
+          bool(m) and f'HEXAPOD_WC_PORT") or {m.group(1)}' in src,
+          m.group(1) if m else "server.py 里没找到 --port 默认值")
+
+    check("进程识别保持两道核实 (exe 是 python + 参数就是脚本路径), "
+          "不接受纯文本匹配",
+          "/proc/" in src and "_pid_exe" in src and "args[1:]" in src
+          and "webconfig/server.py" in src)
+    check("没有退回按命令行文本收网的写法 (老 bug: 误杀别人的终端)",
+          "pgrep" not in src)
+    check("Windows 那条路也在 (netstat 反查端口 PID → tasklist 核映像名)",
+          '"netstat", "-ano"' in src and '"tasklist"' in src)
+    check("串口桥只能被查询, 不能被终止 (BRIDGE_SCRIPT 只进 bridge_pid)",
+          src.count("BRIDGE_SCRIPT") == 2
+          and "BRIDGE_SCRIPT" in src.split("def bridge_pid")[1].split("def ")[0])
+
+
 # ==================== [3] 端到端 ====================
 
 # 假固件的参数表: name → [val, min, max, def, unit, grp]
@@ -1652,6 +1692,7 @@ def main():
     test_parser()
     test_param_parser()
     test_firmware_contract()
+    test_launcher_contract()
     test_flasher()
 
     print("\n[3] 端到端 (socat pty + 假固件 + 串口控制台 + 网页服务)")
