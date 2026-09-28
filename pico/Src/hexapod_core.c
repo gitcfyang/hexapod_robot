@@ -381,6 +381,10 @@ void hexapod_update(hexapod_t *robot)
         robot->state.body_rot_offset.z = 0;
     }
 
+    /* IMU 读看门狗: I2C 事务会整段卡住 (见 hal_imu_recover_step 注释), 空闲时
+     * 舵机那条恢复路径不跑 —— 这里每个周期推一次, 卡住时能自己回来 */
+    hal_imu_recover_step(robot->state.robot_on);
+
     /* 机器人开关状态变化处理 (ARM 解锁/锁定):
      *   解锁: 开启两路舵机供电 → 等待电源轨稳定 → 使能舵机输出
      *   锁定: 停止 PWM 输出 + 关闭两路舵机供电 (安全/省电)

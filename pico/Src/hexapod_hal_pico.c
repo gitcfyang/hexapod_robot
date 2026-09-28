@@ -2023,6 +2023,10 @@ static bool parse_serial_command(control_state_t *ctrl_state, uint8_t *buf, uint
 
     /* ---- !IMU: IMU 状态 (欧拉角/中断/校准) ---- */
     if (buf[1] == 'I' && len >= 3 && buf[2] == 'M') {
+        /* 先推一把看门狗再打印: 卡住的现场 (只剩 available + 冻结的 last:) 打印
+         * 出来就是这个样子, 用户看了也做不了什么; 修完再答才是"当前状态"。
+         * 现场记录由看门狗那几行 [IMU] 承担 (进日志面板)。 */
+        hal_imu_recover_step(ctrl_state && ctrl_state->robot_on);
         imu_status_print();
         return true;
     }
@@ -3193,6 +3197,120 @@ bool hal_is_period_calib_active(void)
 static bool g_imu_available = false;
 static imu_data_t g_imu_last;           /* 最近一次有效读数 (调试用) */
 
+/* ---- IMU 读看门狗 (2026-09-28 真机现场) ----
+ *
+ * 现场症状: I2C 事务会整段卡住 —— !IMU 只剩 available + 冻结的 last:, 整条应答
+ * 约 40ms (8 次读各吃满 5ms 超时), 芯片本身仍在线 (同一时刻 !I2C q 能读 CHIP_ID),
+ * 且**空闲时没有任何自恢复**: 唯一的 I2C 恢复挂在舵机 flush 的"连续失败 ≥3"分支上,
+ * 而它没有待写舵机时提前返回 (hal_servo_flush 开头)。所以卡住期间控制回路的姿态
+ * 补偿也一并失效, 一直卡到自己好为止 (实测几分钟)。
+ *
+ * 这里把同样的两级恢复搬到 IMU 读路径上, 并把"静默"改成打印:
+ * 卡住的实测签名 (2026-09-28 22:56, 监视器现场): !IMU 只剩 4 行 (available: YES +
+ * 冻结的 last:), 同一时刻 !I2C q 里两块 PCA9685 正常应答而 **BNO055 0x29: NOT
+ * FOUND**, 且 Bus idle SDA=1 SCL=1 —— 总线空闲、外设没问题, 是**芯片自己不应答**;
+ * 紧接着再问 !IMU 仍缺 8 行 (i2c_init 治不了它), 4s 后自行恢复。所以:
+ *   连续失败 ≥ IMU_FAIL_RECOVER_AFTER → 总线恢复 (补时钟 + STOP + i2c_init, 快)
+ *   仍失败 IMU_REINIT_AFTER_MS       → 重新初始化 BNO055 (含 BOOT 引脚复位, 慢)
+ * 两级都限速, 且**重新初始化只在锁定状态下做** (它阻塞主循环约 4s: 3 次重试
+ * × (POR 等待 + BOOT 循环), 机器人正在走的时候不能这么干 —— 与 !IMUR 同一判据)。
+ *
+ * ⚠️ 重新初始化的代价: 芯片不应答时只能靠 BOOT 引脚复位把它拉回来, 而复位会
+ * 清空 BNO055 内部的校准值 (与 !IMUR 同)。因此阈值取 10s —— 实测卡住多为几秒
+ * 到几分钟, 短的自愈 (不动校准), 长的才值得付这个代价。 */
+#define IMU_FAIL_RECOVER_AFTER  20     /* 连续失败次数 → 总线恢复 (10ms 回路 ≈ 200ms) */
+#define IMU_RECOVER_MIN_MS      1000   /* 同一轮卡死里总线恢复的最快重复间隔 */
+#define IMU_REINIT_AFTER_MS     10000  /* 总线恢复仍无效多久 → 重新初始化 (清校准) */
+#define IMU_REINIT_MAX          3      /* 一轮卡死里重新初始化的最大次数 */
+#define IMU_REINIT_RETRY_MS     30000  /* 初始化失败后 (芯片判为不在线) 的自动重试间隔 */
+
+static uint16_t g_imu_fail_run = 0;       /* 当前连续失败次数 */
+static uint32_t g_imu_fail_total = 0;     /* 累计失败次数 (诊断) */
+static uint32_t g_imu_fail_start_ms = 0;  /* 本轮连续失败的起点 */
+static uint32_t g_imu_recover_ms = 0;     /* 上次总线恢复时刻 */
+static uint32_t g_imu_wedge_ms = 0;       /* 本轮卡死判定时刻 (重新初始化的计时起点) */
+static uint8_t  g_imu_reinit_tries = 0;   /* 本轮卡死里已重新初始化的次数 */
+static bool     g_imu_wedged = false;     /* 本轮卡死已打印过 (避免刷屏) */
+static bool     g_imu_armed_skip_done = false; /* 解锁态跳过重新初始化只提示一次 */
+
+/** @brief IMU 读看门狗: 失败累计到阈值就修总线, 仍不行就重新初始化
+ *
+ * 由控制回路每个周期调用 (校准模式下控制回路提前返回, 所以 !IMU 命令处理里
+ * 也调一次 —— 用户正盯着那条命令的结果时, 顺手推一把)。
+ * robot_on 为真时只做总线恢复, 不做会阻塞数秒的重新初始化。 */
+void hal_imu_recover_step(bool robot_on)
+{
+    if (!IMU_ENABLED) return;
+    uint32_t now = hal_get_tick_ms();
+
+    /* 芯片判为不在线 (初始化失败/未探测到): 锁定状态下低速重试, 别一直不管。
+     * 解锁状态下不试 —— hal_imu_init 里的 BOOT 循环会阻塞主循环数秒。 */
+    if (!g_imu_available) {
+        if (!robot_on && g_imu_reinit_tries < IMU_REINIT_MAX &&
+            now - g_imu_recover_ms >= IMU_REINIT_RETRY_MS) {
+            g_imu_reinit_tries++;
+            g_imu_recover_ms = now;
+            hal_debug_printf("[IMU] 自动重试初始化 (%u/%u)...\r\n",
+                             g_imu_reinit_tries, IMU_REINIT_MAX);
+            hal_imu_init();
+        }
+        return;
+    }
+
+    if (g_imu_fail_run < IMU_FAIL_RECOVER_AFTER) return;
+
+    if (!g_imu_wedged) {
+        g_imu_wedged = true;
+        g_imu_wedge_ms = now;
+        g_imu_armed_skip_done = false;
+        g_imu_reinit_tries = 0;
+        hal_debug_printf("[IMU] 读连续失败 %u 次 (约 %ums, 累计 %u 次) → 总线恢复\r\n",
+                         (unsigned)g_imu_fail_run,
+                         (unsigned)(now - g_imu_fail_start_ms),
+                         (unsigned)g_imu_fail_total);
+    }
+
+    /* 阶段一: 总线恢复 (补时钟 + STOP + i2c_init)。它自己会打印 SDA 是否被拉死
+     * 以及放开了几个时钟 —— 那正是"外设卡"还是"器件把线拉死"的现场记录。
+     * 自动恢复都用尽后放慢到 10s 一次: 那时情况已经超出"卡一下"的范畴, 每秒刷
+     * 两行日志只会把面板冲掉 (芯片彻底不在线时走上面那条重试路, 到不了这里) */
+    uint32_t iv = (g_imu_reinit_tries >= IMU_REINIT_MAX) ? 10000 : IMU_RECOVER_MIN_MS;
+    if (now - g_imu_recover_ms >= iv) {
+        g_imu_recover_ms = now;
+        pca9685_i2c_recover();
+    }
+
+    /* 阶段二: 总线恢复无效 → 重新初始化 (含 BOOT 引脚硬复位) */
+    if (now - g_imu_wedge_ms < IMU_REINIT_AFTER_MS) return;
+    if (g_imu_reinit_tries >= IMU_REINIT_MAX) return;
+
+    if (robot_on) {
+        if (!g_imu_armed_skip_done) {
+            g_imu_armed_skip_done = true;
+            hal_debug_printf("[IMU] 总线恢复无效; 机器人已解锁, 跳过重新初始化 "
+                             "(锁定后再修, 或 !IMUR)\r\n");
+        }
+        g_imu_wedge_ms = now;   /* 推迟到锁定之后再判 */
+        return;
+    }
+
+    g_imu_reinit_tries++;
+    hal_debug_printf("[IMU] 连续失败 %us, 总线恢复无效 (%u/%u) → 重新初始化 BNO055 "
+                     "(会清空校准值)...\r\n",
+                     (unsigned)((now - g_imu_wedge_ms) / 1000),
+                     g_imu_reinit_tries, IMU_REINIT_MAX);
+    g_imu_recover_ms = now;
+    if (hal_imu_init()) {
+        hal_debug_printf("[IMU] 重新初始化成功, 姿态数据已恢复\r\n");
+    } else {
+        hal_debug_printf("[IMU] 重新初始化失败 —— IMU 已停用 (查 !I2C 与 BOOT 接线)\r\n");
+    }
+    if (g_imu_reinit_tries >= IMU_REINIT_MAX) {
+        hal_debug_printf("[IMU] 自动恢复次数用尽: 之后只每 10s 修一次总线, "
+                         "重启或 !IMUR 可再试\r\n");
+    }
+}
+
 /** @brief 查询 IMU 是否已初始化成功 (供 !CFG imu_enabled 即时重试) */
 bool hal_imu_is_available(void)
 {
@@ -3262,8 +3380,25 @@ bool hal_imu_read(imu_data_t *data)
 
     bno055_euler_t raw;
     if (!bno055_read_euler(&raw)) {
+        /* 失败计数交给看门狗 (hal_imu_recover_step): 现场会整段卡住几分钟,
+         * 空闲时又没有任何自恢复 —— 详见该函数注释。
+         * 饱和计数: 卡住时这里是 100Hz 自增, 不封顶会在十几分钟后回绕, 打印出
+         * "连续失败 3 次"这种把人带沟里的数字 */
+        if (g_imu_fail_run == 0) g_imu_fail_start_ms = hal_get_tick_ms();
+        if (g_imu_fail_run < 0xFFFFu) g_imu_fail_run++;
+        g_imu_fail_total++;
         data->valid = false;
         return false;
+    }
+
+    if (g_imu_fail_run) {
+        hal_debug_printf("[IMU] 读数恢复 (连续失败 %u 次, 约 %ums)\r\n",
+                         (unsigned)g_imu_fail_run,
+                         (unsigned)(hal_get_tick_ms() - g_imu_fail_start_ms));
+        g_imu_fail_run = 0;
+        g_imu_reinit_tries = 0;
+        g_imu_wedged = false;
+        g_imu_wedge_ms = 0;
     }
 
     /* BNO055 欧拉角: 1° = 16 LSB → 代码 0.1° = raw * 10 / 16
@@ -3365,6 +3500,15 @@ static void imu_status_print(void)
     hal_debug_printf("=== IMU Status ===\r\n");
     hal_debug_printf("available: %s  addr: 0x%02X\r\n",
                      g_imu_available ? "YES" : "NO", BNO055_I2C_ADDR);
+
+    /* 读失败计数 (只在有失败时出现): 偶发单次失败 vs 整段卡住一眼可分。
+     * 下面八行读数各自独立受读取成功守卫, 缺行就是读失败 —— 配合这行看 */
+    if (g_imu_fail_run) {
+        hal_debug_printf("fail: 连续 %u 次 (已持续 %ums) / 累计 %u 次\r\n",
+                         (unsigned)g_imu_fail_run,
+                         (unsigned)(hal_get_tick_ms() - g_imu_fail_start_ms),
+                         (unsigned)g_imu_fail_total);
+    }
 
     if (g_imu_available) {
         bno055_calib_t calib;

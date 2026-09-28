@@ -269,6 +269,14 @@ bool hal_imu_read(imu_data_t *data);
  */
 bool hal_imu_is_available(void);
 
+/**
+ * @brief IMU 读看门狗: 读连续失败时修 I2C 总线, 仍不行则重新初始化 BNO055
+ * @param robot_on 机器人是否已解锁; 已解锁时只做总线恢复 (重新初始化会阻塞数秒)
+ * @note  由控制回路每周期调用 (校准模式下控制回路提前返回, 故 !IMU 命令处理里
+ *        也调一次)。阈值/限速见 hal_pico.c 的 IMU 读看门狗一段。
+ */
+void hal_imu_recover_step(bool robot_on);
+
 /* ==================== 足端微动开关接口 ==================== */
 
 /**
