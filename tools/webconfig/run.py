@@ -3,7 +3,7 @@
 """网页配置台快捷启停 (Linux / WSL / Windows 通用)
 
 用法:
-    python3 tools/webconfig/run.py start [server.py 的额外参数...]
+    python3 tools/webconfig/run.py start [server.py 的额外参数...]   # 如 --host 0.0.0.0
     python3 tools/webconfig/run.py stop
     python3 tools/webconfig/run.py restart [额外参数...]
     python3 tools/webconfig/run.py status
@@ -40,6 +40,7 @@ PORT = int(os.environ.get("HEXAPOD_WC_PORT") or 8080)
 LOG = Path(os.environ.get("HEXAPOD_WC_LOG")
            or Path(tempfile.gettempdir()) / "hexapod-webconfig.log")
 BRIDGE_PORT = 7100
+HOST = os.environ.get("HEXAPOD_WC_HOST") or "127.0.0.1"   # server.py 的默认值
 USAGE = (f"用法: {os.path.basename(__file__)} "
          "{start|stop|restart|status|logs} [server.py 参数...]")
 HELP = f"""网页配置台快捷启停 (Linux / WSL / Windows)
@@ -53,13 +54,22 @@ HELP = f"""网页配置台快捷启停 (Linux / WSL / Windows)
 只管 webconfig/server.py 这一个进程: 不碰 serial_console.py 串口桥
 (/dev/ttyACM0 的唯一读者), 也不碰别的 python。run.sh 是本脚本的 Linux 包装。
 
-环境变量: HEXAPOD_WC_PORT (默认 8080) · HEXAPOD_WC_LOG (默认临时目录)"""
+环境变量: HEXAPOD_WC_HOST (默认 127.0.0.1) · HEXAPOD_WC_PORT (默认 8080) ·
+          HEXAPOD_WC_LOG (默认临时目录)
+
+想让别的电脑用浏览器连过来, 见 README「远程访问」一节 —— 这个服务没有鉴权,
+别直接挂公网。"""
 
 
-def port_open(port, timeout=0.3):
+def probe_addr(host):
+    """把监听地址换算成"能连上去的地址": 0.0.0.0 / :: 这种通配地址只能回落到本机"""
+    return "127.0.0.1" if host in ("", "0.0.0.0", "::", "*") else host
+
+
+def port_open(port, host=None, timeout=0.3):
     with socket.socket() as s:
         s.settimeout(timeout)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+        return s.connect_ex((probe_addr(HOST if host is None else host), port)) == 0
 
 
 def tail(path, n):
@@ -147,6 +157,31 @@ def server_pids(port=None):
     return _pids_by_cmdline("webconfig/server.py")
 
 
+def pid_opt(pid, name, fallback):
+    """从命令行里读它实际用的选项值 —— "已在运行" 报的地址得是真的那个"""
+    if IS_WIN:
+        return fallback
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            args = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+    except OSError:
+        return fallback
+    for i, a in enumerate(args):
+        val = args[i + 1] if a == name and i + 1 < len(args) else None
+        if a.startswith(name + "="):
+            val = a.split("=", 1)[1]
+        if val:
+            return val
+    return fallback
+
+
+def pid_addr(pid):
+    """运行中进程的真实 (host, port); 命令行里没有就用 server.py 的默认值。
+    不能用"这次命令想用的值"兜底 —— 那会把别人的实例报成自己要的那个地址。"""
+    return (pid_opt(pid, "--host", "127.0.0.1"),
+            int(pid_opt(pid, "--port", 8080)))
+
+
 def bridge_pid():
     if IS_WIN:
         return None if not port_open(BRIDGE_PORT) else -1   # 只报"在不在", 不报 pid
@@ -202,16 +237,22 @@ def show_port_owner(port):
 
 
 def do_start(extra):
-    global PORT
-    for i, a in enumerate(extra):                 # 额外参数里的 --port 优先于环境变量
+    global PORT, HOST
+    for i, a in enumerate(extra):                 # 额外参数里的 --port/--host 优先于环境变量
         if a == "--port" and i + 1 < len(extra):
             PORT = int(extra[i + 1])
         elif a.startswith("--port="):
             PORT = int(a.split("=", 1)[1])
+        elif a == "--host" and i + 1 < len(extra):
+            HOST = extra[i + 1]
+        elif a.startswith("--host="):
+            HOST = a.split("=", 1)[1]
 
     pid = next(iter(server_pids()), None)
     if pid:
-        print(f"已在运行 (pid {pid}, http://127.0.0.1:{PORT})")
+        # 同一时刻只跑一个实例 (桥与串口都是单份的), 所以这里不另起, 只报实际端口
+        r_host, r_port = pid_addr(pid)
+        print(f"已在运行 (pid {pid}, http://{probe_addr(r_host)}:{r_port})")
         return 0
     if port_open(PORT):                           # 别人的地盘, 别静默失败
         print(f"端口 {PORT} 已被别的进程占用, 先处理它再启动:", file=sys.stderr)
@@ -223,7 +264,7 @@ def do_start(extra):
         return 1
 
     LOG.parent.mkdir(parents=True, exist_ok=True)
-    cmd = [sys.executable, str(SERVER), "--port", str(PORT), *extra]
+    cmd = [sys.executable, str(SERVER), "--host", HOST, "--port", str(PORT), *extra]
     log = open(LOG, "ab", buffering=0)
     kwargs = {"cwd": str(ROOT), "stdin": subprocess.DEVNULL,
               "stdout": log, "stderr": log}
@@ -240,7 +281,9 @@ def do_start(extra):
         if port_open(PORT):
             pid = next(iter(server_pids()), "?")
             print(f"已启动 (pid {pid}, 日志 {LOG})")
-            print(f"浏览器打开 http://127.0.0.1:{PORT}")
+            print(f"浏览器打开 http://{probe_addr(HOST)}:{PORT}"
+                  + ("   (0.0.0.0 = 所有网卡, 换成这台机器的任一 IP 都能开)"
+                     if probe_addr(HOST) != HOST else ""))
             if bridge_pid() is None:
                 print("⚠️ 串口桥没在跑: 页面能开但数据是离线的 "
                       "(先 python3 tools/serial_console.py)")
@@ -254,9 +297,12 @@ def do_start(extra):
 
 def do_status():
     pids = server_pids()
+    # 报运行中进程的真实地址, 而不是这次命令想用的那个
+    host, port = pid_addr(pids[0]) if pids else (HOST, PORT)
     print("server: " + (f"运行中 pid {' '.join(str(p) for p in pids)}"
                         if pids else "未运行"))
-    print("端口:   " + (f"{PORT} 在听" if port_open(PORT) else f"{PORT} 空"))
+    print("监听:   " + (f"{host}:{port} 在听" if port_open(port, host)
+                        else f"{host}:{port} 空"))
     b = bridge_pid()
     if b is None:
         print("串口桥: 未运行 (页面数据会是离线的)")
