@@ -46,7 +46,16 @@ cd pico/build && make -j$(nproc)
 编译产物 `hexapod_pico.uf2` 拖入 Pico 的 USB 盘即烧录；Linux 下可免按键：
 `picotool load -f -x build/hexapod_pico.uf2`（运行中的固件会被软复位进 BOOTSEL）。
 调试控制台：`python3 tools/serial_console.py`（自动连接、断线重连）。
-网页配置台：`python3 tools/webconfig/run.py start` → 浏览器开 `127.0.0.1:8080`
+网页配置台（同一个页面，两种开法）：
+
+**直连 —— 板子插在你自己电脑上，零安装**：Chrome/Edge/Opera 打开
+<https://gitcfyang.github.io/hexapod_robot/> → 点「连接」→ 浏览器弹串口选择器选中 Pico，
+页面直接读写 USB 串口（Web Serial），没有本地服务、不用下载任何东西。参数/端口/校准/
+日志都在这一条路上；改动推上 main 后 Pages 自动发布（约 10 分钟生效）。
+Safari 不支持，Firefox 需 151+。⚠️ **烧固件不在直连里** —— uf2 拖进 Pico 的 USB 盘照旧。
+
+**本地服务 —— 板子插在别的机器上，或要烧固件**：`python3 tools/webconfig/run.py start`
+→ 浏览器开 `127.0.0.1:8080`
 （同一个脚本还有 `stop`/`restart`/`status`/`logs`，重启＝先终止旧进程再起新的；
 它只管这个 HTTP 服务，不碰串口桥。Linux 侧 `tools/webconfig/run.sh start` 是它的包装，
 不经脚本直接跑 `python3 tools/webconfig/server.py` 也一样。
@@ -68,13 +77,16 @@ PWM 周期滑条 · 外设: 电机/LED/蜂鸣器/外部 UART/外部 I2C+ADC/空�
 机器人只听网页命令；机器人自己会在失去心跳 6s 后放回遥控器（网页挂了不会锁死）。
 远程访问：控制台默认同时开 TCP 桥接（`127.0.0.1:7100`），
 另开终端 `python3 tools/tcp_monitor.py` 即可远程收发命令（可多开）。
-**网页给别人用**：服务默认只监听 `127.0.0.1`（本机浏览器），要让别的电脑连，
+**网页给别人用**：板子在对方手边，让他开上面那个 Pages 直连页就行（你这边不用做任何事）；
+板子插在你这台机器上、要让别的电脑看，才需要下面这套 —— 服务默认只监听 `127.0.0.1`（本机浏览器），要让别的电脑连，
 起服务时给监听地址 —— 同一局域网 `run.py start --host 0.0.0.0`，
 任何设备开 `http://<这台机器的IP>:8080`；跨网络又不想挂公网，就用 Tailscale
 （本机已在跑）等私有网，`run.py start --host <tailnet IP>`，加入同一网络的设备
 直接开 `http://100.x.y.z:8080`，两个网卡都不通的路由不会经过它。
 ⚠️ 这个服务没有鉴权：能连上网页的人就能解锁、驱动 18 路舵机、烧固件。所以
 「任何浏览器都能开」的公网隧道要么别开，要么先加鉴权（TODO，见 STATUS）。
+（直连那条路不涉及这个问题：页面虽在公网，但只有把板子插在自己电脑上、并在浏览器
+弹窗里亲手选中串口的人才能操作它 —— 指令不过任何服务器。）
 串口桥（7100）保持只听本机，别跟着放开。
 
 ## 硬件概览

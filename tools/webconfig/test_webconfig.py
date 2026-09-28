@@ -1798,6 +1798,28 @@ def test_direct_contract():
           kinds == js_kinds == RAW_SKIP, f"server={kinds} 页面={js_kinds}")
 
 
+def test_pages_workflow():
+    """直连模式的托管: 单文件页面由 Pages 工作流发到站点根 (无构建步骤)"""
+    wf = os.path.join(ROOT, ".github", "workflows", "pages.yml")
+    check("GitHub Pages 工作流存在", os.path.isfile(wf), wf)
+    if not os.path.isfile(wf):
+        return
+    y = open(wf, encoding="utf-8").read()
+    head = y.split("jobs:")[0]                     # 触发条件区 (别拿 job 里的字符串顶数)
+    check("工作流把 index.html 发成站点根",
+          "tools/webconfig/index.html" in y and "_site/index.html" in y
+          and "path: _site" in y)
+    check("工作流在页面改动时触发, 也可手动跑",
+          "tools/webconfig/index.html" in head and "workflow_dispatch:" in head)
+    check("工作流用官方 Pages 三件套 (configure/upload/deploy)",
+          all(a in y for a in ("actions/configure-pages@",
+                               "actions/upload-pages-artifact@",
+                               "actions/deploy-pages@")))
+    # 缺 permissions 时 deploy 会失败得很难懂 (OIDC 拿不到 token)
+    check("工作流声明 pages/id-token 权限",
+          "pages: write" in y and "id-token: write" in y)
+
+
 def wait_dev(port, up, timeout=20):
     """等 /state 里的设备在线状态变成 up"""
     end = time.time() + timeout
@@ -2424,6 +2446,7 @@ def main():
     test_connect_gate()
 
     test_direct_contract()
+    test_pages_workflow()
 
     print("\n[5] 页面脚本 (无头浏览器)")
     test_page_js()
