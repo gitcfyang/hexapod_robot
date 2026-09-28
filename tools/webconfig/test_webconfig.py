@@ -241,6 +241,7 @@ STORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_store.c")
 CORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_core.c")
 I2C_C = os.path.join(ROOT, "pico", "Src", "hexapod_i2c_protocol.c")
 HAL_C = os.path.join(ROOT, "pico", "Src", "hexapod_hal_pico.c")
+HAL_H = os.path.join(ROOT, "pico", "Inc", "hexapod_hal.h")
 BNO_C = os.path.join(ROOT, "pico", "Src", "bno055.c")
 BNO_H = os.path.join(ROOT, "pico", "Inc", "bno055.h")
 PICO_C = os.path.join(ROOT, "pico", "hexapod_pico.c")
@@ -367,6 +368,27 @@ def test_firmware_contract():
     check("!IMUR 已解锁时拒绝 (与 !SAVE 的 safe_context 同一判据)",
           "robot is armed, disarm first (!S)" in hal
           and "ctrl_state && ctrl_state->robot_on" in hal)
+
+    # IMU 读看门狗 (2026-09-28 真机现场): I2C 事务会整段卡住几分钟, 期间八行读数
+    # 全缺、last: 冻结, 而空闲时唯一的 I2C 恢复挂在舵机 flush 上 (它没待写舵机就
+    # 提前返回) —— 等于没有任何自恢复。这几条静态钉住"看门狗确实挂上了", 因为
+    # 挂漏了在真机上只表现为"IMU 又不动了", 没有任何报错。
+    hal_h = open(HAL_H, encoding="utf-8").read()
+    check("IMU 读看门狗挂在控制回路每周期 + !IMU 命令里 (校准模式控制回路提前返回)",
+          "hal_imu_recover_step(robot->state.robot_on);" in core
+          and "hal_imu_recover_step(ctrl_state && ctrl_state->robot_on);" in hal)
+    check("看门狗两级恢复: 总线恢复 → 重新初始化 (含声明与失败计数)",
+          "void hal_imu_recover_step(bool robot_on);" in hal_h
+          and "void hal_imu_recover_step(bool robot_on)" in hal
+          and "pca9685_i2c_recover();" in hal
+          and "if (hal_imu_init()) {" in hal
+          and "g_imu_fail_run++;" in hal)
+    check("看门狗在解锁状态下不做重新初始化 (会阻塞主循环数秒)",
+          "机器人已解锁, 跳过重新初始化" in hal)
+    check("看门狗与失败计数都有打印 (原来整段卡住是全静默的)",
+          '"[IMU] 读连续失败 %u 次' in hal
+          and '"[IMU] 读数恢复 (连续失败 %u 次' in hal
+          and '"fail: 连续 %u 次' in hal)
 
     # 硬件版本行 ([HW]) 与四条原始传感器行 (!IMU): 网页状态栏/曲线的数据源。
     # 文案对不上就整行丢掉 —— 页面没有任何报错, 只是版本栏永远"—"、曲线停在
@@ -1570,10 +1592,11 @@ S_SERVO_AGAIN = [
 DIRECT_LINES = (S_VER + S_BATT + S_BATT_ABSENT + S_I2C + S_I2C_Q + S_IMU
                 + S_SERVO + S_SERVO_AGAIN + S_CH_CRSF + S_CH_PS2 + S_CH_CRSF
                 + S_RUN + S_PER + S_PORTS + S_HO + S_U0 + S_PARAMS + S_RC
-                + ["[FOO] 固件以后新加的行"])
+                + ["[IMU] 读连续失败 20 次 (约 210ms, 累计 57 次) → 总线恢复",
+                   "[FOO] 固件以后新加的行"])
 
 # 解析出来的行不再当 raw 重发 (server.py on_line 与页面 RAW_SKIP 各一份)
-RAW_SKIP = ["params", "per", "ch", "rc", "run", "ho", "ports"]
+RAW_SKIP = ["params", "per", "ch", "imu", "rc", "run", "ho", "ports"]
 
 
 def _first_diff(a, b):
@@ -1834,6 +1857,19 @@ def test_direct_engine():
                                 "[CH]", "[RC]", "[RUN]", "[IDLE]", "[U0]",
                                 "[U0TX]", "Robot "))
                   for r in raws), str(raws[:3]))
+    # IMU 数据行同理: 5Hz × 十来行会把 600 行日志面板十几秒冲干净。留在日志里的
+    # 是**没有解析器**的 IMU 杂项行 (表头/INT_STA/INT cfg/SW rev/页脚) —— 与
+    # "[P] WARN 认不出来就进日志" 同一原则, 别顺手把它们也藏了
+    check("raw 白名单: IMU 数据行不进日志 (5Hz 推送)",
+          not any(r.startswith(("calib:", "accel:", "gyro:", "mag:", "temp:",
+                                "last:", "available:")) for r in raws),
+          str([r for r in raws if r.startswith(("calib:", "accel:", "last:"))][:3]))
+    check("raw 白名单: 没有解析器的 IMU 杂项行 (INT_STA 等) 照旧进日志",
+          any(r.startswith("INT_STA=") for r in raws),
+          str([r for r in raws if r.startswith(("INT_STA", "SW rev"))][:2]))
+    check("raw 白名单: 固件看门狗的 [IMU] 警告行照常进日志 (认不出来 = 进日志)",
+          any(r.startswith("[IMU] 读连续失败") for r in raws),
+          str([r for r in raws if r.startswith("[IMU]")][:3]))
     check("raw 白名单: 认不出来的行原样进日志",
           "=== Battery ADC (GP28/ADC2, divider 47/377) ===" in raws
           and "[P] FAIL unknown param 'nosuch' (试 !CFG 列出全部)" in raws
@@ -2018,6 +2054,16 @@ def test_direct_contract():
     js_kinds = [x.strip().strip('"') for x in m_js.group(1).split(",") if x.strip()]
     check("raw 白名单同表 (server on_line 与页面 RAW_SKIP)",
           kinds == js_kinds == RAW_SKIP, f"server={kinds} 页面={js_kinds}")
+
+    # !IMU 轮询间隔: 直连态 (页面 iv.imu) 与 server 态 (--imu-interval 默认) 同值,
+    # 否则同一块板在两种模式下"跟手程度"不一样, 而用户看不出是模式差异
+    m_iv = re.search(r"const iv = \{[^}]*?imu: ([0-9.]+)", src)
+    m_si = re.search(r'"--imu-interval", type=float, default=([0-9.]+)', srv)
+    check("!IMU 轮询间隔同值 (页面 iv.imu = server --imu-interval 默认)",
+          bool(m_iv and m_si) and m_iv.group(1) == m_si.group(1),
+          f"页面={m_iv and m_iv.group(1)} server={m_si and m_si.group(1)}")
+    check("!IMU 轮询间隔是 0.2s (5Hz —— 姿态数字与曲线要跟手)",
+          bool(m_iv) and m_iv.group(1) == "0.2", m_iv and m_iv.group(1))
 
 
 def test_pages_workflow():
