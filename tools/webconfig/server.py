@@ -124,6 +124,26 @@ def imu_block_fold(state, line):
         return state, not line.startswith("fail:")
     return 0, False
 
+
+# I2C 检测块 (固件 i2c_bus_check, 网页每 3s 轮询一次 !I2C q) 整块折叠, 与 IMU 块
+# 同一个套路。整块 7 行 (手动全扫描时 ~137 行) 全是喂卡片的诊断值, 在日志面板里
+# 就是每 3s 刷一遍。同样只压噪不藏故障: 设备掉线/CHIP_ID 不对的行照常进日志。
+I2C_BLOCK_HEAD = "=== I2C Bus Check"    # 前缀: 后面还带 (SDA=GP14, SCL=GP15) quick
+I2C_BLOCK_TAIL = "Bus idle:"            # 前缀: 后面还带两路电平读数
+I2C_BLOCK_MAX = 160     # 兜底: 手动全扫描 128 个地址时整块 ~137 行
+
+
+def i2c_block_fold(state, line):
+    """I2C 检测块折叠的一步: 回 (新状态, 这行要不要挡在日志面板外)。"""
+    if line.startswith(I2C_BLOCK_HEAD):
+        return 1, True
+    if state:
+        state += 1
+        if line.startswith(I2C_BLOCK_TAIL) or state > I2C_BLOCK_MAX:
+            state = 0
+        return state, not ("NOT FOUND" in line or "present but" in line)
+    return 0, False
+
 RE_SERVO_BOARD = re.compile(r"^Board 0x([0-9A-F]{2}) \((\w+)\): (.*)$")
 RE_SERVO_ITEM = re.compile(r"\[(\d+)\]:(-?\d+)")
 
@@ -1154,9 +1174,10 @@ def main():
         args.ports_interval = 0
 
     imu_block = 0      # >0 = 正在 IMU 状态块内 (值 = 块内已收行数)
+    i2c_block = 0      # >0 = 正在 I2C 检测块内 (同上)
 
     def on_line(line):
-        nonlocal imu_block
+        nonlocal imu_block, i2c_block
         _stats["lines"] += 1
         m = RE_DEV.match(line)
         if m:
@@ -1166,8 +1187,11 @@ def main():
         if line.startswith("[TCP]"):
             broadcast({"t": "bridge", "msg": line})
             return
-        # IMU 状态块折叠: 只挡日志面板, 照常解析 —— 数据行要喂曲线 (见 imu_block_fold)
-        imu_block, folded = imu_block_fold(imu_block, line)
+        # 两个状态块折叠: 只挡日志面板, 照常解析 —— IMU 数据行要喂曲线, I2C 行
+        # 要喂卡片 (见 imu_block_fold / i2c_block_fold)
+        imu_block, folded_imu = imu_block_fold(imu_block, line)
+        i2c_block, folded_i2c = i2c_block_fold(i2c_block, line)
+        folded = folded_imu or folded_i2c
         parsed = parse_line(TELEM, line)
         # 被解析出来的行不再当 raw 重发: 它们在自己的页面上有专门显示, 而日志
         # 面板是给"没人认领"的行用的。参数行一次 !CFG 就是几十行; [CH] 与 IMU

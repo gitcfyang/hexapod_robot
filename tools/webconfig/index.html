@@ -3314,6 +3314,14 @@ const IMU_BLOCK_HEAD = "=== IMU Status ===";
 const IMU_BLOCK_TAIL = "===================";
 const IMU_BLOCK_MAX = 16;    // 兜底: 页脚那行半路丢了也不能把日志永久堵死
 
+/* I2C 检测块 (=== I2C Bus Check … Bus idle: …) 整块折叠: 网页每 3s 轮询一次
+ * !I2C q, 整块 7 行 (手动全扫描时 ~137 行) 全是喂卡片的诊断值 —— 卡片上都有,
+ * 日志面板不必再刷一遍。只压噪不藏故障: 设备掉线/CHIP_ID 不对的行照常进日志。
+ * server.py 同款 (I2C_BLOCK_*, 两边必须一致) */
+const I2C_BLOCK_HEAD = "=== I2C Bus Check";   // 前缀: 后面还带 (SDA=...) quick
+const I2C_BLOCK_TAIL = "Bus idle:";           // 前缀: 后面还带两路电平读数
+const I2C_BLOCK_MAX = 160;   // 兜底: 手动全扫描 128 个地址时整块 ~137 行
+
 const Direct = {
   supported() { return typeof navigator !== "undefined" && "serial" in navigator; },
 
@@ -3333,17 +3341,25 @@ const Direct = {
   readerDone: null, _readerDone: null,
   telem: newTelem(),    // 始终是个能用的遥测对象 (断开时也只是回到空)
   imuBlock: 0,          // >0 = 正在 IMU 状态块内 (值 = 块内已收行数)
+  i2cBlock: 0,          // >0 = 正在 I2C 检测块内 (同上)
 
   /* 一行固件输出 → 帧 (块折叠 + raw 白名单在前, 与 server.py 的 on_line 同序。
      折叠只挡日志面板, 照常解析 —— 数据行要喂曲线) */
   handleLine(line) {
-    let folded = false;
-    if (line === IMU_BLOCK_HEAD) { Direct.imuBlock = 1; folded = true; }
+    let foldedImu = false, foldedI2c = false;
+    if (line === IMU_BLOCK_HEAD) { Direct.imuBlock = 1; foldedImu = true; }
     else if (Direct.imuBlock) {
       Direct.imuBlock += 1;
       if (line === IMU_BLOCK_TAIL || Direct.imuBlock > IMU_BLOCK_MAX) Direct.imuBlock = 0;
-      folded = line.indexOf("fail:") !== 0;
+      foldedImu = line.indexOf("fail:") !== 0;
     }
+    if (line.indexOf(I2C_BLOCK_HEAD) === 0) { Direct.i2cBlock = 1; foldedI2c = true; }
+    else if (Direct.i2cBlock) {
+      Direct.i2cBlock += 1;
+      if (line.indexOf(I2C_BLOCK_TAIL) === 0 || Direct.i2cBlock > I2C_BLOCK_MAX) Direct.i2cBlock = 0;
+      foldedI2c = line.indexOf("NOT FOUND") < 0 && line.indexOf("present but") < 0;
+    }
+    const folded = foldedImu || foldedI2c;
     const parsed = parseLine(Direct.telem, line);
     if (!folded && !(parsed && RAW_SKIP.has(parsed[0]))) handleFrame({ t: "raw", line });
     if (parsed) handleFrame({ t: parsed[0], d: parsed[1] });
