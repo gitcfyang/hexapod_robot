@@ -1110,7 +1110,8 @@ def main():
     ap.add_argument("--bridge-host", default="127.0.0.1", help="串口桥接地址")
     ap.add_argument("--bridge-port", type=int, default=7100, help="串口桥接端口")
     ap.add_argument("--batt-interval", type=float, default=2.0, help="!BATT 轮询间隔秒 (0=关)")
-    ap.add_argument("--imu-interval", type=float, default=1.0, help="!IMU 轮询间隔秒 (0=关)")
+    ap.add_argument("--imu-interval", type=float, default=0.2,
+                    help="!IMU 轮询间隔秒 (0=关; 默认 0.2 = 5Hz, 与页面直连态一致)")
     ap.add_argument("--servo-interval", type=float, default=2.0, help="!A 轮询间隔秒 (0=关)")
     ap.add_argument("--i2c-interval", type=float, default=3.0,
                     help="!I2C q (I2C 总线) 轮询间隔秒 (0=关)")
@@ -1140,11 +1141,11 @@ def main():
             return
         parsed = parse_line(TELEM, line)
         # 被解析出来的行不再当 raw 重发: 它们在自己的页面上有专门显示, 而日志
-        # 面板是给"没人认领"的行用的。参数行一次 !CFG 就是几十行; [CH] 是 5Hz
-        # 推送; !PERIPH 每 2s 6 行; rc 心跳每 ~2s 一条 —— 都会把日志冲掉。
-        # (FAIL/WARN 提示行解析不出来, 仍然照常进日志)
-        if not (parsed and parsed[0] in ("params", "per", "ch", "rc", "run", "ho",
-                                         "ports")):
+        # 面板是给"没人认领"的行用的。参数行一次 !CFG 就是几十行; [CH] 与 IMU
+        # 都是 5Hz 推送 (IMU 一次 12 行); !PERIPH 每 2s 6 行; rc 心跳每 ~2s 一条
+        # —— 都会把日志冲掉。(固件 [IMU] 警告行解析不出来, 仍然照常进日志)
+        if not (parsed and parsed[0] in ("params", "per", "ch", "imu", "rc", "run",
+                                         "ho", "ports")):
             broadcast({"t": "raw", "line": line})
         if parsed:
             key, snap = parsed

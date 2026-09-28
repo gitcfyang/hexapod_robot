@@ -3301,8 +3301,10 @@ function parseLine(t, line) {
 }
 
 /* 被解析出来的行不再当 raw 重发: 它们在自己的页面上有专门显示, 而日志面板
- * 是给"没人认领"的行用的 (server.py 同款白名单, 两处必须一致) */
-const RAW_SKIP = new Set(["params", "per", "ch", "rc", "run", "ho", "ports"]);
+ * 是给"没人认领"的行用的 (server.py 同款白名单, 两处必须一致)。
+ * imu 与 ch 同理: 都是一次十来行的高频推送 (5Hz), 全进日志面板会把 600 行的
+ * 面板十几秒冲干净 —— 而 [IMU] 警告行解析不出来, 仍然照常进日志 (见固件看门狗) */
+const RAW_SKIP = new Set(["params", "per", "ch", "imu", "rc", "run", "ho", "ports"]);
 
 const Direct = {
   supported() { return typeof navigator !== "undefined" && "serial" in navigator; },
@@ -3487,7 +3489,9 @@ const Direct = {
      而心跳是"调试页还开着"的续租, 停了它固件 6s 后就把遥控器放进来) */
   startPoller() {
     Direct.stopPoller();
-    const iv = { batt: 2, imu: 1, servo: 2, i2c: 3, periph: 2, rc: 2, ports: 2 };
+    /* !IMU 5Hz: 姿态/曲线要跟手 (0.2s; tick 100ms 一拍, 与 server.py
+       --imu-interval 默认一致)。它一次回 12 行, 数据行由 RAW_SKIP 挡在日志面板外 */
+    const iv = { batt: 2, imu: 0.2, servo: 2, i2c: 3, periph: 2, rc: 2, ports: 2 };
     const next = {};
     const tick = () => {
       Direct.timer = setTimeout(tick, 100);
