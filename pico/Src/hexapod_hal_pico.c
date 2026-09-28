@@ -1146,6 +1146,19 @@ static bool calib_handle_command(uint8_t *buf, uint8_t len)
 
 /* ==================== I2C 总线检测 (!I2C) ==================== */
 
+/** pad 的真实电平 (0/1) —— 读 IO bank 的 INFROMPAD 位, 与引脚功能无关。
+ *
+ * 不用 gpio_get: 它读的是 SIO 的输入寄存器, 引脚不在 SIO 功能上时那一路就废了
+ * (要读准得先把引脚切回 SIO —— 而切走正是锁死外设的那个动作, 见 i2c_bus_check
+ * 末尾的现场记录)。INFROMPAD 是"进 override 之前、来自 pad 的输入", 与 FUNCSEL
+ * 无关, 引脚可以一直留在 I2C 功能上就把电平量了。
+ * 注意它量的是线上此刻的真实电平 —— 事务刚结束时线还没回到空闲高电平, 量之前
+ * 得留出上拉爬升的时间 (见调用处)。 */
+static int pad_level(uint pin)
+{
+    return (io_bank0_hw->io[pin].status & IO_BANK0_GPIO0_STATUS_INFROMPAD_BITS) ? 1 : 0;
+}
+
 /**
  * @brief 检测 I2C 总线上的 PCA9685 和 BNO055
  * @note 独立于机器人初始化, 启动失败/等待状态也可执行
@@ -1221,23 +1234,29 @@ static void i2c_bus_check(bool full_scan)
         pca9685_scan_bus();
     }
 
-    /* 总线空闲电平诊断: 临时切为 GPIO 输入上拉读取, 再恢复 I2C 功能。
-     * 0 = 被器件拉低 (器件损坏把总线拖死) 或 GPIO 引脚本身损坏;
-     * 1 = 线路空闲正常 → 设备在线但 I2C 模块已死 (需换器件)。 */
-    gpio_set_function(PCA9685_I2C_SDA_PIN, GPIO_FUNC_SIO);
-    gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_SIO);
-    gpio_set_dir(PCA9685_I2C_SDA_PIN, GPIO_IN);
-    gpio_set_dir(PCA9685_I2C_SCL_PIN, GPIO_IN);
-    gpio_pull_up(PCA9685_I2C_SDA_PIN);
-    gpio_pull_up(PCA9685_I2C_SCL_PIN);
-    sleep_ms(2);   /* 等待上拉稳定 */
+    /* 总线空闲电平诊断: 引脚全程留在 I2C 功能上, 直接读 pad 输入电平。
+     * 0 = 被器件拉低 (器件损坏把总线拖死) / 主控自己压着 / GPIO 引脚损坏;
+     * 1 = 线路空闲正常 → 设备在线但 I2C 模块已死 (需换器件)。
+     *
+     * ⚠️ 2026-09-29 真机现场: 这里原本把 SDA/SCL 切成 GPIO_FUNC_SIO 输入、
+     * 读电平、再切回 I2C —— 而切出去的瞬间 I2C 外设自己的 SDA/SCL 输入会读到 0
+     * (RP2040 的 IO mux 只把 pad 输入接给被选中的那个功能), 外设把这个当成总线
+     * 事件锁存下来, 之后所有事务一律失败, 直到看门狗的总线恢复 (i2c_deinit +
+     * i2c_init) 才清掉。实测: 网页每 3s 的 !I2C q 轮询 → 141s 内 21 次卡死;
+     * 零轮询 / 只轮询 !IMU 各 180s 都不复现; 23 次恢复中没有一次 SDA 被拉死。
+     * 对照 pca9685_i2c_recover(): 它先 i2c_deinit 再切引脚、切回来再 i2c_init,
+     * 同样的动作在那边是解药 —— 区别就在这里。
+     * 现在改读 pad_level() (IO bank 的 INFROMPAD, 与 FUNCSEL 无关), 上拉也一直
+     * 开着 (i2c_init 与 gpio_set_function 都不动 PADS 的上拉位), 所以语义与原来
+     * 一字不差, 还顺带能读出"主控自己压着 SCL"这种被 mux 掩盖的状态。
+     *
+     * 量之前必须先等总线回到空闲电平: 最后一次事务就在几十微秒前, 上拉把线拉回
+     * 高要 µs 级时间 (10k 上拉 × 总线电容), 立刻读会读到还在爬升/仍被压住的电平
+     * —— 实测同一根健康总线一半读到 1 一半读到 0 (换 INFROMPAD 之后照样, 所以
+     * 那不是"读到过期值", 是量早了)。真的被器件拉死时, 等多久都是 0。 */
+    sleep_ms(2);
     hal_debug_printf("Bus idle: SDA(GP14)=%d SCL(GP15)=%d (1=空闲正常, 0=被拉低/短路/引脚损坏)\r\n",
-                     gpio_get(PCA9685_I2C_SDA_PIN), gpio_get(PCA9685_I2C_SCL_PIN));
-    /* 恢复 I2C 引脚功能 */
-    gpio_set_function(PCA9685_I2C_SDA_PIN, GPIO_FUNC_I2C);
-    gpio_set_function(PCA9685_I2C_SCL_PIN, GPIO_FUNC_I2C);
-    gpio_pull_up(PCA9685_I2C_SDA_PIN);
-    gpio_pull_up(PCA9685_I2C_SCL_PIN);
+                     pad_level(PCA9685_I2C_SDA_PIN), pad_level(PCA9685_I2C_SCL_PIN));
 }
 
 /* 前置声明: 周期校准命令处理 (定义在本文件后部) */
