@@ -20,27 +20,25 @@ PORT="${HEXAPOD_WC_PORT:-8080}"
 LOG="${HEXAPOD_WC_LOG:-/tmp/hexapod-webconfig.log}"
 BRIDGE_PATTERN="tools/serial_console\.py"
 
-# server.py 的进程: 命令行里得同时有 python 和 webconfig/server.py。
-# (别用 pgrep -f 直接收网: 编辑器、测试、这个脚本自己的路径都可能撞上。)
-server_pids() {
-    local pid cmd
-    for pid in $(pgrep -f 'webconfig/server\.py' 2>/dev/null || true); do
-        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-        case "$cmd" in
-            *python*webconfig/server.py*) echo "$pid" ;;
-        esac
+# 找脚本进程: 先 pgrep 收个大概, 再逐条核实 ——
+#   ① /proc/<pid>/exe 必须真的是 python (排除临时 shell: 一条命令的文本里
+#      提到过 "python ... server.py" 也会被 pgrep 收进来, 杀它就把人家终端干了);
+#   ② 命令行里得有一个参数**就是**那个脚本的路径 (不是"文本里提到")。
+script_pids() {
+    local pattern="$1" script="$2" pid exe arg
+    for pid in $(pgrep -f "$pattern" 2>/dev/null || true); do
+        exe="$(basename "$(readlink "/proc/$pid/exe" 2>/dev/null || true)" 2>/dev/null || true)"
+        case "$exe" in python*) ;; *) continue ;; esac
+        while IFS= read -r -d '' arg; do
+            case "$arg" in
+                *"$script") echo "$pid"; break ;;
+            esac
+        done < "/proc/$pid/cmdline"
     done
 }
 
-bridge_pid() {
-    local pid cmd
-    for pid in $(pgrep -f "$BRIDGE_PATTERN" 2>/dev/null || true); do
-        cmd="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-        case "$cmd" in
-            *python*serial_console.py*) echo "$pid"; return ;;
-        esac
-    done
-}
+server_pids() { script_pids 'webconfig/server\.py' 'webconfig/server.py'; }
+bridge_pid()  { script_pids "$BRIDGE_PATTERN" 'tools/serial_console.py' | head -1; }
 
 port_open() {
     (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null
