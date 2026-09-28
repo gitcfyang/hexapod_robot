@@ -100,6 +100,11 @@ S_IMU = [
     "available: YES  addr: 0x29",
     "calib: sys=3 gyr=3 acc=3 mag=0 (fully)",
     "INT_STA=0x80 (bit7=BSX_DRDY)",
+    # 原始传感器行 (imu_status_print): 每行挑一个负轴, 钉住 -?\d+ 的负号分支
+    "accel: x=12 y=5 z=-1002 (0.01 m/s2)",
+    "gyro: x=0 y=0 z=-45 (1/16 dps)",
+    "mag: x=-32 y=64 z=0 (1/16 uT)",
+    "temp: 31 (C)",
     "last: roll=-12 pitch=34 yaw=567 (0.1deg) valid=1",
     "===================",
 ]
@@ -120,10 +125,12 @@ S_CH_PS2 = [
     "[CH] m=ps2 con=1 btns=65535 lx=128 ly=130 rx=127 ry=126 fc=987",
 ]
 
-# 固件版本 (hexapod_hal_pico.c: hal_fw_version_print): 开机横幅 + !VER 共用。
-# 内容是 git describe 的结果, 所以样本取个"长得像"的字符串即可。
+# 固件版本 (hexapod_hal_pico.c: hal_fw_version_print): 开机横幅 + !VER 共用两行。
+# 固件内容是 git describe 的结果, 所以样本取个"长得像"的字符串即可;
+# [HW] 是 HEXAPOD_HW_VERSION 常量 (换板时人工改)。
 S_VER = [
     "[VER] Hexapod v0.3.0-16-g8f5b04f-dirty",
+    "[HW] PCB v2",
 ]
 
 # 遥控门回执 (hexapod_hal_pico.c: !RC 命令 + 6s 超时自解锁): 严格两单词,
@@ -235,6 +242,7 @@ CORE_C = os.path.join(ROOT, "pico", "Src", "hexapod_core.c")
 I2C_C = os.path.join(ROOT, "pico", "Src", "hexapod_i2c_protocol.c")
 HAL_C = os.path.join(ROOT, "pico", "Src", "hexapod_hal_pico.c")
 BNO_C = os.path.join(ROOT, "pico", "Src", "bno055.c")
+BNO_H = os.path.join(ROOT, "pico", "Inc", "bno055.h")
 PICO_C = os.path.join(ROOT, "pico", "hexapod_pico.c")
 INDEX_HTML = os.path.join(HERE, "index.html")
 
@@ -359,6 +367,33 @@ def test_firmware_contract():
     check("!IMUR 已解锁时拒绝 (与 !SAVE 的 safe_context 同一判据)",
           "robot is armed, disarm first (!S)" in hal
           and "ctrl_state && ctrl_state->robot_on" in hal)
+
+    # 硬件版本行 ([HW]) 与四条原始传感器行 (!IMU): 网页状态栏/曲线的数据源。
+    # 文案对不上就整行丢掉 —— 页面没有任何报错, 只是版本栏永远"—"、曲线停在
+    # "等待遥测数据…" (样本在 [1] 里, 解析正则在这里反过来钉固件的 printf)
+    check("固件版本应答带 [HW] 行, 硬件版本来自 config.h 常量",
+          '"[HW] %s\\r\\n"' in hal and "HEXAPOD_HW_VERSION" in hal
+          and '#define HEXAPOD_HW_VERSION "PCB v2"' in cfg)
+    check("固件 !IMU 输出四条原始传感器行 (前缀与解析正则对齐)",
+          all(f'"{k}: x=%d y=%d z=%d' in hal
+              for k in ("accel", "gyro", "mag"))
+          and '"temp: %d' in hal
+          and wc.RE_IMU_ACC.match(S_IMU[4]) is not None
+          and wc.RE_IMU_GYR.match(S_IMU[5]) is not None
+          and wc.RE_IMU_MAG.match(S_IMU[6]) is not None
+          and wc.RE_IMU_TEMP.match(S_IMU[7]) is not None)
+    # 驱动侧: 寄存器地址 (BNO055 数据手册 Page 0) 与四个读函数, 以及单位注释 ——
+    # 单位错了曲线还在画, 只是数值全错, 比不画更难发现
+    bno_h = open(BNO_H, encoding="utf-8").read()
+    check("BNO055 驱动有加速度/磁力/陀螺/温度读取 (寄存器地址对表)",
+          all(s in bno for s in ("bool bno055_read_accel", "bool bno055_read_mag",
+                                 "bool bno055_read_gyro", "bool bno055_read_temp"))
+          and all(s in bno_h for s in ("BNO055_REG_ACC_DATA_X_LSB   0x08",
+                                       "BNO055_REG_MAG_DATA_X_LSB   0x0E",
+                                       "BNO055_REG_GYR_DATA_X_LSB   0x14",
+                                       "BNO055_REG_TEMP             0x34")))
+    check("BNO055 原始数据的单位在头文件里写明 (0.01 m/s² / 1/16 dps / 1/16 uT)",
+          "0.01 m/s²" in bno_h and "1/16 dps" in bno_h and "1/16 uT" in bno_h)
 
     # 舵机机械中心 (!HO 单路 / !HOS 全量): 网页校准页的写入与回读通道。四个易错点
     # 都只在真机上才现形, 静态钉住:
@@ -685,6 +720,14 @@ def test_parser():
           == (-12, 34, 567) and m.get("valid") == 1)
     check("IMU: 校准等级与 fully 标记",
           m["calib"] == {"sys": 3, "gyr": 3, "acc": 3, "mag": 0} and m["fully"] is True)
+    # 原始传感器 (网页曲线数据源): 三轴完整 + 负号保真 + 温度有符号
+    check("IMU: 加速度三轴 (含负轴)", m.get("acc") == {"x": 12, "y": 5, "z": -1002},
+          str(m.get("acc")))
+    check("IMU: 陀螺仪三轴 (含负轴)", m.get("gyr") == {"x": 0, "y": 0, "z": -45},
+          str(m.get("gyr")))
+    check("IMU: 磁力计三轴 (含负轴)", m.get("mag") == {"x": -32, "y": 64, "z": 0},
+          str(m.get("mag")))
+    check("IMU: 温度 (可负的 int8)", m.get("temp") == 31, str(m.get("temp")))
 
     t = wc.Telemetry()
     for line in S_SERVO:
@@ -834,6 +877,14 @@ def test_parser():
     check("[VER] 解析为 ver 帧", r is not None and r[0] == "ver", str(r))
     check("[VER] 版本原文整行保留 (含 git 哈希/dirty 标记)",
           r and r[1].get("text") == "Hexapod v0.3.0-16-g8f5b04f-dirty", str(r[1]))
+
+    # 硬件版本 ([HW], 紧跟在 [VER] 后): 状态栏与开始页的"跑在哪版板子上"
+    r = wc.parse_line(t, S_VER[1])
+    check("[HW] 解析为 hw 帧", r is not None and r[0] == "hw", str(r))
+    check("[HW] 硬件版本原文保留", r and r[1].get("text") == "PCB v2", str(r[1]))
+    check("[HW] 与 [VER] 分属两个子系统 (不互相覆盖)",
+          t.snapshot().get("ver", {}).get("text") == "Hexapod v0.3.0-16-g8f5b04f-dirty"
+          and t.snapshot().get("hw", {}).get("text") == "PCB v2")
 
     # 设备在线状态行 ([TCP] dev ...) 由 serial_console 发布, 走的是桥接路径
     # (on_line 里最先判定) —— 这里只验正则本身认哪些、不认哪些
@@ -1557,7 +1608,10 @@ PROBE_DIRECT_JS = """
 <script>
 try {
   var LINES = """ + json.dumps(DIRECT_LINES, ensure_ascii=False) + """;
+  var S_IMU_LINES = """ + json.dumps(S_IMU, ensure_ascii=False) + """;
+  var S_VER_LINES = """ + json.dumps(S_VER, ensure_ascii=False) + """;
   var out = {renderErrs: [], frames: []};
+  var realFrame = handleFrame;   /* 第二拍会换成记录器, 先留一份真的 */
   /* 第一拍: 每一步都过**真的** handleFrame —— 渲染函数 (renderBatt/renderI2c/…)
      抛异常在前端是"页面卡住", 什么回执都没有, 只能在这里拦 */
   Direct.telem = Direct.newTelem();
@@ -1634,14 +1688,43 @@ try {
                boards: Object.keys(b3.boards).sort(),
                b41: b3.boards["41"], b40: b3.boards["40"]};
 
+  /* 版本行/曲线: 走真的 handleFrame (第二拍换成了记录器, 这里换回来) */
+  handleFrame = realFrame;
+  var feed = function (lines) {
+    for (var i = 0; i < lines.length; i++) Direct.handleLine(lines[i]);
+  };
+  var hlen = function () {
+    return ["att", "acc", "gyr", "mag", "tmp"]
+      .map(function (k) { return IMU_HIST[k].length; }).join(",");
+  };
+  for (var hk in IMU_HIST) { IMU_HIST[hk].length = 0; IMU_PREV[hk] = ""; }
+  feed(S_IMU_LINES);
+  out.imuLen1 = hlen();
+  out.accPt = JSON.stringify(IMU_HIST.acc[0]);
+  feed(S_IMU_LINES);              /* 同一份快照再喂一遍: 值没变, 一个点都不许加 */
+  out.imuLen2 = hlen();
+  feed(S_VER_LINES);
+  out.verBar = [$("fwver").textContent, $("hwver").textContent];
+  out.welVer = [$("wel-ver").textContent, $("wel-hw").textContent];
+  feed(["available: NO  addr: 0x29"]);   /* 掉线: 五条曲线全清 */
+  out.imuLen3 = hlen();
+
   /* 直连态的开始页: 桥接行/固件卡/桥接日志区必须**算出来**不可见。只看 hidden
      属性会被样式表骗 —— .row{display:flex} 盖掉浏览器默认的 [hidden]{display:none},
-     于是 el.hidden = true 看着设了却没藏住 (直连态还显示"串口桥接"就是它) */
+     于是 el.hidden = true 看着设了却没藏住 (直连态还显示"串口桥接"就是它)。
+     版本行反着来: 从固件卡挪进通用状态区, 直连态必须可见 */
   MODE = "direct"; applyModeUI(); renderWelcome();
   out.hideDirect = ["wel-row-bridge", "wel-fw-card", "wel-log-sect"]
     .map(function (id) { return getComputedStyle($(id)).display; });
+  out.showVer = ["wel-row-ver", "wel-row-hw"]
+    .map(function (id) { return getComputedStyle($(id)).display; });
   MODE = "server"; applyModeUI(); renderWelcome();
   out.hideServer = getComputedStyle($("wel-row-bridge")).display;   /* 正对照 */
+
+  /* 真画一遍 (welcome 挡着时 canvas clientWidth=0, drawMultiChart 会早退) */
+  enterDebugUI(); drawAllCharts();
+  out.drawW = [$("chart").clientWidth, $("ch-att").clientWidth];
+  out.drew = true;
   $("probe").textContent = JSON.stringify(out);
 } catch (e) { $("probe").textContent = "THROW " + e; }
 </script>
@@ -1702,9 +1785,18 @@ def test_direct_engine():
           pr["frames"] == py_frames, _first_diff(pr["frames"], py_frames))
     # 帧类型要真的覆盖到, 否则"两边一致"可能只是两边都没解析出东西
     kinds = sorted({f["t"] for f in py_frames})
-    check("时间线覆盖到 12 类帧 (含 raw 日志路)",
-          kinds == ["batt", "ch", "ho", "i2c", "imu", "params", "per", "ports",
-                    "raw", "rc", "run", "servo", "ver"], str(kinds))
+    check("时间线覆盖到 14 类帧 (含 raw 日志路)",
+          kinds == ["batt", "ch", "ho", "hw", "i2c", "imu", "params", "per",
+                    "ports", "raw", "rc", "run", "servo", "ver"], str(kinds))
+    # 原始传感器字段真的解析出来了 (两边都漏 = 差分一致但全空, 所以单独钉)
+    check("时间线里的 imu 帧带 acc/gyr/mag/temp (不是空壳)",
+          any(f["t"] == "imu" and f["d"].get("acc") == {"x": 12, "y": 5, "z": -1002}
+              and f["d"].get("gyr", {}).get("z") == -45
+              and f["d"].get("mag", {}).get("x") == -32
+              and f["d"].get("temp") == 31
+              for f in py_frames))
+    check("时间线里的 hw 帧带硬件版本",
+          any(f["t"] == "hw" and f["d"].get("text") == "PCB v2" for f in py_frames))
     # raw 白名单: 白名单里的行不再进日志面板 (一次 !CFG 几十行会把日志冲掉),
     # 认不出来的行必须原样进日志
     raws = [f["line"] for f in py_frames if f["t"] == "raw"]
@@ -1762,6 +1854,30 @@ def test_direct_engine():
           pr["hideDirect"] == ["none", "none", "none"], str(pr["hideDirect"]))
     check("服务态桥接行照旧可见 (正对照: 免得上面那条靠「全藏了」蒙过)",
           pr["hideServer"] != "none", str(pr["hideServer"]))
+    # 版本行与固件卡相反: 直连态必须可见 (挪出卡外就是为了这个)
+    check("直连态版本行可见 (与隐藏的固件卡对照)",
+          pr["showVer"] == ["flex", "flex"], str(pr["showVer"]))
+
+    # 曲线: 一帧一个点, 值没变不推点 (轮询快照重复广播), 掉线全清
+    check("曲线: 一帧喂出五条序列各一个点",
+          pr["imuLen1"] == "1,1,1,1,1", pr["imuLen1"])
+    check("曲线: 同一份快照再喂一遍不推新点 (去重)",
+          pr["imuLen2"] == pr["imuLen1"], pr["imuLen2"])
+    acc = json.loads(pr["accPt"])
+    check("曲线: 点里是解析后的原始值 (含负轴)",
+          (acc["x"], acc["y"], acc["z"]) == (12, 5, -1002), pr["accPt"])
+    check("曲线: 掉线 (available: NO) 清空五条序列",
+          pr["imuLen3"] == "0,0,0,0,0", pr["imuLen3"])
+    check("版本帧进状态栏 (固件 … / 硬件 …, 原文保留)",
+          pr["verBar"] == ["固件 Hexapod v0.3.0-16-g8f5b04f-dirty", "硬件 PCB v2"],
+          str(pr["verBar"]))
+    check("版本帧同时写开始页两行",
+          pr["welVer"] == ["Hexapod v0.3.0-16-g8f5b04f-dirty", "PCB v2"],
+          str(pr["welVer"]))
+    # 画图真跑过: 断言画布宽度非零, 否则 drawMultiChart 一直在早退,
+    # "没抛异常"就变成空断言 (隐藏页 clientWidth=0)
+    check("五张图画布有实际宽度 (真走过绘制路径, 不是早退)",
+          pr["drew"] and pr["drawW"][0] > 0 and pr["drawW"][1] > 0, str(pr["drawW"]))
 
 
 # 「双击本地 html」那条路: 页面不能因为 scheme 是 file 就退回服务端态 (那样开始页
@@ -1844,6 +1960,13 @@ def test_direct_contract():
         check(f"常量同值: {const}",
               bool(a and b) and a.group(1) == b.group(1),
               f"server={a and a.group(1)} 页面={b and b.group(1)}")
+
+    # 新协议行 (原始传感器 + 硬件版本): 正则体由上面的逐条比对钉住, 这里钉
+    # "接进了行解析" —— 光定义正则不接进解析器 = 数据到了却没人认 (时序测试
+    # 只喂固定夹具, 覆盖不到这种漏接)
+    for name in ("RE_IMU_ACC", "RE_IMU_GYR", "RE_IMU_MAG", "RE_IMU_TEMP", "RE_HW"):
+        check(f"直连契约: {name} 两边都接进了行解析",
+              f"{name}.match(line)" in srv and f"{name}.exec(line)" in src, name)
 
     # raw 白名单: 两边的表必须一字不差 (差了就有行在一边进日志、另一边不进)
     m_py = re.search(r"parsed\[0\] in \(([^)]+)\)", srv, re.S)
@@ -2263,6 +2386,29 @@ def main():
     check("IMU 校准卡复用 !IMU 帧 (等级/姿态与状态页同源)",
           'const cav = $("calimu-av")' in raw_page
           and '$("calimu-calib").className = d.fully ? "ok" : "warn"' in raw_page)
+
+    # 版本与曲线 (2026-09 加): 版本行必须在固件卡**外面** —— 直连态整卡隐藏,
+    # 版本行留在卡里就是"开始页显示不了固件版本" (位置用索引先后钉住)
+    check("开始页版本行在固件卡之外 (直连态才看得见)",
+          'id="wel-row-ver"' in raw_page and 'id="wel-hw"' in raw_page
+          and raw_page.index('id="wel-row-ver"') < raw_page.index('id="wel-fw-card"'))
+    check("状态栏有固件/硬件版本两个位 (x 行/秒旁边)",
+          'id="fwver"' in raw_page and 'id="hwver"' in raw_page)
+    check("直连态版本靠 localStorage 记住 (连过再开开始页也有)",
+          'lsGet("hexapod_ver")' in raw_page and 'lsGet("hexapod_hw")' in raw_page
+          and 'lsSet("hexapod_ver"' in raw_page and 'lsSet("hexapod_hw"' in raw_page)
+    check("状态总览有五张 IMU 曲线 (姿态/加速度/陀螺仪/磁力计/温度)",
+          all(f'id="ch-{k}"' in raw_page for k in ("att", "acc", "gyr", "mag", "tmp"))
+          and 'id="chart"' in raw_page)
+    # 曲线推点必须去重 (轮询帧是累积快照, 不去重会以数倍速灌重复点),
+    # 且重绘点全都要走 drawAllCharts (漏一处 = 那种进页方式下图是空的)
+    check("曲线推点按值去重 (快照重复广播不重复推点)",
+          "function pushHist(key, vals)" in raw_page
+          and "if (s === IMU_PREV[key]) return;" in raw_page)
+    check("切页/出隐藏/缩放/掉线清空都重画全部曲线",
+          raw_page.count("drawAllCharts") >= 4
+          and "if (name === \"dash\") drawAllCharts();" in raw_page
+          and 'window.addEventListener("resize", drawAllCharts);' in raw_page)
 
     # 参数分页: 每页一个 tab 按钮 + 一个卡片宿主。页面本身由 JS 按 PAGES 生成,
     # 所以断言生成器的输入 (PAGES 里的 id) 与 HTML 里的 tab 按钮两边都在。
