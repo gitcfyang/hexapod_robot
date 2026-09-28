@@ -531,8 +531,8 @@
             </div>
 
             <!-- IMU 曲线: 数据来自 !IMU 的四条原始传感器行 (1s 轮询, 见
-                 imu_status_print)。与电池曲线同一套历史缓冲与去重规则:
-                 值没变就不产生新点 (轮询帧会反复重发同一份快照)。 -->
+                 imu_status_print)。与电池曲线同一套历史缓冲: 只留最近 1 分钟,
+                 横轴按真时间铺, 推点带时间闸门 (见 histPush)。 -->
             <div class="box wide">
               <h2>IMU 姿态曲线 (°)</h2>
               <canvas id="ch-att"></canvas>
@@ -783,9 +783,43 @@ function showTab(name) {
 }
 document.querySelectorAll(".tab").forEach(b => b.onclick = () => showTab(b.dataset.tab));
 
+/* ---------------- 曲线历史 (电池 + 下面五张 IMU 共用) ----------------
+   每张图都是"最近 CH_WINDOW_MS 一段"的窗口, 横轴按**真时间**铺开 —— 不是
+   "最近 N 个点": 轮询偶尔漏帧、标签页切到后台被浏览器压成分钟级定时器时,
+   按点数铺会把那段静默挤掉, 按时间才画得如实。
+   推点带一道时间闸门: 一个轮询周期里同一条读数会被后续几帧重复带出来 (帧是
+   累积快照, 见 renderImu 的注释), 距上一个点不足 CH_GATE_MS 就不推。于是
+   静止时值不变也照样每秒长一个点 (曲线不停住), 周期内的重复帧也灌不进来。 */
+const CH_WINDOW_MS = 60 * 1000;   // 窗口长度: 只显示最近 1 分钟
+const CH_GATE_MS = 250;           // 闸门: 大于一个周期内几帧的散开时间 (几十 ms),
+                                  // 小于默认轮询间隔 (IMU 1s / 电池 2s)。谁把轮询
+                                  // 调到比它还快, 快出来的点就会被闸掉
+
+function histPush(h, vals) {
+  const t = Date.now();
+  if (h.length && t - h[h.length - 1].t < CH_GATE_MS) return false;
+  h.push(Object.assign({ t }, vals));
+  while (h.length > 1 && t - h[0].t > CH_WINDOW_MS) h.shift();
+  return true;
+}
+
+/* 时间戳 → 横坐标: 还没满窗时铺满整宽 (刚连上就看得见曲线), 满了就是固定 1 分钟 */
+function histXOf(h, w) {
+  const t0 = h[0].t, span = Math.max(1, h[h.length - 1].t - t0);
+  return (p) => ((p.t - t0) / span) * w;
+}
+
+/* 右下角标出窗口长度 —— 横轴按时间铺了, "这一屏是多长"就得写在脸上 */
+function histWindowLabel(ctx, w, ht, u) {
+  ctx.fillStyle = cssvar("--surface-700");
+  ctx.font = `${u(11)}px ui-monospace, monospace`;
+  ctx.textAlign = "right";
+  ctx.fillText(`最近 ${CH_WINDOW_MS / 60000} 分钟`, w - u(4), ht - u(4));
+  ctx.textAlign = "start";
+}
+
 /* ---------------- 电池曲线 ---------------- */
 const hist = [];              // [{t, mv}]
-const HIST_MAX = 900;
 const cv = $("chart"), ctx = cv.getContext("2d");
 
 function drawChart() {
@@ -817,7 +851,7 @@ function drawChart() {
   const pad = Math.max(40, (mx - mn) * 0.15);
   mn -= pad; mx += pad;
 
-  const X = (i) => (i / (hist.length - 1)) * w;
+  const X = histXOf(hist, w);
   const Y = (mv) => h - ((mv - mn) / (mx - mn)) * h;
 
   ctx.setLineDash([u(4), u(4)]); ctx.lineWidth = u(1);
@@ -830,21 +864,20 @@ function drawChart() {
   const last = hist[hist.length - 1].mv;
   ctx.strokeStyle = cssvar((lo && hi && (last < lo || last > hi)) ? "--error-400" : "--success-400");
   ctx.lineWidth = u(1.6); ctx.beginPath();
-  hist.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p.mv)) : ctx.moveTo(X(i), Y(p.mv)));
+  hist.forEach((p, i) => i ? ctx.lineTo(X(p), Y(p.mv)) : ctx.moveTo(X(p), Y(p.mv)));
   ctx.stroke();
 
   ctx.fillStyle = cssvar("--surface-900"); ctx.font = `${u(11)}px ui-monospace, monospace`;
   ctx.fillText(`${Math.round(mx)} mV`, u(4), u(12));
   ctx.fillText(`${Math.round(mn)} mV`, u(4), h - u(4));
+  histWindowLabel(ctx, w, h, u);
 }
 
 /* ---------------- IMU 曲线 (姿态/加速度/陀螺仪/磁力计/温度) ----------------
    数据来自 !IMU 的输出 (1s 轮询): last: 行给姿态, 四条原始传感器行给其余。
-   轮询帧是累积快照 —— 一条 accel: 行到达后, 同一周期的后续帧还会再带一次
-   同样的 acc, 不去重的话曲线会以数倍速灌重复点, 900 点窗口几分钟就滚完。
-   副作用: 静止时值不变就不产生新点, 曲线停住 —— 诊断图就该是这样。 */
+   推点走上面共用的 histPush (时间闸门 + 1 分钟时间窗), 所以静止时值不变也
+   照样每秒长一个点, 而同一周期内的累积快照不会灌成好几个点。 */
 const IMU_HIST = { att: [], acc: [], gyr: [], mag: [], tmp: [] };
-const IMU_PREV = { att: "", acc: "", gyr: "", mag: "", tmp: "" };
 
 /* 五张图的配置: canvas id / 历史缓冲键 / 各序列 [取值字段, 颜色, 图例名] */
 const IMU_CHARTS = [
@@ -863,15 +896,9 @@ const IMU_CHARTS = [
   { cv: "ch-tmp", key: "tmp", unit: "°C", series: [["v", "--primary-400", "温度"]] },
 ];
 
-/* 推一个点 (值没变就不推) 并重画对应那张图 */
+/* 推一个点并重画对应那张图 —— 推不推由 histPush 的时间闸门说话 */
 function pushHist(key, vals) {
-  const s = JSON.stringify(vals);
-  if (s === IMU_PREV[key]) return;
-  IMU_PREV[key] = s;
-  const h = IMU_HIST[key];
-  h.push(Object.assign({ t: Date.now() }, vals));
-  while (h.length > HIST_MAX) h.shift();
-  drawChartByKey(key);
+  if (histPush(IMU_HIST[key], vals)) drawChartByKey(key);
 }
 
 function drawChartByKey(key) {
@@ -914,20 +941,21 @@ function drawMultiChart(cfg) {
   const pad = (mx - mn) * 0.15 || 1;   // 全等序列也不能除零 (|| 1 兜底)
   mn -= pad; mx += pad;
 
-  const X = (i) => (i / (h.length - 1)) * w;
+  const X = histXOf(h, w);
   const Y = (v) => ht - ((v - mn) / (mx - mn)) * ht;
 
   ctx.lineWidth = u(1.6);
   for (const [k, color] of cfg.series) {
     ctx.strokeStyle = cssvar(color);
     ctx.beginPath();
-    h.forEach((p, i) => i ? ctx.lineTo(X(i), Y(p[k])) : ctx.moveTo(X(i), Y(p[k])));
+    h.forEach((p, i) => i ? ctx.lineTo(X(p), Y(p[k])) : ctx.moveTo(X(p), Y(p[k])));
     ctx.stroke();
   }
 
   ctx.fillStyle = cssvar("--surface-900"); ctx.font = `${u(11)}px ui-monospace, monospace`;
   ctx.fillText(`${Math.round(mx)}${cfg.unit}`, u(4), u(12));
   ctx.fillText(`${Math.round(mn)}${cfg.unit}`, u(4), ht - u(4));
+  histWindowLabel(ctx, w, ht, u);
   /* 图例 (右对齐): 多条线得能分清谁是谁 */
   ctx.textAlign = "right";
   let lx = w - u(4);
@@ -965,9 +993,7 @@ function renderBatt(d) {
     $("batt-v").textContent = d.batt_mv;
     $("batt-v").className = "";
     $("batt-unit").textContent = " mV";
-    hist.push({ t: Date.now(), mv: d.batt_mv });
-    while (hist.length > HIST_MAX) hist.shift();
-    drawChart();
+    if (histPush(hist, { mv: d.batt_mv })) drawChart();
   } else if (absent) {
     $("batt-v").textContent = "USB 供电";
     $("batt-v").className = "dim";
@@ -1027,12 +1053,12 @@ function renderImu(d) {
     $("imu-calib").className = d.fully ? "ok" : "warn";
   }
 
-  /* 曲线: 帧是累积快照, 各序列按值去重 (见 IMU_HIST 处说明)。
+  /* 曲线: 推点走 histPush 的时间闸门 (见 IMU_HIST 处说明)。
      掉线时清空 —— 否则曲线会一直画着拔线/关 IMU 之前的最后读数 */
   if (d.available === false) {
     let had = false;
     for (const k in IMU_HIST) {
-      if (IMU_HIST[k].length) { IMU_HIST[k].length = 0; IMU_PREV[k] = ""; had = true; }
+      if (IMU_HIST[k].length) { IMU_HIST[k].length = 0; had = true; }
     }
     if (had) drawAllCharts();
   } else {

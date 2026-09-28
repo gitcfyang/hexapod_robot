@@ -1610,6 +1610,7 @@ try {
   var LINES = """ + json.dumps(DIRECT_LINES, ensure_ascii=False) + """;
   var S_IMU_LINES = """ + json.dumps(S_IMU, ensure_ascii=False) + """;
   var S_VER_LINES = """ + json.dumps(S_VER, ensure_ascii=False) + """;
+  var S_BATT_LINES = """ + json.dumps(S_BATT, ensure_ascii=False) + """;
   var out = {renderErrs: [], frames: []};
   var realFrame = handleFrame;   /* 第二拍会换成记录器, 先留一份真的 */
   /* 第一拍: 每一步都过**真的** handleFrame —— 渲染函数 (renderBatt/renderI2c/…)
@@ -1697,17 +1698,45 @@ try {
     return ["att", "acc", "gyr", "mag", "tmp"]
       .map(function (k) { return IMU_HIST[k].length; }).join(",");
   };
-  for (var hk in IMU_HIST) { IMU_HIST[hk].length = 0; IMU_PREV[hk] = ""; }
+  /* 把每条序列最后一个点往过去推 ms 毫秒 —— 探针里连喂几遍是同一瞬间,
+     真实轮询的间隔得自己造出来 (闸门放不放行看的就是这个差) */
+  var backdate = function (ms) {
+    for (var k in IMU_HIST) {
+      var h = IMU_HIST[k];
+      if (h.length) h[h.length - 1].t -= ms;
+    }
+  };
+  for (var hk in IMU_HIST) IMU_HIST[hk].length = 0;
   feed(S_IMU_LINES);
   out.imuLen1 = hlen();
   out.accPt = JSON.stringify(IMU_HIST.acc[0]);
-  feed(S_IMU_LINES);              /* 同一份快照再喂一遍: 值没变, 一个点都不许加 */
+  feed(S_IMU_LINES);   /* 同一周期内的重复快照 (紧接着到): 闸门没过, 一个点都不加 */
   out.imuLen2 = hlen();
+  backdate(1000);      /* 一秒后的下一次轮询: 值没变, 但曲线得照长 */
+  feed(S_IMU_LINES);
+  out.imuLen3 = hlen();
+  /* 窗口: 把最老的点推到一分钟以外 —— 再推一个点就得把它挤出去, 条数不涨 */
+  for (var wk in IMU_HIST) if (IMU_HIST[wk].length > 1) IMU_HIST[wk][0].t -= 61000;
+  backdate(1000);
+  feed(S_IMU_LINES);
+  out.imuLen4 = hlen();
+  out.imuOldestAge = Math.round(Date.now() - IMU_HIST.acc[0].t);   /* 老点已被挤掉 */
   feed(S_VER_LINES);
   out.verBar = [$("fwver").textContent, $("hwver").textContent];
   out.welVer = [$("wel-ver").textContent, $("wel-hw").textContent];
   feed(["available: NO  addr: 0x29"]);   /* 掉线: 五条曲线全清 */
-  out.imuLen3 = hlen();
+  out.imuLenClear = hlen();
+
+  /* 电池曲线同一套历史 (同一个 histPush), 也照这几条来一遍 */
+  hist.length = 0;
+  feed(S_BATT_LINES);
+  out.battLen1 = hist.length;
+  feed(S_BATT_LINES);                    /* 重复快照: 闸门挡住 */
+  out.battLen2 = hist.length;
+  hist[hist.length - 1].t -= 2000;       /* 电池轮询 2s */
+  feed(S_BATT_LINES);
+  out.battLen3 = hist.length;
+  out.battPt = JSON.stringify(hist[hist.length - 1]);
 
   /* 直连态的开始页: 桥接行/固件卡/桥接日志区必须**算出来**不可见。只看 hidden
      属性会被样式表骗 —— .row{display:flex} 盖掉浏览器默认的 [hidden]{display:none},
@@ -1858,16 +1887,30 @@ def test_direct_engine():
     check("直连态版本行可见 (与隐藏的固件卡对照)",
           pr["showVer"] == ["flex", "flex"], str(pr["showVer"]))
 
-    # 曲线: 一帧一个点, 值没变不推点 (轮询快照重复广播), 掉线全清
+    # 曲线: 一帧一个点; 同一周期内的重复快照不推点 (时间闸门), 但静止时值不变
+    # 也要照长 —— 这两条合起来才是用户要的"曲线在动, 且不是假的在动"
     check("曲线: 一帧喂出五条序列各一个点",
           pr["imuLen1"] == "1,1,1,1,1", pr["imuLen1"])
-    check("曲线: 同一份快照再喂一遍不推新点 (去重)",
+    check("曲线: 同一周期的重复快照一个点都不推 (闸门 250ms)",
           pr["imuLen2"] == pr["imuLen1"], pr["imuLen2"])
+    check("曲线: 一秒后的下一次轮询值没变也照样长 (不是按值去重)",
+          pr["imuLen3"] == "2,2,2,2,2", pr["imuLen3"])
     acc = json.loads(pr["accPt"])
     check("曲线: 点里是解析后的原始值 (含负轴)",
           (acc["x"], acc["y"], acc["z"]) == (12, 5, -1002), pr["accPt"])
+    # 窗口: 最老的点被挤出窗口后条数不涨 (进来一个、出去一个), 留下的那个是新的
+    check("曲线: 只留最近 1 分钟 (老点挤出窗口, 条数不涨)",
+          pr["imuLen4"] == "2,2,2,2,2" and pr["imuOldestAge"] < 5000,
+          f'{pr["imuLen4"]} 最老的点 {pr["imuOldestAge"]}ms 前')
     check("曲线: 掉线 (available: NO) 清空五条序列",
-          pr["imuLen3"] == "0,0,0,0,0", pr["imuLen3"])
+          pr["imuLenClear"] == "0,0,0,0,0", pr["imuLenClear"])
+    # 电池曲线共用同一套 (同一个 histPush): 闸门/时长都照上面的规矩
+    check("电池曲线: 重复快照不推点, 2s 后的下一轮推一个",
+          pr["battLen1"] == 1 and pr["battLen2"] == 1 and pr["battLen3"] == 2,
+          f'{pr["battLen1"]}/{pr["battLen2"]}/{pr["battLen3"]}')
+    batt = json.loads(pr["battPt"])
+    check("电池曲线: 点里是解析后的 mV",
+          batt["mv"] == 8370 and batt.get("t", 0) > 0, pr["battPt"])
     check("版本帧进状态栏 (固件 … / 硬件 …, 原文保留)",
           pr["verBar"] == ["固件 Hexapod v0.3.0-16-g8f5b04f-dirty", "硬件 PCB v2"],
           str(pr["verBar"]))
@@ -2400,11 +2443,18 @@ def main():
     check("状态总览有五张 IMU 曲线 (姿态/加速度/陀螺仪/磁力计/温度)",
           all(f'id="ch-{k}"' in raw_page for k in ("att", "acc", "gyr", "mag", "tmp"))
           and 'id="chart"' in raw_page)
-    # 曲线推点必须去重 (轮询帧是累积快照, 不去重会以数倍速灌重复点),
-    # 且重绘点全都要走 drawAllCharts (漏一处 = 那种进页方式下图是空的)
-    check("曲线推点按值去重 (快照重复广播不重复推点)",
-          "function pushHist(key, vals)" in raw_page
-          and "if (s === IMU_PREV[key]) return;" in raw_page)
+    # 曲线推点必须过时间闸门 (轮询帧是累积快照, 不挡会以数倍速灌重复点),
+    # 但**不能**按值去重 —— 静止时值不变也得长点, 不然曲线看着像死了。
+    # 横轴按真时间铺 (窗口 1 分钟), 电池与 IMU 五张共用同一套 histPush。
+    check("曲线推点按时间闸门挡重复快照 (旧的值去重已拆掉)",
+          "function histPush(h, vals)" in raw_page
+          and "t - h[h.length - 1].t < CH_GATE_MS" in raw_page
+          and "IMU_PREV" not in raw_page)
+    check("六张图都是 1 分钟时间窗 + 真时间横轴",
+          "CH_WINDOW_MS = 60 * 1000" in raw_page
+          and "function histXOf(" in raw_page
+          and raw_page.count("const X = histXOf(") == 2
+          and "t - h[0].t > CH_WINDOW_MS" in raw_page)
     check("切页/出隐藏/缩放/掉线清空都重画全部曲线",
           raw_page.count("drawAllCharts") >= 4
           and "if (name === \"dash\") drawAllCharts();" in raw_page
