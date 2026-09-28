@@ -32,6 +32,10 @@
     --mono: ui-monospace, "SF Mono", Consolas, "Noto Sans Mono CJK SC", monospace;
   }
   * { box-sizing: border-box; }
+  /* hidden 属性只在"没人给它写 display"时才管用 —— 本表里 .row/.tabpage 这类
+     都带 display, 作者样式盖过浏览器默认的 [hidden]{display:none}, 于是
+     el.hidden = true 看着设了却没藏住 (直连态藏桥接行时踩过这个坑) */
+  [hidden] { display: none !important; }
   html, body { height: 100%; }
   body {
     margin: 0; overflow: hidden; background: var(--surface-50); color: var(--text);

@@ -1633,6 +1633,15 @@ try {
   out.servo = {first: firstBoards, firstAngles: b1Angles,
                boards: Object.keys(b3.boards).sort(),
                b41: b3.boards["41"], b40: b3.boards["40"]};
+
+  /* 直连态的开始页: 桥接行/固件卡/桥接日志区必须**算出来**不可见。只看 hidden
+     属性会被样式表骗 —— .row{display:flex} 盖掉浏览器默认的 [hidden]{display:none},
+     于是 el.hidden = true 看着设了却没藏住 (直连态还显示"串口桥接"就是它) */
+  MODE = "direct"; applyModeUI(); renderWelcome();
+  out.hideDirect = ["wel-row-bridge", "wel-fw-card", "wel-log-sect"]
+    .map(function (id) { return getComputedStyle($(id)).display; });
+  MODE = "server"; applyModeUI(); renderWelcome();
+  out.hideServer = getComputedStyle($("wel-row-bridge")).display;   /* 正对照 */
   $("probe").textContent = JSON.stringify(out);
 } catch (e) { $("probe").textContent = "THROW " + e; }
 </script>
@@ -1743,6 +1752,12 @@ def test_direct_engine():
           and pr["servo"]["b41"] == {"side": "right", "angles": {"0": 1600}}
           and pr["servo"]["b40"] == {"side": "left", "angles": {"9": 1500}},
           str(pr["servo"]))
+    # 隐藏态要按**算出来的 display** 判, 不能只看 hidden 属性 —— 属性设了但被
+    # 样式表的 display 盖掉, 在用户眼里就是"直连态还显示串口桥接"
+    check("直连态真的藏住了桥接行/固件卡/桥接日志 (算 display, 不看属性)",
+          pr["hideDirect"] == ["none", "none", "none"], str(pr["hideDirect"]))
+    check("服务态桥接行照旧可见 (正对照: 免得上面那条靠「全藏了」蒙过)",
+          pr["hideServer"] != "none", str(pr["hideServer"]))
 
 
 # 页面里的解析器与 server.py 必须同源: 正则表逐条同体 (改一处就得改另一处),
@@ -1818,6 +1833,10 @@ def test_pages_workflow():
     # 缺 permissions 时 deploy 会失败得很难懂 (OIDC 拿不到 token)
     check("工作流声明 pages/id-token 权限",
           "pages: write" in y and "id-token: write" in y)
+    # 站点没建过时 configure-pages 会以「Get Pages site failed」失败 —— 首次部署
+    # 就卡在这里 (enablement: true 让它自己把站点建出来)
+    check("工作流会自己启用 Pages 站点 (enablement)",
+          "enablement: true" in y)
 
 
 def wait_dev(port, up, timeout=20):
