@@ -1429,7 +1429,7 @@ def test_page_js():
     probe_path = "/tmp/wc_page_probe.html"
     with open(probe_path, "w", encoding="utf-8") as f:
         f.write(src.replace("</body>", PROBE_JS + "</body>"))
-    page = "file://" + probe_path
+    page = "file://" + probe_path + "?mode=server"   # 钉住服务端态: 探针页面是 file:// 加载的
     with open("/tmp/wc_chrome.log", "wb") as errlog:
         try:
             r = subprocess.run(
@@ -1648,8 +1648,11 @@ try {
 """
 
 
-def _probe_json(js, tag):
-    """把探针追加到页面末尾, 无头浏览器跑一遍, 返回 (解析好的 JSON, 失败原因)"""
+def _probe_json(js, tag, mode=None):
+    """把探针追加到页面末尾, 无头浏览器跑一遍, 返回 (解析好的 JSON, 失败原因)
+
+    mode= 会钉在 URL 上 (?mode=): 探针页面是 file:// 加载的, 不钉的话页面自己
+    探出来的态要看这台机器给不给 Web Serial —— 除"探探测本身"的用例, 其余都该钉。"""
     if not CHROME:
         return None, "没有无头浏览器"
     prof = f"/tmp/wc_chrome_profile_{tag}"
@@ -1658,12 +1661,13 @@ def _probe_json(js, tag):
     probe_path = f"/tmp/wc_page_probe_{tag}.html"
     with open(probe_path, "w", encoding="utf-8") as f:
         f.write(src.replace("</body>", js + "</body>"))
+    page = "file://" + probe_path + (f"?mode={mode}" if mode else "")
     with open(f"/tmp/wc_chrome_{tag}.log", "wb") as errlog:
         try:
             r = subprocess.run(
                 [CHROME, "--headless=new", "--no-sandbox", "--disable-gpu",
                  f"--user-data-dir={prof}", "--virtual-time-budget=5000",
-                 "--dump-dom", "file://" + probe_path],
+                 "--dump-dom", page],
                 stdout=subprocess.PIPE, stderr=errlog,
                 stdin=subprocess.DEVNULL, timeout=90)
         except subprocess.TimeoutExpired:
@@ -1683,7 +1687,7 @@ def _probe_json(js, tag):
 
 def test_direct_engine():
     """页面内的直连解析器 vs server.py: 同一条时间线逐帧差分"""
-    pr, why = _probe_json(PROBE_DIRECT_JS, "direct")
+    pr, why = _probe_json(PROBE_DIRECT_JS, "direct", mode="direct")
     if pr is None:
         check("直连引擎探针能跑通", False, why)
         return
@@ -1760,6 +1764,40 @@ def test_direct_engine():
           pr["hideServer"] != "none", str(pr["hideServer"]))
 
 
+# 「双击本地 html」那条路: 页面不能因为 scheme 是 file 就退回服务端态 (那样开始页
+# 显示"串口桥接"、点连接什么也不会发生 —— 板子插在自己电脑上也用不了)。
+# 真开一次浏览器, 让它自己探完模式再读: 探针不钉 ?mode=, 钉了就测不到探测本身。
+# 断言随浏览器给不给 Web Serial 分叉 —— 给 → direct, 不给 → none (页面提示换浏览器);
+# 这条要钉死的是「绝不回 server」。
+PROBE_FILEMODE_JS = """
+<div id="probe"></div>
+<script>
+/* detectMode 是异步的 (fetch 失败也要等一个 task), 等一拍再读 */
+setTimeout(function () {
+  try {
+    document.getElementById("probe").textContent = JSON.stringify({
+      mode: MODE, hasSerial: !!navigator.serial,
+      label: document.getElementById("wel-web-label").textContent,
+      web: document.getElementById("wel-web").textContent});
+  } catch (e) { document.getElementById("probe").textContent = "THROW " + e; }
+}, 50);
+</script>
+"""
+
+
+def test_file_url_mode():
+    """双击本地 html (file://): 该直连就直连, 不能退回服务端态"""
+    pr, why = _probe_json(PROBE_FILEMODE_JS, "filemode")
+    if pr is None:
+        check("file:// 探模式探针能跑通", False, why)
+        return
+    check("file:// 探模式探针能跑通", True)
+    want = "direct" if pr["hasSerial"] else "none"
+    check(f"file:// 不再退回服务端态 (本机浏览器有 Web Serial = {pr['hasSerial']})",
+          pr["mode"] == want,
+          f"mode={pr['mode']!r} 该是 {want!r}; label={pr['label']!r} web={pr['web']!r}")
+
+
 # 页面里的解析器与 server.py 必须同源: 正则表逐条同体 (改一处就得改另一处),
 # 常量与 raw 白名单同值。这些是静态检查 —— 不需要浏览器, 也不需要跑固件。
 def test_direct_contract():
@@ -1772,11 +1810,14 @@ def test_direct_contract():
             ("帧分发器提到顶层 (两条数据路共用)", "function handleFrame(ev)"),
             ("直连引擎命名空间", "const Direct = {"),
             ("直连的行入口 (白名单 + 转帧)", "handleLine(line) {"),
-            ("连接前先探模式 (?mode= 覆盖 / file: 短路)", 'get("mode")'),
-            ("file:// 视作 server 态 (无头探针与本地开发靠它)",
-             'if (location.protocol === "file:") return pick("server");'),
+            ("连接前先探模式 (?mode= 覆盖)", 'get("mode")'),
     ]:
         check(f"页面直连标志: {name}", needle in src, "index.html 里没有 " + needle)
+    # file:// 不许被特判成服务端态: 双击本地 html 走的就是这条路 (探测里 fetch
+    # /state 必然失败 → 落到直连, 行为另有 test_file_url_mode 真开浏览器验)
+    check("file:// 不再被特判成服务端态 (双击本地 html 也能直连)",
+          "location.protocol" not in src and "detectMode().then(pick);" in src,
+          "index.html 里还有 file:// 特判, 或探测入口没了")
 
     # 正则表同源: 名字相同、模式体逐字节相同 (Python r"..." 与 JS /.../ 都是
     # 字面量, 所以体可以直接比字符串)。只取两边都有的; RE_DEV 是桥接侧专有
@@ -2470,6 +2511,7 @@ def main():
     print("\n[5] 页面脚本 (无头浏览器)")
     test_page_js()
     test_direct_engine()
+    test_file_url_mode()
 
     print(f"\n{len(passed)} 项通过, {len(failed)} 项失败")
     if failed:

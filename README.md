@@ -48,11 +48,13 @@ cd pico/build && make -j$(nproc)
 调试控制台：`python3 tools/serial_console.py`（自动连接、断线重连）。
 网页配置台（同一个页面，两种开法）：
 
-**直连 —— 板子插在你自己电脑上，零安装**：Chrome/Edge/Opera 打开
-<https://gitcfyang.github.io/hexapod_robot/> → 点「连接」→ 浏览器弹串口选择器选中 Pico，
-页面直接读写 USB 串口（Web Serial），没有本地服务、不用下载任何东西。参数/端口/校准/
-日志都在这一条路上；改动推上 main 后 Pages 自动发布（约 10 分钟生效）。
-Safari 不支持，Firefox 需 151+。⚠️ **烧固件不在直连里** —— uf2 拖进 Pico 的 USB 盘照旧。
+**直连 —— 板子插在你自己电脑上，零安装**：Chrome/Edge/Opera 打开这份
+[index.html](tools/webconfig/index.html)（**双击本地文件即可**；也可以开
+<https://gitcfyang.github.io/hexapod_robot/> 那份，由工作流在页面变更时自动发布，
+约 10 分钟生效）→ 点「连接」→ 浏览器弹串口选择器选中 Pico，页面直接读写 USB 串口
+（Web Serial），没有本地服务、不用下载任何东西。参数/端口/校准/日志都在这一条路上。
+Safari 不支持，Firefox 需 151+；浏览器不给弹串口选择器时换下面两种开法。
+⚠️ **烧固件不在直连里** —— uf2 拖进 Pico 的 USB 盘照旧。
 
 **本地服务 —— 板子插在别的机器上，或要烧固件**：`python3 tools/webconfig/run.py start`
 → 浏览器开 `127.0.0.1:8080`

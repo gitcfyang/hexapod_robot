@@ -1007,8 +1007,9 @@ Pico ──USB CDC──> 浏览器 ── 页面内解析 ──> 同一套渲�
 
 **页面只有一份**, 两条路共用 `handleFrame` 之后的全部渲染/参数/校准逻辑;
 差别的只是帧从哪来、命令往哪去 (`MODE ∈ {server, direct, none}`, 启动时探测:
-`?mode=` 强制 > `file://` 一律当 ① > `/state` 能取到 JSON 当 ① > 有
-`navigator.serial` 当 ② > 都没有则提示换浏览器)。① 里固件输出在服务端解析成帧,
+`?mode=` 强制 > `/state` 能取到 JSON 当 ① > 有 `navigator.serial` 当 ② >
+都没有则提示换浏览器; `file://` 不特判 —— 那正是"双击本地 html"这条路, 相对路径的
+`/state` 取不到就落到 ②)。① 里固件输出在服务端解析成帧,
 ② 里在页面内解析 —— **两份解析器由 `test_webconfig.py [6]` 逐帧差分钉住**。
 
 - **① 为什么必须服务端桥接**: Web Serial 只能访问**浏览器所在机器**的 USB, 而
@@ -1027,7 +1028,7 @@ Pico ──USB CDC──> 浏览器 ── 页面内解析 ──> 同一套渲�
 - `tools/webconfig/server.py` — 桥接客户端 + SSE 广播 + 静态服务 + 轮询调度
 - `tools/webconfig/flasher.py` — 设备检测 (扫 /sys) + picotool 烧录; 只此一处碰 USB
 - `tools/webconfig/index.html` — 单页应用 (零依赖, 无构建步骤; 服务模式与直连模式共用)
-- `tools/webconfig/test_webconfig.py` — 358 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延、页面脚本执行与合成帧探针、直连解析器与 server 的逐帧差分、正则同源检查; 无 headless 浏览器时页面那几项自动跳过)
+- `tools/webconfig/test_webconfig.py` — 363 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延、页面脚本执行与合成帧探针、直连解析器与 server 的逐帧差分、正则同源检查; 无 headless 浏览器时页面那几项自动跳过)
 - `.github/workflows/pages.yml` — 把 index.html 发布到 GitHub Pages (直连模式的托管)
 - `tools/webconfig/run.py` / `run.sh` — 本地服务启停 (start/stop/restart/status/logs)
 
@@ -1117,9 +1118,10 @@ python3 tools/webconfig/server.py     # 终端 2: 默认 127.0.0.1:8080
 板子插在**开网页的这台电脑**上时走这条: Chrome/Edge/Opera 打开
 <https://gitcfyang.github.io/hexapod_robot/> (GitHub Pages 托管, 由
 `.github/workflows/pages.yml` 在 index.html 变更时自动发布, 有约 10 分钟缓存),
-或任何 HTTPS / localhost 上的同一份页面 → 「连接」→ 浏览器弹串口选择器 → 选中
-Pico → 进调试页。Safari 没有 Web Serial 用不了; Firefox 需 151+。URL 加
-`?mode=server|direct|none` 可强制某条路 (本地开发对着静态服务调时用)。
+或**本地那份 `index.html` 双击打开**, 或任何 HTTPS / localhost 上的同一份页面
+→ 「连接」→ 浏览器弹串口选择器 → 选中 Pico → 进调试页。Safari 用不了
+(没有 Web Serial); Firefox 需 151+。URL 加 `?mode=server|direct|none` 可强制某条路
+(本地开发对着静态服务调、单测探针钉模式都用它)。
 
 - **页面自己当串口主**: `navigator.serial.requestPort()` → `open(115200)` 之后
   reader/writer 全在页面里; 命令直接写串口, 帧由页面内解析器产出 —— 没有服务端、
@@ -1139,10 +1141,17 @@ Pico → 进调试页。Safari 没有 Web Serial 用不了; Firefox 需 151+。U
   与烧录入口在直连态整块隐藏, 顶部横幅也换成"断开的是串口"的说法)、跨浏览器共享
   连接态 (Web Serial 端口排他, 一个标签页独占一个串口, 没有"多浏览器各连各的"),
   桥接/设备在线状态 (直连态显示的就是串口自身状态)。
+- **`file://` 也是合法入口** (双击本地 html 那条): Chrome 把 `file://` 当安全上下文,
+  `navigator.serial` 实测可用 (无头 Chrome 154), 页面探不到 `/state` 便落到直连 ——
+  所以 `file` scheme 不特判。回归由 `test_webconfig.py` 两条钉住: 静态查
+  `location.protocol` 不再出现在页面里 + 真开一次无头浏览器看它探成 `direct`。
+  未验的一环: **`file://` origin 弹不弹串口选择器、权限给不给**(无头没有串口后端,
+  `getPorts()` 在那儿根本不落定, 这一层测不了) —— 只能人工点一次, 见下面的验收清单。
 - **待人工验收** (无头浏览器测不了真实串口时序, 是发布门槛):
   `python3 -m http.server 8000` 静态托管 + Chrome 直连实板走一遍 —— 连接/端口
   选择器 → 参数页滑条改值 → `!CFGW` → 端口页下拉 → 断开后遥控器恢复 → 拔 USB
-  掉线回开始页; 同时回归 ① (本地服务) 的行为不变。
+  掉线回开始页; 再加一档: **同一个文件双击打开** (file://) 重复上面这条, 看浏览器
+  弹不弹选择器; 同时回归 ① (本地服务) 的行为不变。
 
 ### 固件烧录 (开始页与调试页都能开)
 

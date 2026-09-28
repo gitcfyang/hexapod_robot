@@ -3327,8 +3327,10 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /* 模式探测: 有服务端就用服务端 (功能全、能烧录), 没有才走直连。
- * file:// 直接按 server 处理 —— 单测的探针就是这么加载页面的, 那里既没有
- * 服务端也没有 Web Serial。?mode= 可手动指定, 方便本地开发时对着静态服务调。 */
+ * file:// 不特判 —— "双击本地 html 打开"走的就是这条路: 相对路径的 /state 在
+ * file:// 下必然取不到 (Chrome 只当它是安全上下文, 能拿到 navigator.serial,
+ * 但 fetch 不到文件), 于是落到直连。?mode= 是给单测探针和本地开发用的钉子 ——
+ * 不钉的话页面跑成哪个态要看浏览器给不给 Web Serial。 */
 async function detectMode() {
   try {
     const ac = new AbortController();
@@ -3368,7 +3370,7 @@ function renderWelcomeDirect(msg) {
     ? "这个浏览器用不了 Web Serial：换 Chrome / Edge，或在本机跑 "
       + "python3 tools/webconfig/server.py"
     : Direct.active ? "已连接"
-      : "插好 Pico 后点「连接」，浏览器会弹出串口选择器（网页需 HTTPS 或 localhost）");
+      : "插好 Pico 后点「连接」，浏览器会弹出串口选择器，选中它即可");
 }
 
 /* ---------------- 命令 ---------------- */
@@ -3565,8 +3567,8 @@ function renderFlash(d) {
 
 /* 定模式 → 画开始页。服务端模式与从前逐字一致 (先画开始页, 等 hello 帧再定去留);
  * 直连模式不碰 /events、/device, 一切等用户点了「连接」拿到串口才开始。
- * file:// 直接按服务端走: 单测的探针就是这么加载页面的 (那里既没有服务端、
- * 也没有 Web Serial), 别让它多等一次异步探测。 */
+ * ?mode= 优先 (单测探针与本地开发钉模式用), 否则探测 —— file:// 与静态托管
+ * 都落进同一条路。 */
 function startApp() {
   const forced = new URLSearchParams(location.search).get("mode");
   const pick = (m) => {
@@ -3576,7 +3578,6 @@ function startApp() {
     if (m === "server") { loadDevice(); connect(); }   // 固件卡要 /device 数据
   };
   if (forced === "server" || forced === "direct" || forced === "none") return pick(forced);
-  if (location.protocol === "file:") return pick("server");
   detectMode().then(pick);
 }
 
