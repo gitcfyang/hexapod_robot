@@ -1119,9 +1119,11 @@ python3 tools/webconfig/server.py     # 终端 2: 默认 127.0.0.1:8080
 <https://gitcfyang.github.io/hexapod_robot/> (GitHub Pages 托管, 由
 `.github/workflows/pages.yml` 在 index.html 变更时自动发布, 有约 10 分钟缓存),
 或**本地那份 `index.html` 双击打开**, 或任何 HTTPS / localhost 上的同一份页面
-→ 「连接」→ 浏览器弹串口选择器 → 选中 Pico → 进调试页。Safari 用不了
-(没有 Web Serial); Firefox 需 151+。URL 加 `?mode=server|direct|none` 可强制某条路
-(本地开发对着静态服务调、单测探针钉模式都用它)。
+→ 「连接」→ 浏览器弹串口选择器 → 选中 Pico → 进调试页。备选的开法: **本地那份
+`index.html` 双击打开** (file://, 不用等发布也不联网), 或任何 HTTPS / localhost 上的
+同一份页面 —— 三条路页面完全一样, 只是来源不同。Safari 用不了 (没有 Web Serial);
+Firefox 需 151+。URL 加 `?mode=server|direct|none` 可强制某条路 (本地开发对着静态服务调、
+单测探针钉模式都用它)。
 
 - **页面自己当串口主**: `navigator.serial.requestPort()` → `open(115200)` 之后
   reader/writer 全在页面里; 命令直接写串口, 帧由页面内解析器产出 —— 没有服务端、
