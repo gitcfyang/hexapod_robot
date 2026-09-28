@@ -100,6 +100,30 @@ RE_IMU_GYR = re.compile(r"^gyro: x=(-?\d+) y=(-?\d+) z=(-?\d+)")
 RE_IMU_MAG = re.compile(r"^mag: x=(-?\d+) y=(-?\d+) z=(-?\d+)")
 RE_IMU_TEMP = re.compile(r"^temp: (-?\d+)")
 
+# IMU 状态块 (固件 imu_status_print) 整块折叠, 表头到页脚之间不进日志面板。
+# 表头/INT_STA/INT cfg/SW rev/页脚这几行没有解析器, 本来会当 raw 进日志 —— 5Hz
+# 轮询下就是 25 行/秒, 600 行面板二十几秒冲干净。折叠只压噪不藏故障: 块外的
+# [IMU] 警告行 (看门狗/读失败) 和块内的 fail: 行一律照常进日志。
+IMU_BLOCK_HEAD = "=== IMU Status ==="
+IMU_BLOCK_TAIL = "==================="
+IMU_BLOCK_MAX = 16      # 兜底: 页脚那行半路丢了也不能把日志永久堵死 (整块 12 行)
+
+
+def imu_block_fold(state, line):
+    """IMU 状态块折叠的一步: 回 (新状态, 这行要不要挡在日志面板外)。
+
+    状态 0 = 块外, >0 = 块内已收行数。提成模块级函数是为了让测试直接调它 ——
+    测试里再抄一份的话, 两边一起漂移就没人发现 (曲线/日志都要用这条逻辑)。
+    """
+    if line == IMU_BLOCK_HEAD:
+        return 1, True
+    if state:
+        state += 1
+        if line == IMU_BLOCK_TAIL or state > IMU_BLOCK_MAX:
+            state = 0
+        return state, not line.startswith("fail:")
+    return 0, False
+
 RE_SERVO_BOARD = re.compile(r"^Board 0x([0-9A-F]{2}) \((\w+)\): (.*)$")
 RE_SERVO_ITEM = re.compile(r"\[(\d+)\]:(-?\d+)")
 
@@ -1129,7 +1153,10 @@ def main():
         args.i2c_interval = args.periph_interval = args.rc_interval = 0
         args.ports_interval = 0
 
+    imu_block = 0      # >0 = 正在 IMU 状态块内 (值 = 块内已收行数)
+
     def on_line(line):
+        nonlocal imu_block
         _stats["lines"] += 1
         m = RE_DEV.match(line)
         if m:
@@ -1139,13 +1166,15 @@ def main():
         if line.startswith("[TCP]"):
             broadcast({"t": "bridge", "msg": line})
             return
+        # IMU 状态块折叠: 只挡日志面板, 照常解析 —— 数据行要喂曲线 (见 imu_block_fold)
+        imu_block, folded = imu_block_fold(imu_block, line)
         parsed = parse_line(TELEM, line)
         # 被解析出来的行不再当 raw 重发: 它们在自己的页面上有专门显示, 而日志
         # 面板是给"没人认领"的行用的。参数行一次 !CFG 就是几十行; [CH] 与 IMU
         # 都是 5Hz 推送 (IMU 一次 12 行); !PERIPH 每 2s 6 行; rc 心跳每 ~2s 一条
         # —— 都会把日志冲掉。(固件 [IMU] 警告行解析不出来, 仍然照常进日志)
-        if not (parsed and parsed[0] in ("params", "per", "ch", "imu", "rc", "run",
-                                         "ho", "ports")):
+        if not folded and not (parsed and parsed[0] in ("params", "per", "ch", "imu",
+                                                        "rc", "run", "ho", "ports")):
             broadcast({"t": "raw", "line": line})
         if parsed:
             key, snap = parsed
