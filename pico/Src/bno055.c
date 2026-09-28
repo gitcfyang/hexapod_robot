@@ -129,6 +129,79 @@ bool bno055_read_euler(bno055_euler_t *euler)
     return true;
 }
 
+bool bno055_read_accel(bno055_accel_t *accel)
+{
+    if (!g_initialized || !accel) {
+        return false;
+    }
+
+    /* 突发读取 6 字节: ACC_DATA_X_LSB ~ ACC_DATA_Z_MSB (0x08 ~ 0x0D) */
+    uint8_t buf[6];
+    if (!bno055_read_burst(BNO055_REG_ACC_DATA_X_LSB, buf, 6)) {
+        return false;
+    }
+
+    accel->x = (int16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8));
+    accel->y = (int16_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8));
+    accel->z = (int16_t)((uint16_t)buf[4] | ((uint16_t)buf[5] << 8));
+
+    return true;
+}
+
+bool bno055_read_mag(bno055_mag_t *mag)
+{
+    if (!g_initialized || !mag) {
+        return false;
+    }
+
+    /* 突发读取 6 字节: MAG_DATA_X_LSB ~ MAG_DATA_Z_MSB (0x0E ~ 0x13) */
+    uint8_t buf[6];
+    if (!bno055_read_burst(BNO055_REG_MAG_DATA_X_LSB, buf, 6)) {
+        return false;
+    }
+
+    mag->x = (int16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8));
+    mag->y = (int16_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8));
+    mag->z = (int16_t)((uint16_t)buf[4] | ((uint16_t)buf[5] << 8));
+
+    return true;
+}
+
+bool bno055_read_gyro(bno055_gyro_t *gyro)
+{
+    if (!g_initialized || !gyro) {
+        return false;
+    }
+
+    /* 突发读取 6 字节: GYR_DATA_X_LSB ~ GYR_DATA_Z_MSB (0x14 ~ 0x19) */
+    uint8_t buf[6];
+    if (!bno055_read_burst(BNO055_REG_GYR_DATA_X_LSB, buf, 6)) {
+        return false;
+    }
+
+    gyro->x = (int16_t)((uint16_t)buf[0] | ((uint16_t)buf[1] << 8));
+    gyro->y = (int16_t)((uint16_t)buf[2] | ((uint16_t)buf[3] << 8));
+    gyro->z = (int16_t)((uint16_t)buf[4] | ((uint16_t)buf[5] << 8));
+
+    return true;
+}
+
+bool bno055_read_temp(int8_t *temp)
+{
+    if (!g_initialized || !temp) {
+        return false;
+    }
+
+    /* 单字节读, 有符号: BNO055 温度可为负 (0°C 以下) */
+    uint8_t raw;
+    if (!bno055_read_reg(BNO055_REG_TEMP, &raw)) {
+        return false;
+    }
+
+    *temp = (int8_t)raw;
+    return true;
+}
+
 bool bno055_get_calib(bno055_calib_t *calib)
 {
     if (!g_initialized || !calib) {

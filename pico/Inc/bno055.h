@@ -3,6 +3,7 @@
  * @brief BNO055 9轴IMU传感器驱动接口
  *
  * 通过 I2C 读取融合后的欧拉角，用于机身姿态补偿。
+ * 另提供加速度/磁力计/陀螺仪/温度原始值读取 (!IMU 诊断与网页曲线用)。
  * 与 PCA9685 共享 i2c1 总线 (GP2/GP3, 400kHz)。
  */
 
@@ -31,6 +32,30 @@ extern "C" {
 #define BNO055_REG_SW_REV_ID_MSB    0x05    /* 软件版本 MSB */
 #define BNO055_REG_BL_REV_ID        0x06    /* Bootloader 版本 */
 #define BNO055_REG_PAGE_ID          0x07    /* 寄存器页选择 */
+
+/* ---- 加速度计数据 (只读, 1 LSB = 0.01 m/s²) ---- */
+#define BNO055_REG_ACC_DATA_X_LSB   0x08    /* 加速度 X LSB */
+#define BNO055_REG_ACC_DATA_X_MSB   0x09    /* 加速度 X MSB */
+#define BNO055_REG_ACC_DATA_Y_LSB   0x0A    /* 加速度 Y LSB */
+#define BNO055_REG_ACC_DATA_Y_MSB   0x0B    /* 加速度 Y MSB */
+#define BNO055_REG_ACC_DATA_Z_LSB   0x0C    /* 加速度 Z LSB */
+#define BNO055_REG_ACC_DATA_Z_MSB   0x0D    /* 加速度 Z MSB */
+
+/* ---- 磁力计数据 (只读, 1 LSB = 1/16 uT) ---- */
+#define BNO055_REG_MAG_DATA_X_LSB   0x0E    /* 磁力 X LSB */
+#define BNO055_REG_MAG_DATA_X_MSB   0x0F    /* 磁力 X MSB */
+#define BNO055_REG_MAG_DATA_Y_LSB   0x10    /* 磁力 Y LSB */
+#define BNO055_REG_MAG_DATA_Y_MSB   0x11    /* 磁力 Y MSB */
+#define BNO055_REG_MAG_DATA_Z_LSB   0x12    /* 磁力 Z LSB */
+#define BNO055_REG_MAG_DATA_Z_MSB   0x13    /* 磁力 Z MSB */
+
+/* ---- 陀螺仪数据 (只读, 1 LSB = 1/16 dps) ---- */
+#define BNO055_REG_GYR_DATA_X_LSB   0x14    /* 角速度 X LSB */
+#define BNO055_REG_GYR_DATA_X_MSB   0x15    /* 角速度 X MSB */
+#define BNO055_REG_GYR_DATA_Y_LSB   0x16    /* 角速度 Y LSB */
+#define BNO055_REG_GYR_DATA_Y_MSB   0x17    /* 角速度 Y MSB */
+#define BNO055_REG_GYR_DATA_Z_LSB   0x18    /* 角速度 Z LSB */
+#define BNO055_REG_GYR_DATA_Z_MSB   0x19    /* 角速度 Z MSB */
 
 /* ---- 欧拉角数据 (只读) ---- */
 #define BNO055_REG_EUL_HEADING_LSB  0x1A    /* 航向/Yaw (X) LSB */
@@ -131,6 +156,33 @@ typedef struct {
 } bno055_euler_t;
 
 /**
+ * @brief BNO055 加速度数据 (原始 int16, 1 LSB = 0.01 m/s²)
+ */
+typedef struct {
+    int16_t x;          /* X 轴 */
+    int16_t y;          /* Y 轴 */
+    int16_t z;          /* Z 轴 */
+} bno055_accel_t;
+
+/**
+ * @brief BNO055 磁力计数据 (原始 int16, 1 LSB = 1/16 uT)
+ */
+typedef struct {
+    int16_t x;          /* X 轴 */
+    int16_t y;          /* Y 轴 */
+    int16_t z;          /* Z 轴 */
+} bno055_mag_t;
+
+/**
+ * @brief BNO055 陀螺仪数据 (原始 int16, 1 LSB = 1/16 dps)
+ */
+typedef struct {
+    int16_t x;          /* X 轴 */
+    int16_t y;          /* Y 轴 */
+    int16_t z;          /* Z 轴 */
+} bno055_gyro_t;
+
+/**
  * @brief BNO055 校准状态
  */
 typedef struct {
@@ -161,6 +213,44 @@ bool bno055_init(uint8_t i2c_addr);
  * @return true 读取成功
  */
 bool bno055_read_euler(bno055_euler_t *euler);
+
+/**
+ * @brief 读取加速度 (原始 int16, 1 LSB = 0.01 m/s²)
+ *
+ * 突发读取 6 字节从 ACC_DATA_X_LSB (0x08) 到 ACC_DATA_Z_MSB (0x0D)。
+ *
+ * @param accel  输出加速度
+ * @return true 读取成功
+ */
+bool bno055_read_accel(bno055_accel_t *accel);
+
+/**
+ * @brief 读取磁力计 (原始 int16, 1 LSB = 1/16 uT)
+ *
+ * 突发读取 6 字节从 MAG_DATA_X_LSB (0x0E) 到 MAG_DATA_Z_MSB (0x13)。
+ *
+ * @param mag  输出磁力计
+ * @return true 读取成功
+ */
+bool bno055_read_mag(bno055_mag_t *mag);
+
+/**
+ * @brief 读取陀螺仪 (原始 int16, 1 LSB = 1/16 dps)
+ *
+ * 突发读取 6 字节从 GYR_DATA_X_LSB (0x14) 到 GYR_DATA_Z_MSB (0x19)。
+ *
+ * @param gyro  输出角速度
+ * @return true 读取成功
+ */
+bool bno055_read_gyro(bno055_gyro_t *gyro);
+
+/**
+ * @brief 读取芯片温度 (1°C/LSB, 有符号 —— 0°C 以下为负)
+ *
+ * @param temp  输出温度 (°C)
+ * @return true 读取成功
+ */
+bool bno055_read_temp(int8_t *temp);
 
 /**
  * @brief 读取校准状态

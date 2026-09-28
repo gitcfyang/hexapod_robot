@@ -431,8 +431,10 @@ batt_state_t hal_battery_state(void)
  * (见 STATUS.md「电路保护建议」事件 3)。 */
 void hal_fw_version_print(void)
 {
-    /* 单一格式: 开机横幅、!VER 命令、网页开始页都认这一行 */
+    /* 单一格式: 开机横幅、!VER 命令、网页开始页都认这两行
+     * ([VER] = 固件版本, [HW] = 硬件版本; 网页状态栏两个并排显示) */
     hal_debug_printf("[VER] Hexapod %s\r\n", HEXAPOD_FW_VERSION);
+    hal_debug_printf("[HW] %s\r\n", HEXAPOD_HW_VERSION);
 }
 
 static void battery_status_print(void)
@@ -3385,6 +3387,28 @@ static void imu_status_print(void)
         uint16_t sw_rev = 0;
         if (bno055_get_sw_rev(&sw_rev)) {
             hal_debug_printf("SW rev: 0x%04X (BSX DRDY 需 ≥0x0314)\r\n", sw_rev);
+        }
+
+        /* 原始传感器读数 (诊断 + 网页曲线): 读失败就不打印 (曲线保持上一值),
+         * 单位与 BNO055 默认 UNIT_SEL 一致 (见 bno055_init 注释) */
+        bno055_accel_t acc;
+        if (bno055_read_accel(&acc)) {
+            hal_debug_printf("accel: x=%d y=%d z=%d (0.01 m/s2)\r\n",
+                             acc.x, acc.y, acc.z);
+        }
+        bno055_gyro_t gyr;
+        if (bno055_read_gyro(&gyr)) {
+            hal_debug_printf("gyro: x=%d y=%d z=%d (1/16 dps)\r\n",
+                             gyr.x, gyr.y, gyr.z);
+        }
+        bno055_mag_t mag;
+        if (bno055_read_mag(&mag)) {
+            hal_debug_printf("mag: x=%d y=%d z=%d (1/16 uT)\r\n",
+                             mag.x, mag.y, mag.z);
+        }
+        int8_t temp;
+        if (bno055_read_temp(&temp)) {
+            hal_debug_printf("temp: %d (C)\r\n", temp);
         }
 
         hal_debug_printf("last: roll=%d pitch=%d yaw=%d (0.1deg) valid=%d\r\n",
