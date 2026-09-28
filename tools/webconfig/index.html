@@ -403,15 +403,15 @@
     <div class="dim">六足机器人配置台 · 确认硬件在线后再连接</div>
 
     <div class="wel-rows">
-      <div class="row"><span>网页服务</span>
+      <div class="row"><span id="wel-web-label">网页服务</span>
         <span id="wel-web" class="dim">检测中…</span></div>
-      <div class="row"><span>串口桥接 (serial_console.py)</span>
+      <div class="row" id="wel-row-bridge"><span>串口桥接 (serial_console.py)</span>
         <span id="wel-bridge" class="dim">检测中…</span></div>
       <div class="row"><span>机器人设备</span>
         <span id="wel-dev" class="dim">检测中…</span></div>
     </div>
 
-    <div class="box">
+    <div class="box" id="wel-fw-card">
       <h2>固件</h2>
       <div class="row"><span>板上运行</span><span id="wel-ver" class="dim">—</span></div>
       <div id="wel-usb" class="dim">检测中…</div>
@@ -432,7 +432,7 @@
     <button id="connectbtn" class="regular-button" disabled>连接</button>
     <div id="wel-hint" class="dim"></div>
 
-    <div class="sect">
+    <div class="sect" id="wel-log-sect">
       <h4>最近日志</h4>
       <div class="devlog" id="welcome-log">（等待桥接输出…）</div>
     </div>
@@ -2416,6 +2416,8 @@ function refreshPageState() {
 }
 
 async function postParam(body) {
+  /* 直连没有服务端: 同一套指令集在本地展开成固件命令 (Direct.param) */
+  if (MODE === "direct") return Direct.param(body);
   try {
     const r = await fetch("/param", { method: "POST", body });
     return await r.json();
@@ -2593,6 +2595,7 @@ function devText(d) {
 }
 
 function renderWelcome(msg) {
+  if (MODE !== "server") { renderWelcomeDirect(msg); return; }   // 直连/不支持: 另有一套
   $("wel-web").textContent = SSE_OK ? "已连接" : "断开，重连中…";
   $("wel-web").className = SSE_OK ? "ok" : "err";
   $("wel-bridge").textContent = BRIDGE_UP ? "已连接" : "未连接";
@@ -2621,6 +2624,12 @@ function setDev(d) {
   if (DEVS.up !== was) loadDevice();   // 拔插之后 USB 列表也跟着变
 }
 
+/* 调试页顶部那条横幅 (服务端的连接态由 setLink 管, 直连走这里) */
+function setBanner(show, text) {
+  if (text !== undefined) $("banner").textContent = text;
+  $("banner").style.display = show ? "block" : "none";
+}
+
 function setLink(up, msg) {
   BRIDGE_UP = !!up;
   $("linkdot").className = "dot " + (up ? "on" : "off");
@@ -2643,6 +2652,9 @@ async function enterDebug() {
    * radio 开关一起带过去: 服务端据此决定要不要锁遥控器 (!RC), 不勾 = 锁 */
   $("connectbtn").disabled = true;
   const keep = $("rc-keep");
+  /* 直连: 交给 Direct 去申请串口。⚠️ 这里不能先 await 任何东西 ——
+     requestPort 要用掉「点击」这次用户手势, 中间一次往返就作废了 */
+  if (MODE === "direct") { Direct.connect(!!(keep && keep.checked)); return; }
   const r = await post("/connect",
                        JSON.stringify({ radio: !!(keep && keep.checked) }));
   if (!r.ok) { renderWelcome("连接失败：" + (r.err || "未知")); return; }
@@ -2672,6 +2684,11 @@ function welLog(line) {
 
 $("connectbtn").onclick = enterDebug;
 $("discbtn").onclick = async () => {
+  if (MODE === "direct") {
+    leaveDebug("已断开连接");     // 先回开始页, 再慢慢收串口 (关端口有几百 ms)
+    await Direct.disconnect();
+    return;
+  }
   leaveDebug("已断开连接");
   await post("/disconnect", "");
 };
@@ -2681,70 +2698,673 @@ let lineCount = 0, rateT = Date.now();
 
 function connect() {
   const es = new EventSource("/events");
-  es.onmessage = (e) => {
-    const ev = JSON.parse(e.data);
-    switch (ev.t) {
-      case "hello":
-        SSE_OK = true;
-        setLink(ev.bridge, ev.msg || (ev.bridge ? "桥接已连接" : "桥接未连接"));
-        /* 刷新/重连后按服务端状态选页面: 别的标签页还连着就别把人踢回开始页 */
-        if (ev.connected) enterDebugUI(); else leaveDebug("");
-        setDev(ev.dev);
-        /* hello 才带 paused —— 别把暂停按钮冲回未暂停 */
-        if (ev.paused !== undefined) setPaused(ev.paused);
-        break;
-      case "link":
-        setLink(ev.up, ev.msg);
-        if (!ev.up) leaveDebug("串口桥接已断开");
-        break;
-      case "conn":
-        /* 连接态是全局的: 别的标签页点了连接/断开, 本页跟着切 */
-        if (ev.on) { if (!inDebug) enterDebugUI(); }
-        else leaveDebug(ev.msg || "已断开连接");
-        break;
-      case "dev":
-        setDev(ev);
-        if (!ev.up) leaveDebug("设备已断开");     // 拔线 → 回开始页
-        break;
-      case "ver":
-        VER_TXT = (ev.d && ev.d.text) || "";
-        renderWelcome();
-        break;
-      case "bridge": addLog(ev.msg, "l-ok"); welLog(ev.msg); break;
-      case "raw":
-        addLog(ev.line);
-        welLog(ev.line);
-        /* 写 flash 成功 → 当前值即基线 (保存按钮随之置灰)。
-         * 认固件的回显而不是「点了按钮」, 因为从日志页命令框手敲 !CFGW 也走这里,
-         * 而且被固件拒绝 (robot is armed) 时不该清掉未保存标记 */
-        if (/\[STORE\] Params saved OK/.test(ev.line)) saveBaseline();
-        if (++lineCount % 20 === 0) {
-          const now = Date.now();
-          $("rate").textContent =
-            Math.round(20000 / Math.max(1, now - rateT)) + " 行/秒";
-          rateT = now;
-        }
-        break;
-      case "batt": renderBatt(ev.d); break;
-      case "imu": renderImu(ev.d); break;
-      case "i2c": renderI2c(ev.d); break;
-      case "servo": renderServo(ev.d); break;
-      case "ho": renderHo(ev.d); break;
-      case "ch": renderCh(ev.d); break;
-      case "per": renderPer(ev.d); break;
-      case "ports": renderPorts(ev.d); break;
-      case "run": renderRun(ev.d); break;
-      case "rc": renderRc(ev.d); break;
-      case "params": renderParams(ev.d); break;
-      case "flash": renderFlash(ev.d); break;
-    }
-  };
+  es.onmessage = (e) => handleFrame(JSON.parse(e.data));
   es.onerror = () => {
     SSE_OK = false;
     setLink(false, "网页服务断开，重连中…");
     es.close();
     setTimeout(connect, 2000);
   };
+}
+
+/* 一帧数据的唯一入口 —— 服务端 SSE 与浏览器直连 (Direct) 都走这里。
+ * 帧的形状两边一致 (server.py 的 broadcast 与 Direct.handleLine 拼的是同一种
+ * {t, d} 对象), 所以渲染层一视同仁: 帧从哪来, 下面这些 case 不关心。 */
+function handleFrame(ev) {
+  switch (ev.t) {
+    case "hello":
+      SSE_OK = true;
+      setLink(ev.bridge, ev.msg || (ev.bridge ? "桥接已连接" : "桥接未连接"));
+      /* 刷新/重连后按服务端状态选页面: 别的标签页还连着就别把人踢回开始页 */
+      if (ev.connected) enterDebugUI(); else leaveDebug("");
+      setDev(ev.dev);
+      /* hello 才带 paused —— 别把暂停按钮冲回未暂停 */
+      if (ev.paused !== undefined) setPaused(ev.paused);
+      break;
+    case "link":
+      setLink(ev.up, ev.msg);
+      if (!ev.up) leaveDebug("串口桥接已断开");
+      break;
+    case "conn":
+      /* 连接态是全局的: 别的标签页点了连接/断开, 本页跟着切 */
+      if (ev.on) { if (!inDebug) enterDebugUI(); }
+      else leaveDebug(ev.msg || "已断开连接");
+      break;
+    case "dev":
+      setDev(ev);
+      if (!ev.up) leaveDebug("设备已断开");     // 拔线 → 回开始页
+      break;
+    case "ver":
+      VER_TXT = (ev.d && ev.d.text) || "";
+      renderWelcome();
+      break;
+    case "bridge": addLog(ev.msg, "l-ok"); welLog(ev.msg); break;
+    case "raw":
+      addLog(ev.line);
+      welLog(ev.line);
+      /* 写 flash 成功 → 当前值即基线 (保存按钮随之置灰)。
+       * 认固件的回显而不是「点了按钮」, 因为从日志页命令框手敲 !CFGW 也走这里,
+       * 而且被固件拒绝 (robot is armed) 时不该清掉未保存标记 */
+      if (/\[STORE\] Params saved OK/.test(ev.line)) saveBaseline();
+      if (++lineCount % 20 === 0) {
+        const now = Date.now();
+        $("rate").textContent =
+          Math.round(20000 / Math.max(1, now - rateT)) + " 行/秒";
+        rateT = now;
+      }
+      break;
+    case "batt": renderBatt(ev.d); break;
+    case "imu": renderImu(ev.d); break;
+    case "i2c": renderI2c(ev.d); break;
+    case "servo": renderServo(ev.d); break;
+    case "ho": renderHo(ev.d); break;
+    case "ch": renderCh(ev.d); break;
+    case "per": renderPer(ev.d); break;
+    case "ports": renderPorts(ev.d); break;
+    case "run": renderRun(ev.d); break;
+    case "rc": renderRc(ev.d); break;
+    case "params": renderParams(ev.d); break;
+    case "flash": renderFlash(ev.d); break;
+  }
+}
+
+/* ---------------- Web Serial 直连 (direct 模式) ----------------
+ * 页面托管在静态站点 (GitHub Pages 之类) 上时没有服务端: 浏览器自己通过
+ * Web Serial 拿串口, 这层把固件输出解析成与 server.py 同形的帧, 交给上面
+ * 那个 handleFrame —— 渲染层因此一行都不用改。
+ *
+ * 与 server.py 是**一对一的移植**: 正则、分支顺序、三种累积策略、raw 白名单、
+ * 轮询节拍、遥控门心跳, 全部照抄 (test_webconfig.py 里有同源检查钉着)。
+ * 改一边就得改另一边, 否则两个模式的行为会悄悄分叉。
+ *
+ * 直连天然丢掉的: 多客户端共享 (串口归这个标签页独有)、命令排队、烧录
+ * (uf2 得靠拖盘或 picotool, 浏览器够不着) —— 见 STATUS.md。
+ * 只支持安全上下文 (HTTPS / localhost) 下有 navigator.serial 的浏览器:
+ * Chrome/Edge/Opera 稳定支持, Firefox 151 起, Safari 不支持。 */
+let MODE = "server";          // "server" | "direct" | "none" —— detectMode() 定
+
+const BAUD = 115200;          // USB CDC 不限速, 但 port.open 必须给一个值
+const CRSF_CH_COUNT = 16;     // CRSF 固定 16 通道 (11bit 打包), 缺项回填中位
+const CRSF_CH_MID = 992;
+const U0_RX_RING = 20;        // 外设页只留最近这些 [U0] 行 (与 server.py 一致)
+
+/* 逐行正则 —— 与 server.py 顶部同名同序 (那边的注释解释每条格式的来历)。
+ * findall 语义用 matchAll (或 kvPairs), 别拿带 g 的正则去 exec: lastIndex 会串。 */
+const RE_BATT_RAW = /^Raw: avg=(\d+) min=(\d+) max=(\d+) \(spread (\d+) counts = (\d+) mV\)/;
+const RE_BATT_MV = /^Pin: (\d+) mV.*Battery: (\d+) mV/;
+const RE_BATT_LIM = /^Limits: (\d+) ~ (\d+) mV . (IN RANGE|OUT OF RANGE)/;
+const RE_BATT_EN = /^Protection: BATTERY_CHECK_ENABLED=(\d)/;
+const RE_BATT_STATE = /^State: (OK|ABSENT|FAULT)\b/;
+const RE_I2C_CHECK = /^=== I2C Bus Check\b/;
+const RE_I2C_PWR = /^Servo power: GP10\(left\)=(\d)\s+GP11\(right\)=(\d)/;
+const RE_I2C_PCA = /^PCA9685 0x([0-9A-F]{2}) \((\w+)\s*legs\): (DETECTED|NOT FOUND)/;
+const RE_I2C_BNO = /^BNO055 0x([0-9A-F]{2}): (DETECTED|NOT FOUND|present)/;
+const RE_I2C_SCAN = /^\s*Device found at 0x([0-9A-F]{2})/;
+const RE_I2C_IDLE = /^Bus idle: SDA\(GP14\)=(\d) SCL\(GP15\)=(\d)/;
+const RE_IMU_AVAIL = /^available: (YES|NO)\s+addr: 0x([0-9A-F]{2})/;
+const RE_IMU_CALIB = /^calib: sys=(\d+) gyr=(\d+) acc=(\d+) mag=(\d+)(.*)$/;
+const RE_IMU_LAST = /^last: roll=(-?\d+) pitch=(-?\d+) yaw=(-?\d+).*valid=(\d)/;
+const RE_SERVO_BOARD = /^Board 0x([0-9A-F]{2}) \((\w+)\): (.*)$/;
+const RE_SERVO_ITEM = /\[(\d+)\]:(-?\d+)/g;
+const RE_CH_CRSF = /^\[CH\] m=crsf link=(\d) fc=(\d+) (.*)$/;
+const RE_CH_PS2 = /^\[CH\] m=ps2 con=(\d) btns=(\d+) lx=(\d+) ly=(\d+) rx=(\d+) ry=(\d+) fc=(\d+)$/;
+const RE_PER = /^\[PER\] (motors|leds|buzzer|uart0|ext|pwm|pwmperiod): (.*)$/;
+const RE_U0TX = /^\[U0TX\] sent (\d+) bytes: (.*)$/;
+const RE_U0 = /^\[U0\] (.*)$/;
+const RE_PARAM_KV = /(\w+)=(\S+)/g;
+const PARAM_NAME_OK = /^[a-z][a-z0-9_]{0,18}$/;      // 与固件 STORE_PARAM_NAME_LEN-1 一致
+const GROUP_NAME_OK = /^[a-z]{1,12}$/;
+const RE_VER = /^\[VER\] (.*)$/;
+const RE_ROBOT_PWR = /^Robot (ON|OFF)\b/;
+const RE_RUN_STATE = /^\[(RUN|IDLE)\]/;
+const RE_RUN_TRAVEL = /X:(-?\d+) Y:(-?\d+) Z:(-?\d+) Gait:(\d+) Lift:(\d+)/;
+const RE_RUN_MODE = /Bal:(-?\d+) St:(-?\d+) Hi:(\d+)/;
+const RE_RC = /^\[RC\] (locked|unlocked)$/;
+const RE_HO = /^\[HO\] id=(\d+) off=(-?\d+)$/;
+const RE_PORTS = /^\[PORTS\] (uart0|input|motors|foot|ext|gpio|fixed): (.*)$/;
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const errText = (e) => (e && (e.message || e.name)) || String(e);
+const intOrNull = (s) => (/^[+-]?\d+$/.test(s) ? parseInt(s, 10) : null);
+const kvPairs = (s) => Array.from(s.matchAll(RE_PARAM_KV), (m) => [m[1], m[2]]);
+const kvDict = (s) => Object.fromEntries(kvPairs(s));
+
+/* [PER]/[PORTS] 的值区: 能当整数就当整数, 否则原样留着 (与 Python int() 的取舍一致) */
+function numFields(s) {
+  const f = {};
+  for (const [k, v] of kvPairs(s)) {
+    const n = intOrNull(v);
+    f[k] = n === null ? v : n;
+  }
+  return f;
+}
+
+/* 一行 [P] 参数 → 对象; 提示行 (=== / WARN / FAIL) 返回 null 走原样日志 */
+function parseParamLine(line) {
+  if (!line.startsWith("[P] ") || !line.includes("name=")) return null;
+  const kv = kvDict(line);
+  const val = intOrNull(kv.val), min = intOrNull(kv.min);
+  const max = intOrNull(kv.max), def = intOrNull(kv.def);
+  if (kv.name === undefined || val === null || min === null
+      || max === null || def === null) return null;
+  return {
+    name: kv.name, val, min, max, def,
+    unit: kv.unit === undefined ? "" : kv.unit,    // unit 为空时 \S+ 失配, 故给默认
+    grp: kv.grp === undefined ? "?" : kv.grp,
+    chg: kv.chg === "1",
+  };
+}
+
+/* 各子系统的最新状态。键与 server.py 的 Telemetry.data 一一对应。 */
+function newTelem() {
+  return {
+    batt: {}, i2c: {}, imu: {}, servo: {}, ch: {}, per: {},
+    params: { list: {}, count: 0, changed: 0 },
+    ver: {}, rc: {}, ho: {}, ports: {}, run: {},
+  };
+}
+
+function telemUpdate(t, key, fields) {
+  t[key] = Object.assign(t[key] || {}, fields);
+  return Object.assign({}, t[key]);
+}
+
+/* 一行固件输出 → [子系统名, 快照] 或 null。纯函数, 不碰 DOM。
+ * 分支顺序与 server.py parse_line 逐条对齐 (顺序即优先级, 别重排)。 */
+function parseLine(t, line) {
+  const p = parseParamLine(line);
+  if (p) {
+    const st = t.params;
+    st.list[p.name] = p;
+    /* 以固件回显为准重新统计, 不靠本地加减 */
+    st.count = Object.keys(st.list).length;
+    st.changed = Object.values(st.list).filter((x) => x.chg).length;
+    /* list 要复制一份: 帧是"这一行到达时的快照", 直接给活的对象会把后面
+       几行也算进这一帧 (server.py 那边是 deepcopy, 语义相同) */
+    return ["params", { list: Object.assign({}, st.list),
+                        count: st.count, changed: st.changed }];
+  }
+
+  let m = RE_VER.exec(line);
+  if (m) return ["ver", telemUpdate(t, "ver", { text: m[1] })];
+
+  m = RE_RC.exec(line);
+  if (m) return ["rc", telemUpdate(t, "rc", { locked: m[1] === "locked" })];
+
+  m = RE_ROBOT_PWR.exec(line);
+  if (m) return ["run", telemUpdate(t, "run", { on: m[1] === "ON" })];
+
+  /* [RUN]/[IDLE] 只是"在跑/待机"的另一种说法, 供电状态以 Robot ON/OFF 为准;
+     [RUN] 行还带行程/步态/抬腿, Bal/St/Hi 三种行都有 (缺字段 = 保留上次值) */
+  m = RE_RUN_STATE.exec(line);
+  if (m) {
+    const snap = { on: m[1] === "RUN" };
+    const tr = RE_RUN_TRAVEL.exec(line);
+    if (tr) Object.assign(snap, { x: +tr[1], y: +tr[2], z: +tr[3],
+                                  gait: +tr[4], lift: +tr[5] });
+    const md = RE_RUN_MODE.exec(line);
+    if (md) Object.assign(snap, { bal: +md[1], st: +md[2], hi: +md[3] });
+    return ["run", telemUpdate(t, "run", snap)];
+  }
+
+  m = RE_BATT_RAW.exec(line);
+  if (m) return ["batt", telemUpdate(t, "batt", {
+    avg: +m[1], min: +m[2], max: +m[3],
+    spread_counts: +m[4], spread_mv: +m[5],
+  })];
+
+  m = RE_BATT_MV.exec(line);
+  if (m) return ["batt", telemUpdate(t, "batt", {
+    pin_mv: +m[1], batt_mv: +m[2],
+  })];
+
+  m = RE_BATT_LIM.exec(line);
+  if (m) return ["batt", telemUpdate(t, "batt", {
+    lo_mv: +m[1], hi_mv: +m[2], in_range: m[3] === "IN RANGE",
+  })];
+
+  m = RE_BATT_EN.exec(line);
+  if (m) return ["batt", telemUpdate(t, "batt", { enabled: +m[1] })];
+
+  m = RE_BATT_STATE.exec(line);
+  if (m) return ["batt", telemUpdate(t, "batt", { state: m[1] })];
+
+  m = RE_I2C_CHECK.exec(line);
+  if (m) {
+    /* 只有全扫描那次才作废扫描列表 —— 否则手动 !I2C 的结果会在 3s 后
+       被常规的 !I2C q 轮询抹掉, 用户根本来不及看 */
+    const full = !line.includes("quick");
+    const old = t.i2c || {};
+    t.i2c = (full || !("scan" in old)) ? {} : { scan: old.scan };
+    /* 显式 reset: 空对象过不了前端 Object.assign, 得让前端自己清 */
+    return ["i2c", { reset: true, reset_scan: full }];
+  }
+
+  m = RE_I2C_PWR.exec(line);
+  if (m) return ["i2c", telemUpdate(t, "i2c", {
+    servo_power: { left: +m[1], right: +m[2] },
+  })];
+
+  m = RE_I2C_PCA.exec(line);
+  if (m) {
+    const devs = t.i2c.pca || (t.i2c.pca = []);
+    const entry = { addr: parseInt(m[1], 16), side: m[2], ok: m[3] === "DETECTED" };
+    const kept = devs.filter((d) => d.addr !== entry.addr);
+    devs.length = 0;
+    devs.push(...kept, entry);
+    return ["i2c", Object.assign({}, t.i2c)];
+  }
+
+  m = RE_I2C_BNO.exec(line);
+  if (m) {
+    const devs = t.i2c.bno || (t.i2c.bno = []);
+    const entry = { addr: parseInt(m[1], 16), ok: m[2] === "DETECTED" };
+    const kept = devs.filter((d) => d.addr !== entry.addr);
+    devs.length = 0;
+    devs.push(...kept, entry);
+    return ["i2c", Object.assign({}, t.i2c)];
+  }
+
+  m = RE_I2C_SCAN.exec(line);
+  if (m) {
+    const found = t.i2c.scan || (t.i2c.scan = []);
+    const a = parseInt(m[1], 16);
+    if (!found.includes(a)) found.push(a);
+    return ["i2c", Object.assign({}, t.i2c)];
+  }
+
+  m = RE_I2C_IDLE.exec(line);
+  if (m) return ["i2c", telemUpdate(t, "i2c", {
+    idle: { sda: +m[1], scl: +m[2] },
+  })];
+
+  m = RE_IMU_AVAIL.exec(line);
+  if (m) return ["imu", telemUpdate(t, "imu", {
+    available: m[1] === "YES", addr: parseInt(m[2], 16),
+  })];
+
+  m = RE_IMU_CALIB.exec(line);
+  if (m) return ["imu", telemUpdate(t, "imu", {
+    calib: { sys: +m[1], gyr: +m[2], acc: +m[3], mag: +m[4] },
+    fully: m[5].includes("fully"),
+  })];
+
+  m = RE_IMU_LAST.exec(line);
+  if (m) return ["imu", telemUpdate(t, "imu", {
+    roll: +m[1], pitch: +m[2], yaw: +m[3], valid: +m[4],
+  })];
+
+  m = RE_SERVO_BOARD.exec(line);
+  if (m) {
+    const angles = {};
+    for (const it of m[3].matchAll(RE_SERVO_ITEM)) angles[+it[1]] = +it[2];
+    if (Object.keys(angles).length) {
+      t.servo.boards = t.servo.boards || {};
+      t.servo.boards[m[1]] = { side: m[2], angles };
+      return ["servo", Object.assign({}, t.servo)];
+    }
+  }
+
+  /* 通道遥测: 每次都是完整一帧, 所以整份覆盖而不是合并 —— 否则切模式后
+     残留的另一种模式的字段会混在一起 (比如 ps2 的 lx 留在 crsf 帧里) */
+  m = RE_CH_CRSF.exec(line);
+  if (m) {
+    const kv = kvDict(m[3]);
+    const chans = [];
+    for (let i = 0; i < CRSF_CH_COUNT; i++) {
+      const v = kv["c" + i];
+      chans.push(v === undefined ? CRSF_CH_MID : (intOrNull(v) === null ? CRSF_CH_MID : +v));
+    }
+    t.ch = { mode: "crsf", link: m[1] === "1", fc: +m[2], ch: chans };
+    return ["ch", Object.assign({}, t.ch)];
+  }
+
+  m = RE_CH_PS2.exec(line);
+  if (m) {
+    t.ch = { mode: "ps2", connected: m[1] === "1", btns: +m[2],
+             lx: +m[3], ly: +m[4], rx: +m[5], ry: +m[6], fc: +m[7] };
+    return ["ch", Object.assign({}, t.ch)];
+  }
+
+  /* 外设状态: 每节独立合并 (一行一行地到, 分节存才能只收到一半也有东西可渲染) */
+  m = RE_PER.exec(line);
+  if (m) return ["per", telemUpdate(t, "per", { [m[1]]: numFields(m[2]) })];
+
+  /* 舵盘偏移: 单路回执与 18 行全量同一格式, 逐个累积成 {id: 值} */
+  m = RE_HO.exec(line);
+  if (m) {
+    const offs = (t.ho.offs = t.ho.offs || {});
+    offs[+m[1]] = +m[2];
+    return ["ho", { offs: Object.assign({}, offs) }];
+  }
+
+  /* 端口状态: 同样是每节独立合并 */
+  m = RE_PORTS.exec(line);
+  if (m) return ["ports", telemUpdate(t, "ports", { [m[1]]: numFields(m[2]) })];
+
+  m = RE_U0TX.exec(line);
+  if (m) return ["per", telemUpdate(t, "per", {
+    u0_tx: m[2], u0_tx_bytes: +m[1],
+  })];
+
+  m = RE_U0.exec(line);
+  if (m) {
+    const ring = (t.per.u0_rx = t.per.u0_rx || []);
+    ring.push(m[1]);
+    if (ring.length > U0_RX_RING) ring.splice(0, ring.length - U0_RX_RING);
+    return ["per", Object.assign({}, t.per)];
+  }
+
+  return null;
+}
+
+/* 被解析出来的行不再当 raw 重发: 它们在自己的页面上有专门显示, 而日志面板
+ * 是给"没人认领"的行用的 (server.py 同款白名单, 两处必须一致) */
+const RAW_SKIP = new Set(["params", "per", "ch", "rc", "run", "ho", "ports"]);
+
+const Direct = {
+  supported() { return typeof navigator !== "undefined" && "serial" in navigator; },
+
+  newTelem,
+  parseLine,
+  parseParamLine,
+
+  /* ---- 串口读写 ---- */
+  port: null, reader: null, writer: null,
+  active: false,        // 串口开着, 且这个标签页是它的主人
+  busy: false,          // 连接过程中 (选择器开着 / 正在握手): 按钮要灰着
+  locked: true,         // 遥控门 (!RC): 默认锁, 心跳续租
+  draining: false,      // 排空期收到的行只丢不解析
+  drainingRx: 0,
+  timer: null,          // 轮询
+  pendingWrites: 0,
+  readerDone: null, _readerDone: null,
+  telem: newTelem(),    // 始终是个能用的遥测对象 (断开时也只是回到空)
+
+  /* 一行固件输出 → 帧 (raw 白名单在前, 与 server.py 的 on_line 同序) */
+  handleLine(line) {
+    const parsed = parseLine(Direct.telem, line);
+    if (!(parsed && RAW_SKIP.has(parsed[0]))) handleFrame({ t: "raw", line });
+    if (parsed) handleFrame({ t: parsed[0], d: parsed[1] });
+  },
+
+  send(line) {
+    const w = Direct.writer;
+    if (!Direct.active || !w) return false;
+    /* 不等这条写 (滑条一拖就是一串命令, 排队等会把交互拖住);
+       失败与拔线同一条路: fail() 自己幂等 */
+    Direct.pendingWrites++;
+    w.write(new TextEncoder().encode(line + "\n")).catch(
+      () => Direct.fail("串口写入失败")).finally(() => { Direct.pendingWrites--; });
+    return true;
+  },
+
+  async writeLine(line) {
+    const w = Direct.writer;
+    if (!w) return false;
+    try { await w.write(new TextEncoder().encode(line + "\n")); return true; }
+    catch (e) { return false; }
+  },
+
+  async readLoop() {
+    const reader = Direct.reader;
+    const dec = new TextDecoder();
+    let buf = "", why = "";
+    try {
+      for (;;) {
+        const res = await reader.read();
+        if (res.done) break;
+        Direct.drainingRx = Date.now();
+        buf += dec.decode(res.value, { stream: true });
+        let i;
+        while ((i = buf.indexOf("\n")) >= 0) {
+          let line = buf.slice(0, i);
+          buf = buf.slice(i + 1);
+          if (line.endsWith("\r")) line = line.slice(0, -1);   // 固件只认 \n
+          if (!line.trim()) continue;                          // 保留行首缩进, 丢纯空白行
+          if (Direct.draining) continue;                       // 排空: 陈旧输出不进页面
+          Direct.handleLine(line);
+        }
+      }
+    } catch (e) {
+      why = "读取失败: " + errText(e);
+    } finally {
+      try { reader.releaseLock(); } catch (e) { /* 已经放掉了 */ }
+      if (Direct._readerDone) { Direct._readerDone(); Direct._readerDone = null; }
+    }
+    /* 没人叫停却退出了 = 拔线/掉线 (teardown 会先把 active 放掉) */
+    if (Direct.active) Direct.fail(why || "串口已断开");
+  },
+
+  /* 排空: 刚打开端口时缓冲里积着的是陈旧输出 (开机横幅 + 5Hz 的 [CH] 行)。
+     出口必须同时有"静默 0.2s"与"总时长 1.5s"两个 —— [CH] 行每 200ms 一条,
+     只看静默就永远退不出去 (serial_console.py 的排空是同一个道理)。 */
+  async drain(maxMs = 1500, quietMs = 200) {
+    const t0 = Date.now();
+    Direct.draining = true;
+    Direct.drainingRx = t0;
+    try {
+      while (Date.now() - t0 < maxMs && Date.now() - Direct.drainingRx < quietMs) {
+        await sleep(20);       // 行由 readLoop 吃掉 (draining 时只丢)
+      }
+    } finally { Direct.draining = false; }
+  },
+
+  /* 连上后的一次性握手: 版本 → 遥控门 → 参数表。顺序与 server.py 的
+     handle_connect + SSE 开场一致 (参数表要等门锁上再拉, 别让它先于 !RC 0) */
+  async connect(radio) {
+    /* ⚠️ requestPort 必须是本函数里第一个同步调用: 浏览器只在"用户手势"里给
+       一次串口选择器 (点「连接」就是那次手势), 中间插一个 await 就失效了。 */
+    Direct.busy = true;
+    renderWelcome();
+    let msg = "";
+    try {
+      let port;
+      try {
+        port = await navigator.serial.requestPort();
+      } catch (e) {
+        if (!(e && e.name === "NotFoundError"))       // NotFoundError = 用户自己关掉了
+          msg = "打开串口选择器失败: " + errText(e);
+        return;
+      }
+      try {
+        await port.open({ baudRate: BAUD });
+      } catch (e) {
+        msg = "串口打不开: " + errText(e) + " —— 先关掉 minicom / 别的标签页?";
+        return;
+      }
+      Direct.port = port;
+      Direct.telem = newTelem();
+      Direct.reader = port.readable.getReader();
+      Direct.writer = port.writable.getWriter();
+      Direct.readerDone = new Promise((res) => { Direct._readerDone = res; });
+      Direct.active = true;
+      port.addEventListener("disconnect", () => Direct.fail("串口已断开"));
+      Direct.readLoop();                     // 不 await: 一直读到断开
+      await Direct.drain();
+      Direct.send("!VER");                   // 开始页的固件版本
+      Direct.setLocked(!radio);              // 遥控门: 不勾「允许遥控器控制」= 锁
+      Direct.send("!CFG");                   // 参数表 (调试页首屏要用)
+      Direct.startPoller();
+      setBanner(false);
+      $("linkdot").className = "dot on";
+      $("linktxt").textContent = "浏览器直连";
+      enterDebugUI();
+    } finally {
+      Direct.busy = false;
+      renderWelcome(msg);
+    }
+  },
+
+  /* 收尾: 先停轮询, 再依次放掉 reader/writer/port (顺序不能颠倒 ——
+     port.close 要求读写两端都解锁, 而 reader 的锁要等读循环自己退出) */
+  async teardown() {
+    Direct.stopPoller();
+    const r = Direct.reader, w = Direct.writer, p = Direct.port;
+    Direct.reader = null; Direct.writer = null; Direct.port = null;
+    const t0 = Date.now();
+    while (Direct.pendingWrites > 0 && Date.now() - t0 < 300) await sleep(20);
+    if (r) { try { await r.cancel(); } catch (e) { /* 已经关了 */ } }
+    if (Direct.readerDone) { try { await Direct.readerDone; } catch (e) { /* 同上 */ } }
+    if (w) { try { w.releaseLock(); } catch (e) { /* 同上 */ } }
+    if (p) { try { await p.close(); } catch (e) { /* 同上 */ } }
+    Direct.telem = newTelem();
+  },
+
+  /* 掉线/出错: 幂等 (拔线时 disconnect 事件与读异常都会到) */
+  async fail(msg) {
+    if (!Direct.active) return;
+    Direct.active = false;
+    Direct.locked = false;
+    await Direct.teardown();
+    setBanner(true, "串口连接已断开。插好 USB 后点「连接」重新选择串口。");
+    leaveDebug(msg || "串口已断开");
+  },
+
+  /* 用户点「断开连接」: 交还遥控器, 再收尾 */
+  async disconnect() {
+    if (!Direct.active) return;
+    await Direct.writeLine("!RC 1");       // 尽力而为; 固件 6s 收不到心跳也会兜底
+    Direct.active = false;
+    Direct.locked = false;
+    await Direct.teardown();
+    setBanner(false);
+    renderWelcome();
+  },
+
+  setLocked(on) {
+    Direct.locked = !!on;
+    if (Direct.active) Direct.send(Direct.locked ? "!RC 0" : "!RC 1");
+  },
+
+  /* 遥控门心跳: 还锁着就重发 !RC 0 (固件 6s 收不到任何 !RC 就自动解锁) */
+  heartbeat() { if (Direct.locked) Direct.send("!RC 0"); },
+
+  /* 轮询: 与 server.py poller_thread 同一张表 —— 每命令独立 next 时间,
+     0.1s 一拍; 心跳不受「暂停轮询」影响 (暂停是"别再问数据了",
+     而心跳是"调试页还开着"的续租, 停了它固件 6s 后就把遥控器放进来) */
+  startPoller() {
+    Direct.stopPoller();
+    const iv = { batt: 2, imu: 1, servo: 2, i2c: 3, periph: 2, rc: 2, ports: 2 };
+    const next = {};
+    const tick = () => {
+      Direct.timer = setTimeout(tick, 100);
+      if (!Direct.active) return;
+      const now = performance.now() / 1000;
+      if (next.rc === undefined) next.rc = 0;
+      if (now >= next.rc) { next.rc = now + iv.rc; Direct.heartbeat(); }
+      if (paused) return;
+      if (now >= (next.batt || 0)) { Direct.send("!BATT"); next.batt = now + iv.batt; }
+      if (now >= (next.imu || 0)) { Direct.send("!IMU"); next.imu = now + iv.imu; }
+      /* 舵盘偏移与角度同拍 (校准页要成对显示) */
+      if (now >= (next.servo || 0)) {
+        Direct.send("!A"); Direct.send("!HOS"); next.servo = now + iv.servo;
+      }
+      /* !I2C q (仅定向检测) 而非 !I2C: 后者含 128 地址全总线扫描, 总线被拉死时
+         每个地址吃满 5ms 超时 (与 server.py 同一取舍) */
+      if (now >= (next.i2c || 0)) { Direct.send("!I2C q"); next.i2c = now + iv.i2c; }
+      if (now >= (next.periph || 0)) { Direct.send("!PERIPH"); next.periph = now + iv.periph; }
+      if (now >= (next.ports || 0)) { Direct.send("!PORTS"); next.ports = now + iv.ports; }
+    };
+    Direct.timer = setTimeout(tick, 100);
+  },
+
+  stopPoller() {
+    if (Direct.timer) clearTimeout(Direct.timer);
+    Direct.timer = null;
+  },
+
+  /* 参数写入: 与 server.py handle_param 同一套指令集 (结构化, 不把任意文本
+     透传给固件 —— 想发任意命令请走日志页的命令框) */
+  param(body) {
+    const parts = String(body || "").trim().split(/\s+/).filter(Boolean);
+    if (!parts.length) return { ok: false, err: "空指令" };
+    const op = parts[0];
+    let cmd;
+    if (op === "dump") cmd = "!CFG";
+    else if (op === "resetall") cmd = "!CFGR";
+    else if (op === "save") cmd = "!CFGW";
+    else if (op === "resetgrp") {
+      if (parts.length !== 2 || !GROUP_NAME_OK.test(parts[1]))
+        return { ok: false, err: "分组名不合法: " + parts.slice(1, 2) };
+      /* 固件没有 !CFGR <组> 语法, 按本地快照里的 grp 展开成多条单参数命令 */
+      const names = Object.values(curParams)
+        .filter((p) => p.grp === parts[1]).map((p) => p.name);
+      if (!names.length)
+        return { ok: false, err: "参数快照里没有分组 " + parts[1] + " (先读取一次?)" };
+      for (const n of names) Direct.send("!CFGR " + n);
+      return { ok: true, cmd: `!CFGR ×${names.length} (${parts[1]})`,
+               n: names.length, err: null };
+    }
+    else if (op === "set" || op === "reset") {
+      if (parts.length < 2 || !PARAM_NAME_OK.test(parts[1]))
+        return { ok: false, err: "参数名不合法: " + parts.slice(1, 2) };
+      if (op === "reset") cmd = "!CFGR " + parts[1];
+      else {
+        if (parts.length !== 3) return { ok: false, err: "set 需要 <name> <value>" };
+        if (!/^[+-]?\d+$/.test(parts[2]))
+          return { ok: false, err: "值必须是整数: " + parts[2] };
+        cmd = `!CFG ${parts[1]} ${parts[2]}`;
+      }
+    }
+    else return { ok: false, err: "未知指令: " + op };
+
+    const ok = Direct.send(cmd);
+    return { ok, cmd, err: ok ? null : "串口未连接" };
+  },
+};
+
+/* 后台标签页的定时器会被节流到分钟级 → 心跳停 → 固件 6s 自解锁 (安全方向,
+   接受)。回前台补一条心跳, 并重拉参数表 (后台期间可能被别处改过)。 */
+document.addEventListener("visibilitychange", () => {
+  if (MODE !== "direct" || document.hidden || !Direct.active) return;
+  Direct.heartbeat();
+  Direct.send("!CFG");
+});
+
+/* 模式探测: 有服务端就用服务端 (功能全、能烧录), 没有才走直连。
+ * file:// 直接按 server 处理 —— 单测的探针就是这么加载页面的, 那里既没有
+ * 服务端也没有 Web Serial。?mode= 可手动指定, 方便本地开发时对着静态服务调。 */
+async function detectMode() {
+  try {
+    const ac = new AbortController();
+    const t = setTimeout(() => ac.abort(), 1500);
+    const r = await fetch("/state", { signal: ac.signal });
+    clearTimeout(t);
+    /* 静态站点的 404/首页兜底也可能"成功", 所以还得看是不是真的 JSON */
+    if (r.ok && (r.headers.get("content-type") || "").includes("json")) return "server";
+  } catch (e) { /* 没有服务端: 往下走直连 */ }
+  return Direct.supported() ? "direct" : "none";
+}
+
+function applyModeUI() {
+  const server = MODE === "server";
+  $("wel-row-bridge").hidden = !server;      // 直连没有串口桥这回事
+  $("wel-fw-card").hidden = !server;         // 固件卡要 /device, 直连够不着
+  $("wel-log-sect").hidden = !server;        // 桥接输出同理
+  $("wel-web-label").textContent = server ? "网页服务" : "浏览器直连";
+  if (!server) {
+    /* 直连态下 topbar 那条横幅是另一件事: 桥接不存在, 断开的是串口 */
+    $("banner").textContent =
+      "串口连接已断开。插好 USB 后点「连接」重新选择串口。";
+  }
+}
+
+/* 直连态的开始页 (服务端那套照旧走 renderWelcome, 一行不动) */
+function renderWelcomeDirect(msg) {
+  const ok = Direct.supported();
+  $("wel-web").textContent = Direct.active ? "已连接" : (ok ? "就绪" : "不可用");
+  $("wel-web").className = Direct.active ? "ok" : (ok ? "dim" : "err");
+  $("wel-dev").textContent = Direct.active ? "在线 · 浏览器直连"
+                            : (ok ? "未选择串口" : "—");
+  $("wel-dev").className = Direct.active ? "ok" : "dim";
+  $("wel-ver").textContent = VER_TXT || "—";
+  $("connectbtn").disabled = !ok || Direct.active || Direct.busy;
+  $("wel-hint").textContent = msg || (!ok
+    ? "这个浏览器用不了 Web Serial：换 Chrome / Edge，或在本机跑 "
+      + "python3 tools/webconfig/server.py"
+    : Direct.active ? "已连接"
+      : "插好 Pico 后点「连接」，浏览器会弹出串口选择器（网页需 HTTPS 或 localhost）");
 }
 
 /* ---------------- 命令 ---------------- */
@@ -2759,6 +3379,10 @@ async function sendCmd(cmd) {
   cmd = (cmd || "").trim();
   if (!cmd) return;
   addLog("> " + cmd, "l-cmd");
+  if (MODE === "direct") {
+    if (!Direct.send(cmd)) addLog("[本页] 发送失败: 串口未连接", "l-err");
+    return;
+  }
   const r = await post("/cmd", cmd);
   if (!r.ok) addLog("[本页] 发送失败: " + (r.err || "未知"), "l-err");
 }
@@ -2789,6 +3413,7 @@ function setPaused(p) {
 }
 $("pausebtn").onclick = async () => {
   setPaused(!paused);
+  if (MODE === "direct") return;        // 直连: 轮询就在本页, 标志位即全部
   await post("/poll", paused ? "off" : "on");
 };
 
@@ -2934,11 +3559,26 @@ function renderFlash(d) {
   }
 }
 
+/* 定模式 → 画开始页。服务端模式与从前逐字一致 (先画开始页, 等 hello 帧再定去留);
+ * 直连模式不碰 /events、/device, 一切等用户点了「连接」拿到串口才开始。
+ * file:// 直接按服务端走: 单测的探针就是这么加载页面的 (那里既没有服务端、
+ * 也没有 Web Serial), 别让它多等一次异步探测。 */
+function startApp() {
+  const forced = new URLSearchParams(location.search).get("mode");
+  const pick = (m) => {
+    MODE = m;
+    applyModeUI();
+    renderWelcome();
+    if (m === "server") { loadDevice(); connect(); }   // 固件卡要 /device 数据
+  };
+  if (forced === "server" || forced === "direct" || forced === "none") return pick(forced);
+  if (location.protocol === "file:") return pick("server");
+  detectMode().then(pick);
+}
+
 window.addEventListener("resize", drawChart);
 showTab(location.hash.slice(1) || "dash");   // 必须在 cv/hist 初始化之后
-renderWelcome();                             // 先画开始页: 等 hello 帧到了再定去留
-loadDevice();                                // 开始页的固件卡要 /device 数据
-connect();
+startApp();
 </script>
 </body>
 </html>
