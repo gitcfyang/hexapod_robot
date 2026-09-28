@@ -59,13 +59,17 @@ pico_set_program_version(hexapod_pico "0.4.0")
 # 固件版本: 每次构建重新生成 hexapod_version.h (git describe: tag + 短哈希 +
 # dirty 标记)。烧录后网页/串口一看就知道板上跑的到底是不是刚编的那次。
 set(HEXAPOD_VERSION_H ${CMAKE_CURRENT_BINARY_DIR}/hexapod_version.h)
+# 本地构建留空 = 按 git describe 走 (能看出 dirty); 发布工作流传 tag 名 (见 release.yml),
+# 不去猜 CI checkout 里刚推的 tag 在不在
+set(HEXAPOD_FW_GIT_OVERRIDE "" CACHE STRING "直接指定固件版本串, 空 = 用 git describe")
 add_custom_target(hexapod_gen_version
         COMMAND ${CMAKE_COMMAND}
                 -DSRC_DIR=${CMAKE_CURRENT_LIST_DIR}
                 -DOUT=${HEXAPOD_VERSION_H}
+                -DHEXAPOD_FW_GIT_OVERRIDE=${HEXAPOD_FW_GIT_OVERRIDE}
                 -P ${CMAKE_CURRENT_LIST_DIR}/cmake/gen_version.cmake
         BYPRODUCTS ${HEXAPOD_VERSION_H}
-        COMMENT "生成固件版本头 (git describe)")
+        COMMENT "生成固件版本头 (版本串: git describe 或 HEXAPOD_FW_GIT_OVERRIDE)")
 add_dependencies(hexapod_pico hexapod_gen_version)
 
 # Modify the below lines to enable/disable output over UART/USB

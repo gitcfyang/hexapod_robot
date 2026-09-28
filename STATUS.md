@@ -728,9 +728,13 @@ typedef struct __attribute__((packed)) {
 ### 启动行为
 
 - banner 末行是固件版本: `[VER] Hexapod <版本> (<git 短哈希>)`。版本串由
-   `pico/cmake/gen_version.cmake` 在**构建时**跑 `git describe --always --dirty`
-   生成头文件 (检出即带版本, 不必手工改版本号); 同一行也是 `!VER` 的输出。
-   串口另一头的网页开始页靠这行显示"板上跑的是什么"
+   `pico/cmake/gen_version.cmake` 在**构建时**生成头文件 (检出即带版本, 不必手工改
+   版本号); 同一行也是 `!VER` 的输出。串口另一头的网页开始页靠这行显示"板上跑的
+   是什么"。两个来源: 本地构建 = `git describe --always --dirty` (dirty 与短哈希都
+   带出来); **发版 = 工作流把正在发的 tag 明着传进去** (`-DHEXAPOD_FW_GIT_OVERRIDE`)
+   —— 2026-09-28 实测, v0.4.0 那次 CI 里 `fetch-depth: 0` 也没让 `git describe` 看见
+   刚推的 v0.4.0 (老 tag 在), 编出来报的是 `v0.3.0-56-g9be97c7`, 所以这个串不靠 CI
+   的 git 状态猜; tag 要打 annotated (`git tag -a`), 轻量 tag 本地构建 describe 不认
 
 1. banner 后 `store_init()`: 线性扫描定位环头 (首个 `type==0xFF`) → 写 `BOOT` 事件
    (此时看门狗尚未启用, 写安全)
@@ -1028,7 +1032,12 @@ Pico ──USB CDC──> 浏览器 ── 页面内解析 ──> 同一套渲�
 - `tools/webconfig/server.py` — 桥接客户端 + SSE 广播 + 静态服务 + 轮询调度
 - `tools/webconfig/flasher.py` — 设备检测 (扫 /sys) + picotool 烧录; 只此一处碰 USB
 - `tools/webconfig/index.html` — 单页应用 (零依赖, 无构建步骤; 服务模式与直连模式共用)
-- `tools/webconfig/test_webconfig.py` — 363 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延、页面脚本执行与合成帧探针、直连解析器与 server 的逐帧差分、正则同源检查; 无 headless 浏览器时页面那几项自动跳过)
+- `tools/webconfig/test_webconfig.py` — 374 项回归 (解析器/烧录单测 + 固件契约 + socat 无硬件端到端, 含桥接转发时延、页面脚本执行与合成帧探针、直连解析器与 server 的逐帧差分、正则同源检查; 无 headless 浏览器时页面那几项自动跳过)
+- `.github/workflows/release.yml` — 打 annotated tag (`git tag -a v0.4.0 -m ...`) 时编固件发 Release:
+  附件 = uf2 + index.html + 硬件文件, 说明 = `.github/release-body.md` (面向使用者, 发版改它)
+  再接一段 GitHub 自动提交清单; 固件版本串由工作流指定为 tag 名 (`-DHEXAPOD_FW_GIT_OVERRIDE`,
+  理由见上面「启动行为」)。打 tag 前先把 `pico/CMakeLists.txt` 的
+  `pico_set_program_version` 改成同一个号 (picotool 元数据, 不吃 tag)
 - `.github/workflows/pages.yml` — 把 index.html 发布到 GitHub Pages (直连模式的托管)。
   **首次要在仓库里手动开一次**: Settings → Pages → Source 选 "GitHub Actions"。
   工作流自己建不了站点 —— `configure-pages` 的 `enablement: true` 实测被

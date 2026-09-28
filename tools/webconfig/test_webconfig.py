@@ -1888,11 +1888,11 @@ def test_release_workflow():
         return
     y = open(wf, encoding="utf-8").read()
     check("Release 工作流按 v* tag 触发", "tags:" in y and "'v*'" in y)
-    # 固件版本串是构建时 git describe 出来的 (pico/cmake/gen_version.cmake),
-    # 而浅克隆里没有 tag —— 实测 depth=1 编出来是 "4ea5744", 拉全才是 "v0.4.0"。
-    # 这个串是"板上跑的到底是不是刚发的这版"的唯一凭据, 错了很难发现
-    check("Release 检出拉全历史 (否则 uf2 版本串是裸短哈希, 不是 v0.4.0)",
-          "fetch-depth: 0" in y)
+    # 版本串 = 正在发的那个 tag, 由工作流显式传给构建: 实测 v0.4.0 那次 CI 里
+    # fetch-depth: 0 也没让 git describe 认出刚推的 tag, 编出来的 uf2 报的是
+    # v0.3.0-56-g9be97c7 —— 靠 git 状态猜不可靠 (实跑见 test_fw_version)
+    check("Release 把 tag 名当版本串传给构建 (不靠 CI 里的 git describe)",
+          "-DHEXAPOD_FW_GIT_OVERRIDE=${{ github.ref_name }}" in y)
     check("Release 注释写明 tag 要 annotated (git describe 不认轻量标签)",
           "annotated" in y)
     check("Release 说明 = 要点文件 + 自动提交清单",
@@ -1902,6 +1902,49 @@ def test_release_workflow():
     check("发布要点文件存在 (发版时改它, 内容面向使用者)", os.path.isfile(body), body)
     check("Release 附件含固件与网页配置台 (单文件, 下载双击即用)",
           "pico/build/hexapod_pico.uf2" in y and "tools/webconfig/index.html" in y)
+
+
+def test_fw_version():
+    """固件版本串怎么来的 —— 实跑 pico/cmake/gen_version.cmake 两种入口
+
+    2026-09-28 实测: v0.4.0 那个 release 里 fetch-depth: 0 也没让 git describe
+    看见刚推的 v0.4.0 (老 tag 在), 编出来的 uf2 报 v0.3.0-56-g9be97c7。所以发布
+    走显式覆盖, 本地构建仍按 describe (能看出 dirty / 短哈希)"""
+    script = os.path.join(ROOT, "pico", "cmake", "gen_version.cmake")
+    cml = os.path.join(ROOT, "pico", "CMakeLists.txt")
+    check("版本头生成脚本存在", os.path.isfile(script), script)
+    if not os.path.isfile(script):
+        return
+    src = open(cml, encoding="utf-8").read() if os.path.isfile(cml) else ""
+    # 少这一行, 工作流传了也白传: 脚本收不到覆盖串, 静默退回 git describe
+    check("CMakeLists 把覆盖串原样转给版本脚本",
+          "-DHEXAPOD_FW_GIT_OVERRIDE=${HEXAPOD_FW_GIT_OVERRIDE}" in src)
+    cmake = shutil.which("cmake")
+    if not cmake:
+        print("  (无 cmake, 版本脚本实跑跳过)")
+        return
+
+    def gen(out, override=None):
+        cmd = [cmake, f"-DSRC_DIR={os.path.join(ROOT, 'pico')}", f"-DOUT={out}"]
+        # 空串也要传 (CMakeLists 变量为空时就是 -DVAR= 这个形状, 脚本按空处理)
+        cmd.append(f"-DHEXAPOD_FW_GIT_OVERRIDE={override if override is not None else ''}")
+        cmd += ["-P", script]
+        r = subprocess.run(cmd, capture_output=True, text=True, cwd=ROOT)
+        if r.returncode != 0:
+            return "EXIT %d %s" % (r.returncode, r.stderr.strip())
+        return open(out, encoding="utf-8").read()
+
+    ov = gen("/tmp/wc_ver_override.h", "v9.9.9")
+    check("给覆盖串时版本头原样用它 (发布固件报的就是正在发的 tag)",
+          '"v9.9.9"' in ov, ov)
+    # 本地构建: 与本仓库此刻的 git describe 逐字一致 (dirty 也带出来)
+    d = subprocess.run(["git", "describe", "--always", "--dirty"],
+                       cwd=os.path.join(ROOT, "pico"),
+                       capture_output=True, text=True)
+    want = d.stdout.strip() if d.returncode == 0 and d.stdout.strip() else "unknown"
+    df = gen("/tmp/wc_ver_describe.h")
+    check("不给覆盖串时仍按 git describe (本地能看出 dirty/短哈希)",
+          f'"{want}"' in df, f"脚本给了 {df!r}, git describe 给的是 {want!r}")
 
 
 def wait_dev(port, up, timeout=20):
@@ -2532,6 +2575,7 @@ def main():
     test_direct_contract()
     test_pages_workflow()
     test_release_workflow()
+    test_fw_version()
 
     print("\n[5] 页面脚本 (无头浏览器)")
     test_page_js()
